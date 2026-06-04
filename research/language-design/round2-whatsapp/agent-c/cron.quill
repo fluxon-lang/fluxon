@@ -1,0 +1,156 @@
+# Weekly Proactive Outreach + Sunday Briefing
+
+use pkg::cron
+use pkg::db
+use pkg::http
+use pkg::json
+use pkg::time
+use pkg::log
+use "tools"
+
+# Build delivery route for a day
+fn build_route(db business_id delivery_date) {
+  customers = db.query(
+    "SELECT DISTINCT c.id, c.phone, c.name, c.address
+     FROM customers c
+     WHERE c.business_id = ? AND c.delivery_day = EXTRACT(DOW FROM ?::date)
+     ORDER BY c.address",
+    [business_id, delivery_date]
+  )
+
+  total_items = 0
+  order_ids = []
+
+  loop customer in customers {
+    items = db.query(
+      "SELECT COUNT(*) as cnt FROM order_items oi
+       JOIN orders o ON oi.order_id = o.id
+       WHERE o.customer_id = ? AND o.delivery_date = ?",
+      [customer.id, delivery_date]
+    )
+    if items {
+      total_items = total_items + items.cnt
+      order = db.query(
+        "SELECT id FROM orders WHERE customer_id = ? AND delivery_date = ?",
+        [customer.id, delivery_date]
+      )
+      if order {
+        order_ids = order_ids ++ [order.id]
+      }
+    }
+  }
+
+  {
+    date: delivery_date
+    customers: customers
+    customer_count: customers ? (customers) : 0
+    total_items: total_items
+    order_ids: order_ids
+  }
+}
+
+# Send outreach message to one customer
+fn send_outreach(db business_id customer_id delivery_date owner_phone owner_token) {
+  customer = db.query(
+    "SELECT phone, name FROM customers WHERE id = ? AND business_id = ?",
+    [customer_id, business_id]
+  )
+
+  if not customer {
+    {sent: false}
+  } else {
+    msg = "Hi {customer.name}! Do you want your usual delivery on {delivery_date}? Reply YES or NO."
+
+    resp = pkg::http::post(
+      "https://api.whatsapp.com/send",
+      {Authorization: "Bearer " ++ owner_token},
+      pkg::json::encode({to: customer.phone, message: msg})
+    )
+
+    if resp.status == 200 {
+      db.exec(
+        "INSERT INTO proactive_outreach (business_id, customer_id, delivery_date, reason, sent_at)
+         VALUES (?, ?, ?, 'weekly_outreach', NOW())",
+        [business_id, customer_id, delivery_date]
+      )
+      {sent: true, phone: customer.phone}
+    } else {
+      {sent: false, error: resp.status}
+    }
+  }
+}
+
+# Send Sunday briefing to owner
+fn send_briefing(db business_id delivery_date owner_phone owner_token) {
+  route = build_route(db business_id delivery_date)
+
+  confirmed = db.query(
+    "SELECT COUNT(*) as cnt FROM orders
+     WHERE business_id = ? AND delivery_date = ? AND status = 'confirmed'",
+    [business_id, delivery_date]
+  )
+
+  pending = db.query(
+    "SELECT COUNT(*) as cnt FROM orders
+     WHERE business_id = ? AND delivery_date = ? AND status = 'pending'",
+    [business_id, delivery_date]
+  )
+
+  briefing = "Sunday Briefing for {delivery_date}:
+Route: {route.customer_count} customers, {route.total_items} items
+Confirmed: {confirmed.cnt} orders | Pending: {pending.cnt} orders
+Ready for tomorrow's delivery!"
+
+  resp = pkg::http::post(
+    "https://api.whatsapp.com/send",
+    {Authorization: "Bearer " ++ owner_token},
+    pkg::json::encode({to: owner_phone, message: briefing})
+  )
+
+  {sent: resp.status == 200}
+}
+
+# Main weekly job: run Tuesday (0-indexed day)
+fn weekly_proactive_outreach(db) {
+  pkg::log::info("Starting weekly proactive outreach")
+
+  businesses = db.query("SELECT id, phone FROM users")
+
+  loop business in businesses {
+    business_id = business.id
+    owner_phone = business.phone
+    owner_record = db.query("SELECT api_token FROM users WHERE id = ?", [business_id])
+
+    if owner_record {
+      owner_token = owner_record.api_token
+      delivery_date = pkg::time::tomorrow_date()  # (or calculate from calendar)
+
+      customers_to_outreach = db.query(
+        "SELECT DISTINCT c.id FROM customers c
+         WHERE c.business_id = ? AND c.delivery_day = EXTRACT(DOW FROM ?::date)",
+        [business_id, delivery_date]
+      )
+
+      loop customer in customers_to_outreach {
+        send_outreach(db business_id customer.id delivery_date owner_phone owner_token)
+      }
+
+      pkg::time::schedule(
+        pkg::time::next_sunday_evening(),
+        fn() { send_briefing(db business_id delivery_date owner_phone owner_token) }
+      )
+
+      pkg::log::info("Outreach queued for business {business_id}")
+    }
+  }
+}
+
+# Schedule cron job: weekly (Sunday 00:00 UTC)
+pkg::cron::job("0 0 * * 0", fn() {
+  pkg::log::info("Cron: weekly outreach triggered")
+  db = pkg::db::connect(pkg::env::get("DATABASE_URL"))
+  weekly_proactive_outreach(db)
+  db.close()
+})
+
+{weekly_proactive_outreach: weekly_proactive_outreach}

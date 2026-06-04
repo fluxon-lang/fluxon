@@ -1,0 +1,179 @@
+# AI-Callable Tools for Order Management & Customer Data
+
+use pkg::db
+use pkg::json
+use pkg::http
+use pkg::log
+
+# Get customer history (last 10 orders)
+fn get_customer_history(db business_id phone) {
+  customer = db.query(
+    "SELECT id FROM customers WHERE business_id = ? AND phone = ?",
+    [business_id, phone]
+  )
+
+  if not customer {
+    {history: []}
+  } else {
+    rows = db.query(
+      "SELECT o.id, o.delivery_date, o.status, o.total_price,
+              string_agg(p.name || ' x' || oi.qty, ', ') as items
+       FROM orders o
+       LEFT JOIN order_items oi ON o.id = oi.order_id
+       LEFT JOIN products p ON oi.product_id = p.id
+       WHERE o.customer_id = ? AND o.business_id = ?
+       GROUP BY o.id
+       ORDER BY o.created_at DESC
+       LIMIT 10",
+      [customer.id, business_id]
+    )
+    {history: rows}
+  }
+}
+
+# Get product catalog with prices
+fn get_product_catalog(db business_id) {
+  rows = db.query(
+    "SELECT id, name, price, category, available
+     FROM products
+     WHERE business_id = ? AND available = 1
+     ORDER BY category, name",
+    [business_id]
+  )
+  {products: rows}
+}
+
+# Create order from extracted data (AI-safe: prices always from DB)
+fn create_order(db business_id customer_phone order_data) {
+  customer = db.query(
+    "SELECT id FROM customers WHERE business_id = ? AND phone = ?",
+    [business_id, customer_phone]
+  )
+
+  if not customer {
+    @ "Customer not found" null
+  }
+
+  order_items = order_data.items
+  total = 0
+
+  order = db.query(
+    "INSERT INTO orders (business_id, customer_id, status, delivery_date, total_price, created_at)
+     VALUES (?, ?, 'pending', ?, 0, NOW())
+     RETURNING id",
+    [business_id, customer.id, order_data.delivery_date]
+  )
+
+  loop item in order_items {
+    product = db.query(
+      "SELECT id, price FROM products WHERE business_id = ? AND name = ?",
+      [business_id, item.product]
+    )
+
+    if product {
+      price = product.price
+      qty = item.qty
+      db.exec(
+        "INSERT INTO order_items (order_id, product_id, qty, price_at_order)
+         VALUES (?, ?, ?, ?)",
+        [order.id, product.id, qty, price]
+      )
+      total = total + (price * qty)
+    }
+  }
+
+  db.exec(
+    "UPDATE orders SET total_price = ? WHERE id = ?",
+    [total, order.id]
+  )
+
+  {order_id: order.id, total: total, status: "pending"}
+}
+
+# Update product (admin only, called by owner)
+fn update_product(db business_id product_name new_price) {
+  db.exec(
+    "UPDATE products SET price = ? WHERE business_id = ? AND name = ?",
+    [new_price, business_id, product_name]
+  )
+  {updated: true}
+}
+
+# Ask owner to confirm/handle issue (sends via WhatsApp)
+fn ask_owner(db business_id question customer_phone order_data) {
+  owner = db.query(
+    "SELECT phone FROM users WHERE id = ?",
+    [business_id]
+  )
+
+  if owner {
+    msg = "Question from {customer_phone}: {question}"
+    if order_data {
+      msg = msg ++ "\nOrder: " ++ pkg::json::encode(order_data)
+    }
+
+    resp = pkg::http::post(
+      "https://api.whatsapp.com/send",
+      {Authorization: "Bearer " ++ owner.api_token},
+      pkg::json::encode({to: owner.phone, message: msg})
+    )
+
+    {queued: true, response_status: resp.status}
+  } else {
+    @ "Owner not found" null
+  }
+}
+
+# Schedule outreach: customer + when + reason
+fn schedule_outreach(db business_id customer_id delivery_date reason) {
+  db.exec(
+    "INSERT INTO proactive_outreach (business_id, customer_id, delivery_date, reason, sent_at)
+     VALUES (?, ?, ?, ?, NOW())",
+    [business_id, customer_id, delivery_date, reason]
+  )
+  {scheduled: true}
+}
+
+# Register tools with LLM
+fn register_ai_tools() {
+  [
+    {
+      name: "get_customer_history"
+      description: "Get last 10 orders from this customer"
+      schema: {phone: "string"}
+    }
+    {
+      name: "get_product_catalog"
+      description: "Get all available products and prices"
+      schema: {}
+    }
+    {
+      name: "create_order"
+      description: "Create and confirm an order. Items must exist in catalog."
+      schema: {
+        items: "array of {product: string qty: int}"
+        delivery_date: "string (YYYY-MM-DD)"
+      }
+    }
+    {
+      name: "ask_owner"
+      description: "Send question to business owner for decision"
+      schema: {question: "string" order_data: "object or null"}
+    }
+    {
+      name: "schedule_outreach"
+      description: "Schedule proactive customer outreach"
+      schema: {customer_id: "int" delivery_date: "string (YYYY-MM-DD)" reason: "string"}
+    }
+  ]
+}
+
+{
+  get_customer_history: get_customer_history
+  get_product_catalog: get_product_catalog
+  create_order: create_order
+  update_product: update_product
+  ask_owner: ask_owner
+  schedule_outreach: schedule_outreach
+  register_ai_tools: register_ai_tools
+}

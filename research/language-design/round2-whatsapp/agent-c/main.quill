@@ -1,0 +1,55 @@
+# WhatsApp AI Ops Assistant - Main Entry Point
+
+use pkg::http
+use pkg::db
+use pkg::env
+use pkg::log
+use "schema"
+use "webhook"
+use "cron"
+
+fn main() {
+  pkg::log::info("Starting WhatsApp AI Ops Assistant")
+
+  # Configuration from environment
+  port = 3000
+  db_url = pkg::env::get("DATABASE_URL")
+  whatsapp_token = pkg::env::get("WHATSAPP_API_TOKEN")
+  llm_api_key = pkg::env::get("OPENAI_API_KEY")
+
+  if not db_url {
+    pkg::log::error("DATABASE_URL not set")
+    @ "Missing DATABASE_URL" null
+  }
+
+  # Connect to database
+  db = pkg::db::connect(db_url)
+  pkg::log::info("Connected to database")
+
+  # Initialize schema
+  schema::init_schema(db)
+  pkg::log::info("Schema initialized")
+
+  # Start HTTP server
+  http::server(port)
+    .on("POST", "/webhook", fn(req) {
+      webhook::handle_webhook(req db)
+    })
+    .on("GET", "/health", fn(req) {
+      http::reply(200, {status: "ok"})
+    })
+    .start()
+
+  pkg::log::info("HTTP server listening on port {port}")
+
+  # Cron jobs are auto-scheduled when cron.quill is imported
+  pkg::log::info("Cron jobs registered")
+
+  # Keep server running
+  loop {
+    pkg::time::sleep(60)
+  }
+}
+
+# Run main
+main()

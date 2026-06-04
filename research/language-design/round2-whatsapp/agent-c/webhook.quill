@@ -1,0 +1,136 @@
+# WhatsApp Webhook Handler: Classify, Extract, Route
+
+use pkg::http
+use pkg::json
+use pkg::llm
+use pkg::log
+use "tools"
+
+# Parse incoming WhatsApp message and determine business owner
+fn parse_incoming(body_str) {
+  body = pkg::json::decode(body_str)
+  phone = body.from
+  message_text = body.text
+  business_id = body.business_id  # passed by webhook provider
+  {phone: phone, text: message_text, business_id: business_id}
+}
+
+# AI Classify + Extract with confidence
+fn ai_classify_and_extract(msg_text db business_id) {
+  start_ms = pkg::time::now() * 1000
+
+  catalog = tools::get_product_catalog(db business_id)
+  catalog_text = pkg::json::encode(catalog)
+
+  prompt = "Classify and extract. Message (Uzbek): {msg_text}
+Catalog: {catalog_text}
+JSON response: {intent: 'new_order'|'question'|'complaint'|'greeting'|'other', confidence: 0-1, order: {items: [{product, qty}], delivery_date}}"
+
+  result = pkg::llm::call({
+    model: "gpt-4o-mini"
+    messages: [{role: "user" content: prompt}]
+  })
+
+  parsed = pkg::json::decode(result.text)
+  latency_ms = pkg::time::now() * 1000 - start_ms
+
+  db.exec(
+    "INSERT INTO ai_interactions (business_id, customer_phone, intent, confidence, tokens_used, cost, latency_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NOW())",
+    [business_id, msg_text, parsed.intent, parsed.confidence, result.tokens_used, result.cost, latency_ms]
+  )
+
+  parsed
+}
+
+# Route based on confidence
+fn route_by_confidence(intent confidence order_data db business_id customer_phone) {
+  if confidence > 0.85 {
+    "auto_reply"
+  } else if confidence >= 0.6 {
+    "ask_owner"
+  } else {
+    "escalate_full"
+  }
+}
+
+# Send WhatsApp reply
+fn send_whatsapp_reply(phone text business_id db) {
+  owner = db.query(
+    "SELECT api_token FROM users WHERE id = ?",
+    [business_id]
+  )
+
+  if owner {
+    token = owner.api_token
+    resp = pkg::http::post(
+      "https://api.whatsapp.com/send",
+      {Authorization: "Bearer " ++ token},
+      pkg::json::encode({to: phone, message: text})
+    )
+
+    db.exec(
+      "INSERT INTO messages (business_id, customer_phone, direction, body, created_at)
+       VALUES (?, ?, 'outbound', ?, NOW())",
+      [business_id, phone, text]
+    )
+
+    resp.status == 200
+  } else {
+    false
+  }
+}
+
+# Main webhook handler
+fn handle_webhook(req db) {
+  try {
+    incoming = parse_incoming(req.body)
+
+    db.exec(
+      "INSERT INTO messages (business_id, customer_phone, direction, body, created_at)
+       VALUES (?, ?, 'inbound', ?, NOW())",
+      [incoming.business_id, incoming.phone, incoming.text]
+    )
+
+    ai_result = ai_classify_and_extract(incoming.text db incoming.business_id)
+
+    route = route_by_confidence(
+      ai_result.intent
+      ai_result.confidence
+      ai_result.order
+      db
+      incoming.business_id
+      incoming.phone
+    )
+
+    reply_text = ""
+
+    if route == "auto_reply" {
+      if ai_result.intent == "new_order" {
+        tools::create_order(db incoming.business_id incoming.phone ai_result.order)
+        reply_text = "Order confirmed! Delivery: {ai_result.order.delivery_date}"
+      } else if ai_result.intent == "greeting" {
+        reply_text = "Hello! How can I help you today?"
+      } else if ai_result.intent == "question" {
+        reply_text = "I'll have my owner respond to your question shortly."
+      }
+    } else if route == "ask_owner" {
+      reply_text = "One moment, let me confirm with my owner..."
+      tools::ask_owner(db incoming.business_id "Customer query pending confirmation" incoming.phone ai_result.order)
+    } else {
+      reply_text = "Thank you for reaching out! My owner will respond shortly."
+    }
+
+    if reply_text != "" {
+      send_whatsapp_reply(incoming.phone reply_text incoming.business_id db)
+    }
+
+    pkg::http::reply(200, {status: "processed"})
+
+  } catch e {
+    pkg::log::error("Webhook error: " ++ e)
+    pkg::http::reply(500, {error: e})
+  }
+}
+
+{handle_webhook: handle_webhook}

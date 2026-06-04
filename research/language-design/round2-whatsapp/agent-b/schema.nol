@@ -1,0 +1,118 @@
+-- schema.nol — Database schema definitions for WhatsApp AI Ops Assistant
+
+db.connect(env.DATABASE_URL)
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS users (
+    id          SERIAL PRIMARY KEY,
+    phone       TEXT UNIQUE NOT NULL,
+    name        TEXT NOT NULL,
+    business    TEXT,
+    wa_token    TEXT,           -- WhatsApp API token for this owner
+    created_at  TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS customers (
+    id          SERIAL PRIMARY KEY,
+    phone       TEXT UNIQUE NOT NULL,
+    name        TEXT,
+    owner_id    INT REFERENCES users(id),
+    notes       TEXT,
+    created_at  TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS products (
+    id          SERIAL PRIMARY KEY,
+    owner_id    INT REFERENCES users(id),
+    name        TEXT NOT NULL,
+    price       NUMERIC(10,2) NOT NULL,
+    unit        TEXT DEFAULT 'dona',  -- dona=piece, kg, litr, etc.
+    available   BOOLEAN DEFAULT yes,
+    created_at  TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS orders (
+    id              SERIAL PRIMARY KEY,
+    owner_id        INT REFERENCES users(id),
+    customer_id     INT REFERENCES customers(id),
+    status          TEXT DEFAULT 'pending',  -- pending|confirmed|delivered|cancelled
+    delivery_date   DATE,
+    delivery_notes  TEXT,
+    total           NUMERIC(10,2),
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS order_items (
+    id          SERIAL PRIMARY KEY,
+    order_id    INT REFERENCES orders(id),
+    product_id  INT REFERENCES products(id),
+    qty         NUMERIC(10,2) NOT NULL,
+    unit_price  NUMERIC(10,2) NOT NULL,   -- snapshot of price at order time
+    subtotal    NUMERIC(10,2) NOT NULL
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS messages (
+    id           SERIAL PRIMARY KEY,
+    owner_id     INT REFERENCES users(id),
+    direction    TEXT NOT NULL,           -- inbound|outbound
+    from_phone   TEXT NOT NULL,
+    to_phone     TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    wa_msg_id    TEXT,                    -- WhatsApp message ID
+    created_at   TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS ai_interactions (
+    id            SERIAL PRIMARY KEY,
+    owner_id      INT REFERENCES users(id),
+    message_id    INT REFERENCES messages(id),
+    intent        TEXT,
+    confidence    NUMERIC(4,3),
+    prompt_tokens INT,
+    reply_tokens  INT,
+    cost_usd      NUMERIC(8,6),
+    latency_ms    INT,
+    action_taken  TEXT,                  -- auto_reply|owner_confirm|escalate
+    created_at    TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS schedule_routes (
+    id            SERIAL PRIMARY KEY,
+    owner_id      INT REFERENCES users(id),
+    week_start    DATE NOT NULL,
+    customer_id   INT REFERENCES customers(id),
+    confirmed     BOOLEAN DEFAULT no,
+    response_body TEXT,
+    created_at    TIMESTAMPTZ DEFAULT now()
+  )
+""", [])
+
+db.exec("""
+  CREATE TABLE IF NOT EXISTS proactive_outreach (
+    id            SERIAL PRIMARY KEY,
+    owner_id      INT REFERENCES users(id),
+    customer_id   INT REFERENCES customers(id),
+    reason        TEXT NOT NULL,          -- weekly_delivery|followup|promo
+    scheduled_at  TIMESTAMPTZ NOT NULL,
+    sent_at       TIMESTAMPTZ,
+    response      TEXT,
+    status        TEXT DEFAULT 'pending'  -- pending|sent|responded|skipped
+  )
+""", [])
+
+log "Schema migrations complete"

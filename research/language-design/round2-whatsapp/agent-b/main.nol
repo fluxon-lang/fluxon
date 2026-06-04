@@ -1,0 +1,144 @@
+-- main.nol — Entry point: wires DB, HTTP server, cron jobs, and queue workers
+
+import schema
+import webhook
+import cron
+
+-- ─── Database ──────────────────────────────────────────────────────────────
+db.connect(env.DATABASE_URL)
+log "DB connected"
+
+-- Run schema migrations (idempotent — all tables use IF NOT EXISTS)
+import schema
+
+-- ─── AI provider configuration ─────────────────────────────────────────────
+ai.configure({
+  provider: env.get("AI_PROVIDER", "openai"),
+  model: env.get("AI_MODEL", "gpt-4o-mini"),
+  api_key: env.OPENAI_API_KEY,
+  max_tokens: 1024,
+  temperature: 0.2   -- low temperature for reliable extraction
+})
+
+-- ─── Cron jobs ─────────────────────────────────────────────────────────────
+
+-- Every Monday 09:00: send weekly delivery inquiry to all customers
+cron "0 9 * * MON"
+  cron.weekly_outreach()
+
+-- Every Sunday 20:00: send route briefing to each owner
+cron "0 20 * * SUN"
+  cron.sunday_briefing()
+
+-- Every 15 minutes: flush any pending scheduled outreach
+cron "*/15 * * * *"
+  cron.process_pending_outreach()
+
+log "Cron jobs registered"
+
+-- ─── Queue workers ─────────────────────────────────────────────────────────
+
+-- Background worker: owner-confirmed orders (owner replied "HA <phone>")
+queue.on "owner_confirmation"
+  let phone = job.data.customer_phone
+  let owner_id = job.data.owner_id
+  let items = job.data.items
+  let delivery_date = job.data.delivery_date
+
+  let order = tools.create_order(owner_id, phone, items, delivery_date, nil)
+
+  let owner = db.one("SELECT wa_token FROM users WHERE id = ?", [owner_id])
+  if order.ok
+    let reply = "Buyurtmangiz tasdiqlandi! Jami: {order.total} so'm. Buyurtma #{order.order_id}"
+    whatsapp.send(phone, reply, owner.wa_token)
+    log "Queue: confirmed order #{order.order_id} for {phone}"
+  else
+    whatsapp.send(phone, "Buyurtma rasmiylashtishda xato yuz berdi. Operator siz bilan bog'lanadi.", owner.wa_token)
+    log.error "Queue: order creation failed for {phone}: {order.error}"
+
+log "Queue workers registered"
+
+-- ─── HTTP server ───────────────────────────────────────────────────────────
+
+let port = env.get("PORT", "3000")
+
+serve port
+  -- Main WhatsApp webhook endpoint
+  post "/webhook"
+    -- Verify webhook signature if configured
+    let sig_header = headers["X-Hub-Signature-256"] or ""
+    let secret = env.get("WA_WEBHOOK_SECRET", "")
+    if secret and not webhook.verify_signature(body_raw, sig_header, secret)
+      log.warn "Webhook: invalid signature from {request.ip}"
+      return {status: 403, body: {error: "invalid signature"}}
+
+    let result = webhook.handle_webhook(body)
+    return result
+
+  -- Webhook verification handshake (Meta/Facebook requirement)
+  get "/webhook"
+    let mode = query.hub_mode
+    let token = query.hub_verify_token
+    let challenge = query.hub_challenge
+    if mode == "subscribe" and token == env.WA_VERIFY_TOKEN
+      log "Webhook verified"
+      return {status: 200, body: challenge}
+    return {status: 403, body: "forbidden"}
+
+  -- Owner reply handler: when owner sends "HA <phone>" or "YOQ <phone>"
+  post "/owner-reply"
+    let from_phone = body.from
+    let text = body.text or body.body or ""
+
+    let owner = db.one("SELECT * FROM users WHERE phone = ?", [from_phone])
+    if not owner
+      return {status: "ignored"}
+
+    -- Parse "HA +998901234567" or "YOQ +998901234567"
+    if text starts_with "HA "
+      let customer_phone = text after "HA "
+      -- Look up pending AI interaction for this customer
+      let pending = db.one("""
+        SELECT ai.*, m.body as original_message
+        FROM ai_interactions ai
+        JOIN messages m ON m.id = ai.message_id
+        WHERE ai.owner_id = ? AND ai.action_taken = 'owner_confirm'
+          AND m.from_phone = ?
+        ORDER BY ai.created_at DESC
+        LIMIT 1
+      """, [owner.id, customer_phone])
+
+      if pending
+        -- Re-run extraction on original message to get items
+        let catalog = tools.get_product_catalog(owner.id)
+        let history = tools.get_customer_history(customer_phone)
+        let re_extracted = webhook.ai_classify_and_extract(pending.original_message, catalog, history)
+
+        queue.push("owner_confirmation", {
+          customer_phone: customer_phone,
+          owner_id: owner.id,
+          items: re_extracted.items,
+          delivery_date: re_extracted.delivery_date
+        })
+
+        whatsapp.send(from_phone, "Tasdiqlandi! Buyurtma rasmiylashtirilyapti.", owner.wa_token)
+        return {status: "ok", action: "confirmed"}
+
+    if text starts_with "YOQ "
+      let customer_phone = text after "YOQ "
+      whatsapp.send(customer_phone, "Kechirasiz, buyurtmangizni qabul qila olmadik. Iltimos qayta urinib ko'ring.", owner.wa_token)
+      whatsapp.send(from_phone, "Rad etildi.", owner.wa_token)
+      return {status: "ok", action: "rejected"}
+
+    return {status: "ok", action: "unrecognised_reply"}
+
+  get "/health"
+    let db_ok = db.ping()
+    return {
+      status: "ok",
+      db: db_ok,
+      version: "1.0.0",
+      uptime: uptime()
+    }
+
+log "Server listening on port {port}"

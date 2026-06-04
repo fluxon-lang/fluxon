@@ -1,0 +1,191 @@
+-- cron.nol — Weekly proactive outreach + Sunday briefing cron jobs
+
+import tools
+import whatsapp
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Run every Monday 09:00: send delivery confirmation requests to all customers
+-- ─────────────────────────────────────────────────────────────────────────────
+
+fn weekly_outreach()
+  log "Cron: weekly_outreach started"
+
+  let owners = db.query("SELECT * FROM users", [])
+
+  each owner in owners
+    let customers = db.query("""
+      SELECT c.id, c.phone, c.name
+      FROM customers c
+      WHERE c.owner_id = ?
+      ORDER BY c.name
+    """, [owner.id])
+
+    let week_start = today()
+
+    each customer in customers
+      -- Check if already sent this week
+      let existing = db.one("""
+        SELECT id FROM proactive_outreach
+        WHERE owner_id = ? AND customer_id = ? AND week_start = ?
+      """, [owner.id, customer.id, week_start])
+
+      if existing
+        continue
+
+      -- Fetch catalog for this owner to personalise message
+      let catalog = tools.get_product_catalog(owner.id)
+      let product_list = ""
+      each p in catalog.products
+        let product_list = product_list + "• {p.name} — {p.price} so'm/{p.unit}\n"
+
+      let msg = """
+Assalomu alaykum, {customer.name or "aziz mijoz"}!
+
+Bu hafta yetkazib berish: dushanba.
+
+Bizda mavjud:
+{product_list}
+Buyurtma bermоqchimisiz? Xohlagan mahsulot va miqdorini yozing, biz tartib qilamiz!
+      """
+
+      whatsapp.send(customer.phone, msg, owner.wa_token)
+
+      -- Record in proactive_outreach
+      db.exec("""
+        INSERT INTO proactive_outreach
+          (owner_id, customer_id, reason, scheduled_at, sent_at, status, week_start)
+        VALUES(?, ?, 'weekly_delivery', now(), now(), 'sent', ?)
+      """, [owner.id, customer.id, week_start])
+
+      -- Also insert into schedule_routes for this week
+      db.exec("""
+        INSERT INTO schedule_routes(owner_id, week_start, customer_id, confirmed)
+        VALUES(?, ?, ?, false)
+        ON CONFLICT DO NOTHING
+      """, [owner.id, week_start, customer.id])
+
+  log "Cron: weekly_outreach complete"
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Run every Sunday 20:00: collect confirmations, send briefing to owner
+-- ─────────────────────────────────────────────────────────────────────────────
+
+fn sunday_briefing()
+  log "Cron: sunday_briefing started"
+
+  let owners = db.query("SELECT * FROM users", [])
+  let week_start = this_monday()   -- built-in: returns ISO date of most recent Monday
+
+  each owner in owners
+    -- Confirmed route customers this week
+    let confirmed_routes = db.query("""
+      SELECT sr.id, c.name, c.phone, sr.response_body
+      FROM schedule_routes sr
+      JOIN customers c ON c.id = sr.customer_id
+      WHERE sr.owner_id = ? AND sr.week_start = ? AND sr.confirmed = true
+      ORDER BY c.name
+    """, [owner.id, week_start])
+
+    -- Confirmed orders for tomorrow's delivery
+    let tomorrow = add_days(today(), 1)
+    let orders = db.query("""
+      SELECT o.id, o.total, c.name as customer_name, c.phone,
+             json_agg(json_build_object(
+               'product', p.name, 'qty', oi.qty
+             )) as items
+      FROM orders o
+      JOIN customers c ON c.id = o.customer_id
+      JOIN order_items oi ON oi.order_id = o.id
+      JOIN products p     ON p.id = oi.product_id
+      WHERE o.owner_id = ? AND o.delivery_date = ? AND o.status = 'confirmed'
+      GROUP BY o.id, c.name, c.phone
+      ORDER BY c.name
+    """, [owner.id, tomorrow])
+
+    -- Aggregate totals per product
+    let product_totals = {}
+    each order in orders
+      each item in order.items
+        let current = product_totals[item.product] or 0
+        let product_totals[item.product] = current + item.qty
+
+    -- Build briefing text
+    let route_count = confirmed_routes.length
+    let order_count = orders.length
+
+    let total_items = 0
+    each qty in product_totals
+      let total_items = total_items + qty
+
+    let prod_summary = ""
+    each product, qty in product_totals
+      let prod_summary = prod_summary + "  • {product}: {qty} ta\n"
+
+    let order_list = ""
+    each order in orders
+      let order_list = order_list + "  {order.customer_name} ({order.phone}): {order.total} so'm\n"
+
+    let briefing = """
+Yaxshi kechqurun!
+
+Ertangi marshrut xulosasi ({tomorrow}):
+━━━━━━━━━━━━━━━━━━━━
+Tasdiqlangan mijozlar: {route_count}
+Buyurtmalar: {order_count}
+Jami mahsulotlar: {total_items} ta
+
+Tayyorlanishi kerak:
+{prod_summary}
+Buyurtmalar ro'yxati:
+{order_list}
+Hammasi yaxshi bo'lsin, omad! 🍞
+    """
+
+    whatsapp.send(owner.phone, briefing, owner.wa_token)
+
+    -- Log briefing as outbound message
+    db.exec("""
+      INSERT INTO messages(owner_id, direction, from_phone, to_phone, body)
+      VALUES(?, 'outbound', ?, ?, ?)
+    """, [owner.id, "system", owner.phone, briefing])
+
+    log "Cron: sunday_briefing sent to owner {owner.phone} — {order_count} orders, {route_count} route stops"
+
+  log "Cron: sunday_briefing complete"
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Process any pending proactive outreach in the queue (runs every 15 minutes)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+fn process_pending_outreach()
+  let pending = db.query("""
+    SELECT po.*, c.phone as customer_phone, c.name as customer_name,
+           u.wa_token, u.phone as owner_phone
+    FROM proactive_outreach po
+    JOIN customers c ON c.id = po.customer_id
+    JOIN users u     ON u.id = po.owner_id
+    WHERE po.status = 'pending' AND po.scheduled_at <= now()
+    ORDER BY po.scheduled_at
+    LIMIT 50
+  """, [])
+
+  each outreach in pending
+    let prompt = """
+Yozing qisqa va do'stona WhatsApp xabar (o'zbek tilida):
+Mijoz ismi: {outreach.customer_name or "aziz mijoz"}
+Sabab: {outreach.reason}
+    """
+
+    let msg = ai.complete(prompt)
+
+    whatsapp.send(outreach.customer_phone, msg, outreach.wa_token)
+
+    db.exec("""
+      UPDATE proactive_outreach
+      SET status = 'sent', sent_at = now()
+      WHERE id = ?
+    """, [outreach.id])
+
+    log "Outreach sent to {outreach.customer_phone}: {outreach.reason}"

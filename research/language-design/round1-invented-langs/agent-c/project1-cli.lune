@@ -1,0 +1,87 @@
+# LUNE CLI TODO Manager
+use json
+use file
+use sys
+
+fn_db = ".todos.json"
+
+fn load_todos() {
+  if file.exists(fn_db) {
+    json.parse(file.read(fn_db)) |> d => d || []
+  } else {
+    []
+  }
+}
+
+fn save_todos(todos) {
+  file.write(fn_db, json.stringify(todos, pretty=true))
+}
+
+fn list_todos() {
+  todos = load_todos()
+  if list.len(todos) == 0 {
+    print("No todos yet.")
+    return
+  }
+  for i : 0..list.len(todos) {
+    todo = todos[i]
+    status = if todo["done"] { "✓" } else { " " }
+    print("[{status}] {i}: {todo["text"]}")
+  }
+}
+
+fn add_todo(text) {
+  todos = load_todos()
+  todo = {text: text, done: false, created: sys.now()}
+  todos = list.push(todos, todo)
+  save_todos(todos)
+  print("Added: {text}")
+}
+
+fn complete_todo(idx) {
+  todos = load_todos()
+  if idx < 0 || idx >= list.len(todos) {
+    print("Invalid index")
+    return
+  }
+  todos[idx]["done"] = true
+  save_todos(todos)
+  print("Done: {todos[idx]["text"]}")
+}
+
+fn delete_todo(idx) {
+  todos = load_todos()
+  if idx < 0 || idx >= list.len(todos) {
+    print("Invalid index")
+    return
+  }
+  text = todos[idx]["text"]
+  todos = list.filter(todos, (t, i) => i != idx)
+  save_todos(todos)
+  print("Deleted: {text}")
+}
+
+fn main() {
+  args = sys.args || []
+
+  if list.len(args) == 0 || args[0] == "list" {
+    list_todos()
+  } else if args[0] == "add" && list.len(args) > 1 {
+    text = str.join(list.slice(args, 1), " ")
+    add_todo(text)
+  } else if args[0] == "done" && list.len(args) > 1 {
+    idx = num.parse(args[1])
+    complete_todo(idx)
+  } else if args[0] == "del" && list.len(args) > 1 {
+    idx = num.parse(args[1])
+    delete_todo(idx)
+  } else {
+    print("Usage:")
+    print("  todo list              # show todos")
+    print("  todo add TEXT          # add todo")
+    print("  todo done INDEX        # mark done")
+    print("  todo del INDEX         # delete")
+  }
+}
+
+main()

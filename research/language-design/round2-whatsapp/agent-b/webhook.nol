@@ -1,0 +1,212 @@
+-- webhook.nol — Incoming WhatsApp message handler
+
+import tools
+import whatsapp
+
+-- Classify and extract structured data from an incoming message
+fn ai_classify_and_extract(text, catalog, history)
+  let prompt = """
+Sen O'zbek tilida yoziladigan non do'koni uchun AI yordamchisan.
+Quyidagi xabarni tahlil qil va JSON qaytarish:
+
+Xabar: {text}
+
+Mahsulotlar katalogi: {json.dump(catalog.products)}
+Mijoz tarixi (oxirgi buyurtmalar): {json.dump(history.orders)}
+
+JSON formatida qaytarish:
+- intent: "new_order" | "question" | "complaint" | "greeting" | "other"
+- confidence: 0.0 dan 1.0 gacha (qanchalik aniq tushundim)
+- items: buyurtma bo'lsa [{product: "nom", qty: raqam}] yoki []
+- delivery_date: "YYYY-MM-DD" yoki null
+- delivery_notes: qo'shimcha izoh yoki null
+- customer_question: savol matni yoki null
+- summary: qisqa inglizcha xulosa
+
+Muhim: narxlarni HECH QACHON o'ylab topmaysan — ular faqat katalogdan.
+  """
+
+  let result = ai.extract(prompt, {
+    intent: "string",
+    confidence: "number",
+    items: [{product: "string", qty: "number"}],
+    delivery_date: "string",
+    delivery_notes: "string",
+    customer_question: "string",
+    summary: "string"
+  })
+
+  return result
+
+
+-- Build a confirmation reply for the customer
+fn build_order_reply(order_result, customer_name)
+  let name = customer_name or "Aziz mijoz"
+  let items_text = ""
+  each item in order_result.items
+    let items_text = items_text + "• {item.product_name}: {item.qty} x {item.unit_price} = {item.subtotal} so'm\n"
+
+  return """
+Assalomu alaykum, {name}! ✓
+
+Buyurtmangiz qabul qilindi:
+{items_text}
+Jami: {order_result.total} so'm
+Yetkazib berish: {order_result.delivery_date}
+
+Buyurtma raqami: #{order_result.order_id}
+Rahmat!
+  """
+
+
+-- Build owner confirmation request message
+fn build_owner_confirm_msg(from_phone, extracted, confidence)
+  let items_text = ""
+  each item in extracted.items
+    let items_text = items_text + "• {item.product}: {item.qty} ta\n"
+
+  return """
+Yangi xabar: {from_phone}
+Ishonch: {confidence}
+
+Buyurtma:
+{items_text}
+Sana: {extracted.delivery_date or "ko'rsatilmagan"}
+Izoh: {extracted.delivery_notes or "yo'q"}
+
+Tasdiqlash uchun "HA {from_phone}" yoki rad etish uchun "YOQ {from_phone}" yuboring.
+  """
+
+
+-- Log the AI interaction to the audit table
+fn log_ai_interaction(owner_id, msg_id, extracted, action, latency_ms)
+  db.exec("""
+    INSERT INTO ai_interactions
+      (owner_id, message_id, intent, confidence, action_taken, latency_ms)
+    VALUES(?, ?, ?, ?, ?, ?)
+  """, [owner_id, msg_id, extracted.intent, extracted.confidence, action, latency_ms])
+
+
+-- Core webhook handler — called for every incoming WhatsApp message
+fn handle_webhook(body)
+  let t_start = now()
+
+  -- Parse the WhatsApp provider payload
+  let from_phone = body.from
+  let message_text = body.text or body.body or ""
+  let wa_msg_id = body.id or ""
+
+  if not from_phone or not message_text
+    log.warn "Webhook: missing from or text"
+    return {status: "ignored"}
+
+  -- Find which owner this customer belongs to (by destination number)
+  let owner_phone = body.to or env.get("DEFAULT_OWNER_PHONE", "")
+  let owner = db.one("SELECT * FROM users WHERE phone = ?", [owner_phone])
+  if not owner
+    log.error "No owner found for destination: {owner_phone}"
+    return {status: "no_owner"}
+
+  -- Log the inbound message
+  let msg_id = db.exec("""
+    INSERT INTO messages(owner_id, direction, from_phone, to_phone, body, wa_msg_id)
+    VALUES(?, 'inbound', ?, ?, ?, ?)
+    RETURNING id
+  """, [owner.id, from_phone, owner_phone, message_text, wa_msg_id])
+
+  -- Fetch context for AI
+  let catalog = tools.get_product_catalog(owner.id)
+  let history = tools.get_customer_history(from_phone)
+  let customer_name = history.customer.name or nil
+
+  -- Run AI classification + extraction
+  let extracted = ai_classify_and_extract(message_text, catalog, history)
+  let confidence = extracted.confidence
+  let intent = extracted.intent
+
+  let t_end = now()
+  let latency = t_end - t_start
+
+  -- ─── Confidence routing ─────────────────────────────────────────────────
+
+  -- Greeting: always auto-reply, no order logic needed
+  if intent == "greeting"
+    let reply = "Assalomu alaykum! Non do'konimizga xush kelibsiz. Buyurtma berish uchun mahsulot nomi va miqdorini yozing."
+    whatsapp.send(from_phone, reply, owner.wa_token)
+    log_ai_interaction(owner.id, msg_id, extracted, "auto_reply", latency)
+    return {status: "ok", action: "auto_reply_greeting"}
+
+  -- Question: pass to owner if confident, else escalate
+  if intent == "question"
+    if confidence > 0.85
+      let answer_prompt = """
+Mijoz savoli: {extracted.customer_question}
+Katalog: {json.dump(catalog.products)}
+Qisqa, do'stona javob ber (o'zbek tilida). Narxlar faqat katalogdan.
+      """
+      let answer = ai.complete(answer_prompt)
+      whatsapp.send(from_phone, answer, owner.wa_token)
+      log_ai_interaction(owner.id, msg_id, extracted, "auto_reply", latency)
+      return {status: "ok", action: "auto_reply_question"}
+    else
+      tools.ask_owner(owner.id, extracted.customer_question, "Mijoz: {from_phone}")
+      whatsapp.send(from_phone, "Savolingiz uchun rahmat! Tez orada javob beramiz.", owner.wa_token)
+      log_ai_interaction(owner.id, msg_id, extracted, "escalate", latency)
+      return {status: "ok", action: "escalated_question"}
+
+  -- New order: confidence-based routing
+  if intent == "new_order"
+    if extracted.items.length == 0
+      whatsapp.send(from_phone, "Qaysi mahsulotni va qancha miqdorda xohlaysiz?", owner.wa_token)
+      log_ai_interaction(owner.id, msg_id, extracted, "clarify", latency)
+      return {status: "ok", action: "clarify_order"}
+
+    -- HIGH confidence: auto-confirm and create order
+    if confidence > 0.85
+      let order = tools.create_order(
+        owner.id,
+        from_phone,
+        extracted.items,
+        extracted.delivery_date,
+        extracted.delivery_notes
+      )
+      if order.ok
+        let reply = build_order_reply(order, customer_name)
+        whatsapp.send(from_phone, reply, owner.wa_token)
+        log_ai_interaction(owner.id, msg_id, extracted, "auto_reply", latency)
+        return {status: "ok", action: "auto_order_created", order_id: order.order_id}
+      else
+        -- Creation failed (e.g. product not found): escalate
+        let err_msg = "Kechirasiz, buyurtmangizni rasmiylashtira olmadik: {order.error}. Iltimos qayta urinib ko'ring yoki biz siz bilan bog'lanamiz."
+        whatsapp.send(from_phone, err_msg, owner.wa_token)
+        tools.ask_owner(owner.id, "Buyurtma xatosi: {order.error}", "Mijoz: {from_phone}, Xabar: {message_text}")
+        log_ai_interaction(owner.id, msg_id, extracted, "escalate", latency)
+        return {status: "ok", action: "order_error_escalated"}
+
+    -- MEDIUM confidence: ask owner to confirm
+    if confidence >= 0.6
+      let confirm_msg = build_owner_confirm_msg(from_phone, extracted, confidence)
+      whatsapp.send(owner.phone, confirm_msg, owner.wa_token)
+      whatsapp.send(from_phone, "Buyurtmangiz ko'rib chiqilmoqda, tez orada xabar beramiz.", owner.wa_token)
+      log_ai_interaction(owner.id, msg_id, extracted, "owner_confirm", latency)
+      return {status: "ok", action: "pending_owner_confirm"}
+
+    -- LOW confidence: fully escalate to owner
+    let escalate_msg = "Tushunarsiz xabar ({from_phone}): \"{message_text}\"\nIshonch: {confidence}\nIltimos o'zingiz javob bering."
+    whatsapp.send(owner.phone, escalate_msg, owner.wa_token)
+    whatsapp.send(from_phone, "Xabaringiz qabul qilindi. Tez orada operator siz bilan bog'lanadi.", owner.wa_token)
+    log_ai_interaction(owner.id, msg_id, extracted, "escalate", latency)
+    return {status: "ok", action: "escalated_low_confidence"}
+
+  -- Complaint: always escalate to owner
+  if intent == "complaint"
+    let complaint_msg = "Shikoyat ({from_phone}): \"{message_text}\"\nIltimos tez javob bering."
+    whatsapp.send(owner.phone, complaint_msg, owner.wa_token)
+    whatsapp.send(from_phone, "Shikoyatingizni qabul qildik. Tez orada siz bilan bog'lanamiz. Uzr so'raymiz!", owner.wa_token)
+    log_ai_interaction(owner.id, msg_id, extracted, "escalate", latency)
+    return {status: "ok", action: "complaint_escalated"}
+
+  -- Other / unknown
+  whatsapp.send(from_phone, "Xabaringiz uchun rahmat! Qanday yordam bera olishimiz mumkin?", owner.wa_token)
+  log_ai_interaction(owner.id, msg_id, extracted, "auto_reply", latency)
+  return {status: "ok", action: "generic_reply"}

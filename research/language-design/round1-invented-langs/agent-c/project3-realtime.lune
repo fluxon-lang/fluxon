@@ -1,0 +1,145 @@
+# LUNE Realtime Chat Server
+use ws
+use json
+use sys
+
+# Global state
+rooms = {}  # {room_name: [client_ids]}
+clients = {} # {client_id: {room, name, conn}}
+next_id = 0
+
+fn new_id() {
+  next_id += 1
+  return next_id
+}
+
+fn broadcast_to_room(room, msg) {
+  client_list = dict.get(rooms, room, [])
+  for client_id in client_list {
+    client = dict.get(clients, client_id)
+    if client {
+      client["conn"].send(json.stringify(msg))
+    }
+  }
+}
+
+fn on_connect(sock) {
+  id = new_id()
+  clients[id] = {room: null, name: null, conn: sock}
+  print("Client {id} connected")
+  return id
+}
+
+fn on_message(sock, msg) {
+  data = json.parse(msg)
+  cmd = data["cmd"]
+
+  # find client by socket
+  client_id = null
+  for cid in dict.keys(clients) {
+    if clients[cid]["conn"] == sock {
+      client_id = cid
+      break
+    }
+  }
+
+  if !client_id {
+    return
+  }
+
+  client = clients[client_id]
+
+  # join room
+  if cmd == "join" {
+    room = data["room"]
+    name = data["name"] || "User{client_id}"
+
+    # leave old room
+    if client["room"] {
+      old = client["room"]
+      rooms[old] = list.filter(rooms[old], (id) => id != client_id)
+      broadcast_to_room(old, {type: "leave", name: client["name"]})
+    }
+
+    # join new room
+    if !rooms[room] { rooms[room] = [] }
+    rooms[room] = list.push(rooms[room], client_id)
+    client["room"] = room
+    client["name"] = name
+
+    # announce
+    broadcast_to_room(room, {
+      type: "join",
+      name: name,
+      room: room,
+      online: list.len(rooms[room])
+    })
+  }
+
+  # send message
+  if cmd == "msg" && client["room"] {
+    broadcast_to_room(client["room"], {
+      type: "message",
+      from: client["name"],
+      text: data["text"],
+      ts: sys.now()
+    })
+  }
+
+  # list online
+  if cmd == "online" && client["room"] {
+    room_users = []
+    for uid in rooms[client["room"]] {
+      u = clients[uid]
+      if u {
+        room_users = list.push(room_users, u["name"])
+      }
+    }
+    sock.send(json.stringify({
+      type: "online",
+      users: room_users,
+      count: list.len(room_users)
+    }))
+  }
+}
+
+fn on_close(sock) {
+  # find and remove client
+  client_id = null
+  for cid in dict.keys(clients) {
+    if clients[cid]["conn"] == sock {
+      client_id = cid
+      break
+    }
+  }
+
+  if client_id {
+    client = clients[client_id]
+    room = client["room"]
+    name = client["name"]
+
+    if room {
+      rooms[room] = list.filter(rooms[room], (id) => id != client_id)
+      broadcast_to_room(room, {type: "leave", name: name})
+    }
+
+    dict.remove(clients, client_id)
+    print("Client {client_id} ({name}) disconnected")
+  }
+}
+
+fn main() {
+  handlers = {
+    onConnect: on_connect,
+    onMessage: on_message,
+    onClose: on_close
+  }
+
+  ws.listen(8080, handlers)
+  print("Chat server on ws://localhost:8080")
+  print("Join a room with: {\"cmd\": \"join\", \"room\": \"general\", \"name\": \"Alice\"}")
+  print("Send message: {\"cmd\": \"msg\", \"text\": \"Hello\"}")
+  print("List online: {\"cmd\": \"online\"}")
+}
+
+main()

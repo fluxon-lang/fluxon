@@ -1,0 +1,108 @@
+# LUNE Notes REST API
+use http
+use db
+use json
+
+db_path = "notes.db"
+
+fn init_db() {
+  conn = db.open(db_path)
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS notes (
+      id INTEGER PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at REAL NOT NULL
+    )
+  `)
+  conn.close()
+}
+
+fn validate_note(data) {
+  if !data["title"] || str.len(data["title"]) == 0 {
+    return {valid: false, error: "title required"}
+  }
+  if !data["body"] || str.len(data["body"]) == 0 {
+    return {valid: false, error: "body required"}
+  }
+  return {valid: true}
+}
+
+fn handle_request(req) {
+  method = req["method"]
+  path = req["path"]
+
+  # GET /notes - list all
+  if method == "GET" && path == "/notes" {
+    conn = db.open(db_path)
+    notes = conn.query("SELECT id, title, body, created_at FROM notes ORDER BY created_at DESC")
+    conn.close()
+    return {
+      status: 200,
+      headers: {"Content-Type": "application/json"},
+      body: json.stringify(notes)
+    }
+  }
+
+  # POST /notes - create
+  if method == "POST" && path == "/notes" {
+    data = json.parse(req["body"] || "{}")
+    val = validate_note(data)
+    if !val["valid"] {
+      return {
+        status: 400,
+        headers: {"Content-Type": "application/json"},
+        body: json.stringify({error: val["error"]})
+      }
+    }
+    conn = db.open(db_path)
+    conn.exec(
+      "INSERT INTO notes (title, body, created_at) VALUES (?, ?, ?)",
+      [data["title"], data["body"], sys.now()]
+    )
+    result = conn.query("SELECT last_insert_rowid() as id")
+    id = result[0]["id"]
+    conn.close()
+    return {
+      status: 201,
+      headers: {"Content-Type": "application/json"},
+      body: json.stringify({id: id, title: data["title"], body: data["body"]})
+    }
+  }
+
+  # GET /notes/:id - fetch one
+  id_match = str.index(path, "/notes/")
+  if method == "GET" && id_match == 0 {
+    id = str.slice(path, 7)
+    conn = db.open(db_path)
+    rows = conn.query("SELECT id, title, body, created_at FROM notes WHERE id = ?", [num.parse(id)])
+    conn.close()
+    if list.len(rows) == 0 {
+      return {status: 404, body: json.stringify({error: "not found"})}
+    }
+    return {
+      status: 200,
+      headers: {"Content-Type": "application/json"},
+      body: json.stringify(rows[0])
+    }
+  }
+
+  # DELETE /notes/:id - delete
+  if method == "DELETE" && id_match == 0 {
+    id = str.slice(path, 7)
+    conn = db.open(db_path)
+    conn.exec("DELETE FROM notes WHERE id = ?", [num.parse(id)])
+    conn.close()
+    return {status: 204, body: ""}
+  }
+
+  return {status: 404, body: json.stringify({error: "not found"})}
+}
+
+fn main() {
+  init_db()
+  http.listen(3000, handle_request)
+  print("Notes API running on http://localhost:3000")
+}
+
+main()

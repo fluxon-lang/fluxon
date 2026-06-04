@@ -1,0 +1,159 @@
+-- tools.nol — AI-callable tools for the WhatsApp ops assistant
+
+import whatsapp
+
+-- Return last 10 orders + messages for a customer phone number
+fn get_customer_history(phone)
+  let customer = db.one(
+    "SELECT c.*, u.phone as owner_phone FROM customers c JOIN users u ON c.owner_id = u.id WHERE c.phone = ?",
+    [phone]
+  )
+  if not customer
+    return {found: no, phone: phone}
+
+  let orders = db.query("""
+    SELECT o.id, o.status, o.delivery_date, o.total, o.created_at,
+           json_agg(json_build_object(
+             'product', p.name, 'qty', oi.qty, 'price', oi.unit_price
+           )) as items
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    JOIN products p     ON p.id = oi.product_id
+    WHERE o.customer_id = ?
+    GROUP BY o.id
+    ORDER BY o.created_at DESC
+    LIMIT 10
+  """, [customer.id])
+
+  let recent_msgs = db.query("""
+    SELECT direction, body, created_at
+    FROM messages
+    WHERE from_phone = ? OR to_phone = ?
+    ORDER BY created_at DESC
+    LIMIT 5
+  """, [phone, phone])
+
+  return {
+    found: yes,
+    customer: customer,
+    orders: orders,
+    recent_messages: recent_msgs,
+    order_count: orders.length
+  }
+
+
+-- Return all available products with current DB prices
+fn get_product_catalog(owner_id)
+  let products = db.query("""
+    SELECT id, name, price, unit, available
+    FROM products
+    WHERE owner_id = ? AND available = true
+    ORDER BY name
+  """, [owner_id])
+
+  return {
+    products: products,
+    count: products.length,
+    note: "Prices are authoritative — always use these, never invent prices"
+  }
+
+
+-- Create a confirmed order; prices always fetched from DB
+fn create_order(owner_id, customer_phone, items, delivery_date, delivery_notes)
+  -- Ensure customer exists
+  let customer = db.one(
+    "SELECT id FROM customers WHERE phone = ? AND owner_id = ?",
+    [customer_phone, owner_id]
+  )
+  if not customer
+    let cid = db.exec(
+      "INSERT INTO customers(phone, owner_id) VALUES(?, ?) RETURNING id",
+      [customer_phone, owner_id]
+    )
+    let customer = {id: cid}
+
+  -- Validate each item and look up DB price
+  let validated = []
+  each item in items
+    let product = db.one(
+      "SELECT id, name, price, unit FROM products WHERE name ILIKE ? AND owner_id = ? AND available = true",
+      [item.product, owner_id]
+    )
+    if not product
+      return {ok: no, error: "Product not found: {item.product}"}
+
+    let subtotal = product.price * item.qty
+    validated = validated + [{
+      product_id: product.id,
+      product_name: product.name,
+      qty: item.qty,
+      unit_price: product.price,   -- always from DB
+      subtotal: subtotal
+    }]
+
+  let total = 0
+  each v in validated
+    let total = total + v.subtotal
+
+  -- Insert order in a transaction
+  db.tx
+    let order_id = db.exec("""
+      INSERT INTO orders(owner_id, customer_id, status, delivery_date, delivery_notes, total)
+      VALUES(?, ?, 'confirmed', ?, ?, ?)
+      RETURNING id
+    """, [owner_id, customer.id, delivery_date, delivery_notes or "", total])
+
+    each v in validated
+      db.exec("""
+        INSERT INTO order_items(order_id, product_id, qty, unit_price, subtotal)
+        VALUES(?, ?, ?, ?, ?)
+      """, [order_id, v.product_id, v.qty, v.unit_price, v.subtotal])
+
+  return {
+    ok: yes,
+    order_id: order_id,
+    total: total,
+    items: validated,
+    delivery_date: delivery_date
+  }
+
+
+-- Update a product's price (only from owner's explicit instruction)
+fn update_product(owner_id, name, price)
+  if price <= 0
+    return {ok: no, error: "Price must be positive"}
+
+  let rows = db.exec(
+    "UPDATE products SET price = ? WHERE name ILIKE ? AND owner_id = ? RETURNING id, name, price",
+    [price, name, owner_id]
+  )
+  if rows == 0
+    return {ok: no, error: "Product not found: {name}"}
+
+  return {ok: yes, updated: name, new_price: price}
+
+
+-- Send a question to the business owner via WhatsApp and wait for reply (async)
+fn ask_owner(owner_id, question, context)
+  let owner = db.one("SELECT phone, wa_token FROM users WHERE id = ?", [owner_id])
+  let msg = "Savol: {question}\n\nKontekst: {context or 'yo`q'}"
+  whatsapp.send(owner.phone, msg, owner.wa_token)
+  log "Owner asked: {question}"
+  return {ok: yes, sent_to: owner.phone}
+
+
+-- Schedule a proactive outreach message to a customer
+fn schedule_outreach(owner_id, customer_phone, when, reason)
+  let customer = db.one(
+    "SELECT id FROM customers WHERE phone = ? AND owner_id = ?",
+    [customer_phone, owner_id]
+  )
+  if not customer
+    return {ok: no, error: "Customer not found"}
+
+  db.exec("""
+    INSERT INTO proactive_outreach(owner_id, customer_id, reason, scheduled_at, status)
+    VALUES(?, ?, ?, ?, 'pending')
+  """, [owner_id, customer.id, reason, when])
+
+  return {ok: yes, scheduled_for: when, reason: reason}
