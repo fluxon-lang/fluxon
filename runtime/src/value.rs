@@ -33,7 +33,12 @@ pub enum Value {
 pub struct FnValue {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
-    pub closure: crate::interp::Env,
+    // Closure ota-havolasi. `apply` shundan child scope ochadi — top-level
+    // fn'lar uchun bu `Parent::Root`, shuning uchun rekursiv chaqiruvda root
+    // Arc klonlanmaydi/lock olinmaydi (atomik contention yo'q). Nested closure
+    // runtime'da joriy scope'ni ushlaydi (`Parent::Scope`). Avval to'liq
+    // `closure: Env` edi — har `apply` root Arc'ni klonlardi.
+    pub parent: crate::interp::Parent,
     pub name: String,
 }
 

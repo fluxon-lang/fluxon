@@ -193,7 +193,11 @@ impl Parser {
         let name = self.expect_ident("funksiya nomi")?;
         let mut params = Vec::new();
         while let Tok::Ident(_) = self.peek() {
-            params.push(self.expect_ident("parametr")?);
+            let p = self.expect_ident("parametr")?;
+            if params.contains(&p) {
+                return Err(format!("'{}' funksiyasida takror parametr nomi: '{}'", name, p));
+            }
+            params.push(p);
         }
         if self.eat(&Tok::Arrow) {
             // bir qatorli: fn double x -> x * 2
@@ -667,7 +671,11 @@ impl Parser {
         self.advance(); // backslash
         let mut params = Vec::new();
         while let Tok::Ident(_) = self.peek() {
-            params.push(self.expect_ident("lambda parametri")?);
+            let p = self.expect_ident("lambda parametri")?;
+            if params.contains(&p) {
+                return Err(format!("lambda'da takror parametr nomi: '{}'", p));
+            }
+            params.push(p);
         }
         self.expect(&Tok::Arrow, "'->'")?;
         let body = self.parse_arrow_body()?;
