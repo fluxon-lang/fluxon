@@ -137,3 +137,9 @@ Flux ochiq manba — yordamingizni kutamiz.
 ## Litsenziya
 
 MIT
+
+---
+
+> **Eslatma.** Flux mavjud global dasturlash tillarini almashtirish yoki
+> ulardan o'tib ketish uchun yaratilmayapti. Maqsad bitta: **AI eng yaxshi
+> biladigan va yoqtiradigan dasturlash tili** bo'lish.
