@@ -162,3 +162,8 @@ runtime'da **hali implementatsiya qilinmagan:**
 
 Bularni qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb oling —
 sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan bir xil.
+
+## 9. Kutilmagan xatolar va kamchiliklar
+
+Hozirda `flux` ichida yetishmayotgan qismlar bo'lishi mumkin, yoki xato va kamchiliklar bo'lishi mumkin
+bunday holatda chiqgan muamo haqida github issue yordamida repoga bildirish kerak bo'ladi. 
