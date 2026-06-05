@@ -87,4 +87,8 @@ pub struct Token {
     pub tok: Tok,
     pub line: usize,
     pub col: usize,
+    // Bu token oldidan bo'shliq (yoki tab/newline) kelganmi. Grammatikada
+    // `arr[i]` (tutash -> indeks) va `f "x" [a]` (bo'shliqli -> alohida argument)
+    // ni ajratish uchun ishlatiladi.
+    pub spaced: bool,
 }
