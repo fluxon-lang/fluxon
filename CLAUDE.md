@@ -155,8 +155,6 @@ o'ylang va test bilan himoyalang:
 runtime'da **hali implementatsiya qilinmagan:**
 
 - `ai` (LLM primitiv — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`)
-- `reg` (funksiya registri — dinamik dispatch)
-- `ws` (websocket — realtime, `ws.on`/`ws.serve`/`ws.room.*`)
 - `cron` (vaqt jadvali)
 - `queue` (fon vazifalari)
 

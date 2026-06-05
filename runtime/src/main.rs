@@ -16,6 +16,7 @@ mod http_mod;
 mod interp;
 mod lexer;
 mod parser;
+mod reg_mod;
 mod token;
 mod value;
 mod ws_mod;
@@ -196,6 +197,58 @@ miss = env.FLUX_NONEXISTENT_XYZ ?? "default"
 env = {PORT:"9999"}
 p = env.PORT
 (p == "9999") | (fail "local env shadow ishlamadi: ${p}")
+"#);
+    }
+
+    #[test]
+    fn reg_add_call_has_names() {
+        // reg battery: funksiyani nom bilan saqlash/chaqirish (dinamik dispatch).
+        // closure args map oladi (agent tool naqshi); reg.has bool, reg.names list.
+        run(r#"
+reg.add "calc" \args -> args.a + args.b
+reg.add "greet" \args -> "salom ${args.nom}"
+
+out = reg.call "calc" {a:2 b:3}
+(out == 5) | (fail "reg.call calc noto'g'ri: ${out}")
+
+g = reg.call "greet" {nom:"Aziza"}
+(g == "salom Aziza") | (fail "reg.call greet noto'g'ri: ${g}")
+
+(reg.has "calc") | (fail "reg.has calc false bo'lmasligi kerak")
+((reg.has "yoq") == false) | (fail "reg.has yoq true bo'lmasligi kerak")
+
+# reg.names argumentsiz (Field) — alifbo tartibida barqaror chiqish
+ns = reg.names
+(ns.len == 2) | (fail "reg.names uzunligi 2 emas: ${ns}")
+(ns.0 == "calc") | (fail "reg.names[0] calc emas: ${ns}")
+"#);
+    }
+
+    #[test]
+    fn reg_call_unknown_fails() {
+        // Ro'yxatda yo'q nomni chaqirish fail bo'lishi kerak (jim nil emas).
+        let err = run_source(
+            r#"
+out = reg.call "yoq" {a:1}
+log out
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("ro'yxatda yo'q"),
+            "kutilgan 'ro'yxatda yo'q', topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn reg_add_overwrites() {
+        // Bir nomga qayta reg.add — ustiga yozadi (tool yangilash holati).
+        run(r#"
+reg.add "f" \args -> 1
+reg.add "f" \args -> 2
+out = reg.call "f" {}
+(out == 2) | (fail "reg.add ustiga yozmadi: ${out}")
 "#);
     }
 
