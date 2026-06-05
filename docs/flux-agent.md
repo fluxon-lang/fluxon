@@ -104,7 +104,10 @@ http.serve 8080
   `req.query`, `req.headers`. Yo'q kalit → `nil`.
 - `rep status body` (map→avtomat JSON). Redirect: `rep 302 {location:url}`.
 - Route ustunligi: literal yo'l avtomat ustun (`/stats/:c` > `/:c`).
-- Klient: `http.get url`, `http.post url body` → `res.status res.body`.
+- Klient: `http.get url`, `http.post url body` → `res.status res.body res.headers`.
+  `res.headers` (map, kalit kichik harf): `res.headers.location`, `m[k]` ham.
+  Redirect default kuzatilmaydi; opt-in: `http.get url {follow:true max:10}`
+  → kuzatadi, `res.hops` (necha hop). `max` default 10.
 
 ### db (Postgres, $DATABASE_URL avtomat)
 ```flux

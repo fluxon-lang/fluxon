@@ -50,6 +50,23 @@ r8 = http.get "${base}/text"
 eq r8.status 200 "GET /text status"
 eq r8.body "salom dunyo" "GET /text plain body"
 
+# res.headers — javob header'lari map sifatida o'qiladi (kichik harf kalit)
+# tireli kalit (content-type) uchun m[k] indeks ishlatamiz (m.k emas).
+r9 = http.get "${base}/health"
+ct = r9.headers["content-type"]
+eq (str.has ct "application/json") true "res.headers content-type"
+
+# follow:false (default) — 302 xom qaytadi, Location header o'qiladi
+r10 = http.get "${base}/r1"
+eq r10.status 302 "default follow off → xom 302"
+eq r10.headers.location "/r2" "res.headers.location o'qildi"
+
+# follow:true — redirect zanjiri kuzatiladi (/r1 → /r2 → /dest)
+r11 = http.get "${base}/r1" {follow:true}
+eq r11.status 200 "follow:true → yakuniy 200"
+eq r11.body.arrived true "follow:true → /dest tanasi"
+eq r11.hops 2 "follow:true → 2 hop sanaldi"
+
 if fails == 0
   log "=== 05_http: HAMMASI O'TDI ==="
 else

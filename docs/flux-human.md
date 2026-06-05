@@ -482,8 +482,18 @@ tartibidan qat'i nazar. `/stats/:code` har doim `/:code` dan oldin tekshiriladi.
 ```flux
 res = http.get "https://api.example.com/data"
 res = http.post url {key:"val"}      # tana avtomat JSON
-# res.status, res.body
+# res.status, res.body, res.headers (map, kalit kichik harf)
+loc = res.headers.location           # yoki res.headers["content-type"]
 ```
+
+Redirect (3xx) **default kuzatilmaydi** — `res.status` 30x, `res.headers.location`
+o'qiladi. Avtomat kuzatish kerak bo'lsa opsiya map qo'shing:
+```flux
+res = http.get url {follow:true}         # 3xx → Location'ga ergashadi
+res = http.get url {follow:true max:5}   # hop limiti (default 10)
+# res.hops — necha marta redirect bo'lgani
+```
+`max`'dan oshsa xato. Opsiya oxirgi argument: `http.post url body {follow:true}`.
 
 ### 9.2 `db` — ma'lumotlar bazasi (Postgres)
 

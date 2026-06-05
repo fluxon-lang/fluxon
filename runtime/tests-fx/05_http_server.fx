@@ -32,5 +32,13 @@ http.on :post "/strict" \req ->
 http.on :get "/text" \req ->
   rep 200 "salom dunyo"
 
+# redirect zanjiri: /r1 → /r2 → /dest (klient follow:true bilan kuzatadi).
+http.on :get "/r1" \req ->
+  rep 302 {location:"/r2"}
+http.on :get "/r2" \req ->
+  rep 302 {location:"/dest"}
+http.on :get "/dest" \req ->
+  rep 200 {arrived:true}
+
 log "server 8123-portda ishga tushyapti..."
 http.serve 8123

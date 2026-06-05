@@ -175,6 +175,18 @@ fn value_to_response(v: Value) -> Response<Full<Bytes>> {
             _ => 200,
         };
         let body = m.get("body").cloned().unwrap_or(Value::Nil);
+        // Redirect: `rep 30x {location:url}` → body'dagi location'ni Location
+        // header'ga chiqaramiz (spec: "Redirect: rep 302 {location:url}").
+        if (300..400).contains(&status)
+            && let Value::Map(bm) = &body
+            && let Some(Value::Str(loc)) = bm.get("location")
+        {
+            return Response::builder()
+                .status(StatusCode::from_u16(status).unwrap_or(StatusCode::FOUND))
+                .header("location", loc.clone())
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+        }
         return body_value_to_response(status, body);
     }
     // rep ishlatilmagan — qiymatning o'zini 200 bilan qaytaramiz.
@@ -216,10 +228,10 @@ impl Interp {
         match func {
             "on" => self.http_on(args),
             "serve" => self.http_serve(args),
-            "get" => http_client("GET", args),
-            "post" => http_client("POST", args),
-            "put" => http_client("PUT", args),
-            "del" => http_client("DELETE", args),
+            "get" => http_client("GET", args, false),
+            "post" => http_client("POST", args, true),
+            "put" => http_client("PUT", args, true),
+            "del" => http_client("DELETE", args, false),
             _ => Err(Flow::err(format!(
                 "http modulida '{}' funksiyasi yo'q",
                 func
@@ -389,8 +401,40 @@ fn pooled_http_client() -> PooledHttpClient {
         .clone()
 }
 
-// http.get url  /  http.post url body
-fn http_client(method: &str, args: Vec<Value>) -> Result<Value, Flow> {
+// Klient so'rovi opsiyalari (oxirgi map argumentdan o'qiladi).
+// follow=true → 3xx redirectni Location bo'yicha avtomat kuzatadi (default off).
+// max → redirect hop limiti (default 10), undan oshsa xato.
+struct ClientOpts {
+    follow: bool,
+    max: i64,
+}
+
+impl Default for ClientOpts {
+    fn default() -> Self {
+        ClientOpts {
+            follow: false,
+            max: 10,
+        }
+    }
+}
+
+// Opsiya map'ini o'qiydi. follow truthy bo'lsa kuzatish yoqiladi.
+fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
+    let mut o = ClientOpts::default();
+    if let Some(Value::Map(m)) = opts {
+        if let Some(v) = m.get("follow") {
+            o.follow = !matches!(v, Value::Nil | Value::Bool(false));
+        }
+        if let Some(Value::Int(n)) = m.get("max") {
+            o.max = *n;
+        }
+    }
+    o
+}
+
+// http.get url [opts]  /  http.post url body [opts]
+// has_body=true bo'lsa args[1]=body, opts=args[2]; aks holda opts=args[1].
+fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, Flow> {
     let url = match args.first() {
         Some(Value::Str(s)) => s.clone(),
         _ => {
@@ -400,59 +444,204 @@ fn http_client(method: &str, args: Vec<Value>) -> Result<Value, Flow> {
             )));
         }
     };
-    let body = args.get(1).cloned();
+    let (body, opts_arg) = if has_body {
+        (args.get(1).cloned(), args.get(2))
+    } else {
+        (None, args.get(1))
+    };
+    let opts = parse_client_opts(opts_arg);
+
+    // So'rov tanasini bir marta tayyorlaymiz (redirect'larda ham qayta ishlatamiz).
+    let (body_str, is_json) = match &body {
+        Some(Value::Map(_)) | Some(Value::List(_)) => (json_encode(body.as_ref().unwrap()), true),
+        Some(Value::Str(s)) => (s.clone(), false),
+        Some(other) => (format!("{}", other), false),
+        None => (String::new(), false),
+    };
 
     client_runtime().block_on(async move {
-        let uri: hyper::Uri = url
-            .parse()
-            .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
+        let mut current = url;
+        // method redirect'da o'zgarishi mumkin (303 va GET-aylantiruvchi 301/302).
+        let mut cur_method = method.to_string();
+        let mut hops: i64 = 0;
 
-        let (body_str, is_json) = match &body {
-            Some(Value::Map(_)) | Some(Value::List(_)) => {
-                (json_encode(body.as_ref().unwrap()), true)
+        loop {
+            let uri: hyper::Uri = current
+                .parse()
+                .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
+
+            // GET'ga aylangach tana yuborilmaydi.
+            let send_body = cur_method != "GET" && cur_method != "DELETE";
+            let mut builder = Request::builder().method(cur_method.as_str()).uri(uri);
+            if is_json && send_body {
+                builder = builder.header("content-type", "application/json");
             }
-            Some(Value::Str(s)) => (s.clone(), false),
-            Some(other) => (format!("{}", other), false),
-            None => (String::new(), false),
-        };
+            let payload = if send_body {
+                Bytes::from(body_str.clone())
+            } else {
+                Bytes::new()
+            };
+            let req = builder
+                .body(Full::new(payload))
+                .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
 
-        let mut builder = Request::builder().method(method).uri(uri);
-        if is_json {
-            builder = builder.header("content-type", "application/json");
+            let resp = pooled_http_client()
+                .request(req)
+                .await
+                .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
+
+            let status = resp.status().as_u16();
+
+            // Redirect kuzatuvi (opt-in). 3xx + Location bo'lsa keyingi hop'ga o'tamiz.
+            if opts.follow
+                && (300..400).contains(&status)
+                && let Some(loc) = resp
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            {
+                hops += 1;
+                if hops > opts.max {
+                    return Err(Flow::err(format!(
+                        "redirect limiti oshib ketdi ({} hop)",
+                        opts.max
+                    )));
+                }
+                // Nisbiy Location'ni joriy URL asosida to'liq URL'ga aylantiramiz.
+                current = resolve_location(&current, &loc);
+                // 303 har doim GET; 301/302 amaliyotda GET'ga aylanadi (POST→GET).
+                // 307/308 metod va tanani saqlaydi.
+                if status == 303 || ((status == 301 || status == 302) && cur_method == "POST") {
+                    cur_method = "GET".to_string();
+                }
+                continue;
+            }
+
+            // Yakuniy javob — header, status, body'ni yig'amiz.
+            let resp_is_json = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.contains("application/json"))
+                .unwrap_or(false);
+
+            // Header'lar: kalit kichik harf, qiymat str (req.headers bilan simmetrik).
+            let mut headers = BTreeMap::new();
+            for (k, v) in resp.headers() {
+                if let Ok(val) = v.to_str() {
+                    headers.insert(k.as_str().to_lowercase(), Value::Str(val.to_string()));
+                }
+            }
+
+            let bytes = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
+                .to_bytes();
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            let resp_body = if resp_is_json {
+                json_decode(&text).unwrap_or(Value::Str(text))
+            } else {
+                Value::Str(text)
+            };
+
+            let mut m = BTreeMap::new();
+            m.insert("status".to_string(), Value::Int(status as i64));
+            m.insert("body".to_string(), resp_body);
+            m.insert("headers".to_string(), Value::Map(headers));
+            // follow yoqilgan bo'lsa nechta redirect bo'lganini ham qaytaramiz.
+            if opts.follow {
+                m.insert("hops".to_string(), Value::Int(hops));
+            }
+            return Ok(Value::Map(m));
         }
-        let req = builder
-            .body(Full::new(Bytes::from(body_str)))
-            .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
-
-        let resp = pooled_http_client()
-            .request(req)
-            .await
-            .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
-
-        let status = resp.status().as_u16() as i64;
-        let resp_is_json = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.contains("application/json"))
-            .unwrap_or(false);
-
-        let bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
-            .to_bytes();
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        let resp_body = if resp_is_json {
-            json_decode(&text).unwrap_or(Value::Str(text))
-        } else {
-            Value::Str(text)
-        };
-
-        let mut m = BTreeMap::new();
-        m.insert("status".to_string(), Value::Int(status));
-        m.insert("body".to_string(), resp_body);
-        Ok(Value::Map(m))
     })
+}
+
+// Redirect Location'ini joriy URL asosida hal qiladi. Location to'liq URL bo'lsa
+// (`http://...`) o'sha qaytadi; aks holda joriy URL'ning sxema+host'iga ulanadi
+// (mutlaq yo'l `/x` yoki nisbiy yo'l).
+fn resolve_location(base: &str, loc: &str) -> String {
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return loc.to_string();
+    }
+    // base'dan sxema://host qismini ajratamiz.
+    let scheme_end = base.find("://").map(|i| i + 3).unwrap_or(0);
+    let host_end = base[scheme_end..]
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(base.len());
+    let origin = &base[..host_end];
+    if loc.starts_with('/') {
+        format!("{}{}", origin, loc)
+    } else {
+        // nisbiy yo'l: joriy yo'lning oxirgi segmentini almashtiramiz.
+        let path_part = &base[host_end..];
+        let dir_end = path_part
+            .rfind('/')
+            .map(|i| host_end + i + 1)
+            .unwrap_or(base.len());
+        format!("{}{}", &base[..dir_end], loc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_absolute_url() {
+        // To'liq URL bo'lsa o'zi qaytadi (base e'tiborga olinmaydi).
+        let got = resolve_location("http://a.com/x", "http://b.com/y");
+        assert_eq!(got, "http://b.com/y");
+    }
+
+    #[test]
+    fn location_root_relative() {
+        // `/...` mutlaq yo'l — base'ning origin'iga ulanadi, yo'l almashtiriladi.
+        let got = resolve_location("http://a.com/old/path", "/new");
+        assert_eq!(got, "http://a.com/new");
+    }
+
+    #[test]
+    fn location_relative_path() {
+        // nisbiy yo'l — joriy yo'lning oxirgi segmenti o'rniga qo'yiladi.
+        let got = resolve_location("http://a.com/dir/file", "other");
+        assert_eq!(got, "http://a.com/dir/other");
+    }
+
+    #[test]
+    fn location_relative_at_root() {
+        // host'dan keyin yo'l yo'q bo'lsa, nisbiy yo'l to'g'ridan-to'g'ri ulanadi.
+        let got = resolve_location("http://a.com", "page");
+        assert_eq!(got, "http://a.compage");
+    }
+
+    #[test]
+    fn opts_default_no_follow() {
+        // Opsiya berilmasa redirect kuzatilmaydi, limit 10.
+        let o = parse_client_opts(None);
+        assert!(!o.follow);
+        assert_eq!(o.max, 10);
+    }
+
+    #[test]
+    fn opts_follow_true() {
+        let mut m = BTreeMap::new();
+        m.insert("follow".to_string(), Value::Bool(true));
+        m.insert("max".to_string(), Value::Int(3));
+        let o = parse_client_opts(Some(&Value::Map(m)));
+        assert!(o.follow);
+        assert_eq!(o.max, 3);
+    }
+
+    #[test]
+    fn opts_follow_falsey() {
+        // follow:false va follow:nil — ikkalasi ham kuzatishni yoqmaydi.
+        let mut m = BTreeMap::new();
+        m.insert("follow".to_string(), Value::Bool(false));
+        assert!(!parse_client_opts(Some(&Value::Map(m))).follow);
+    }
 }
