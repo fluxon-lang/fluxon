@@ -195,7 +195,10 @@ impl Parser {
         while let Tok::Ident(_) = self.peek() {
             let p = self.expect_ident("parametr")?;
             if params.contains(&p) {
-                return Err(format!("'{}' funksiyasida takror parametr nomi: '{}'", name, p));
+                return Err(format!(
+                    "'{}' funksiyasida takror parametr nomi: '{}'",
+                    name, p
+                ));
             }
             params.push(p);
         }

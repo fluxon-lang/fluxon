@@ -13,3 +13,8 @@ Thumbs.db
 runtime/target/
 *.log
 .env
+
+# SQLite db artefaktlari (db battery run/test paytida yaratiladi)
+*.db
+*.db-shm
+*.db-wal
