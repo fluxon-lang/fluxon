@@ -180,6 +180,10 @@ pub struct Interp {
     // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
     // .env fayl (deployda real muhit o'zgaruvchisi muhim).
     env_file: OnceLock<HashMap<String, String>>,
+    // WS battery: hodisa handler'lari + jonli ulanishlar/xonalar/sessiya holati.
+    // http `routes` kabi top-level kod (`ws.on`) to'ldiradi, `ws.serve` thread'lari
+    // o'qiydi/yozadi. Arc — server thread'lari bilan ulashiladi.
+    pub ws: Arc<crate::ws_mod::WsState>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -202,6 +206,7 @@ impl Interp {
             db: OnceLock::new(),
             schema: Arc::new(RwLock::new(HashMap::new())),
             env_file: OnceLock::new(),
+            ws: Arc::new(crate::ws_mod::WsState::new()),
         }
     }
 
@@ -819,6 +824,24 @@ impl Interp {
     fn eval_call(&self, callee: &Expr, args: &[Expr], env: &Env) -> EvalResult {
         // Metod chaqiruvi: target.method arg...  -> Field bo'lib keladi.
         if let Expr::Field { target, name } = callee {
+            // Ikki-bosqichli modul namespace'i: ws.room.* / ws.data.* —
+            // target'ning o'zi Field{Ident("ws"), "room"/"data"}. `Ident` shoxiga
+            // tushmaydi, shuning uchun bu yerda alohida ushlaymiz (ws — state'li,
+            // Interp kerak). Hozircha faqat `ws` namespace'i ichki guruhli.
+            if let Expr::Field {
+                target: inner,
+                name: sub,
+            } = target.as_ref()
+                && let Expr::Ident(root) = inner.as_ref()
+                && root == "ws"
+            {
+                let argv = self.eval_args(args, env)?;
+                return match sub.as_str() {
+                    "room" => self.arc_self().ws_room_dispatch(name, argv),
+                    "data" => self.arc_self().ws_data_dispatch(name, argv),
+                    _ => Err(Flow::err(format!("ws.{} guruhi yo'q", sub))),
+                };
+            }
             // module.func (str.up, math.floor, ...) — `str` o'zgaruvchi emas,
             // shuning uchun target'ni baholashdan OLDIN modulni tekshiramiz.
             if let Expr::Ident(modname) = target.as_ref() {
@@ -833,6 +856,13 @@ impl Interp {
                 if modname == "db" {
                     let argv = self.eval_args(args, env)?;
                     return self.arc_self().db_dispatch(name, argv);
+                }
+                // ws — http kabi state'li (jonli ulanishlar, handler apply uchun
+                // Interp kerak). ws.room.*/ws.data.* esa ikki-bosqichli Field
+                // bo'lib keladi — quyiroqda (Field target ichida) ushlanadi.
+                if modname == "ws" {
+                    let argv = self.eval_args(args, env)?;
+                    return self.arc_self().ws_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;

@@ -14,3 +14,8 @@ mimalloc = "0.1"
 # db battery: SQLite (bundled — tizim kutubxonasi/server kerak emas, CI'da yashil).
 # Boshqa backendlar (postgres/mysql) keyin Db trait orqasiga additiv ulanadi.
 rusqlite = { version = "0.40", features = ["bundled"] }
+# ws battery: WebSocket handshake + framing. hyper 1.x / tokio ekotizimiga mos.
+# TLS yo'q (wss keyin additiv) — sof tokio TcpStream ustida.
+tokio-tungstenite = "0.24"
+# WS stream'ni read/write yo'nalishlarga split qilish (SplitSink/SplitStream).
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

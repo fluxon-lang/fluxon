@@ -842,7 +842,7 @@ Real-time ilovalar (chat, jonli yangilanish) uchun. `http` so'rov-javob bo'lsa,
 use ws
 
 ws.on :connect \conn ->         # yangi ulanish. conn.id — barqaror unikal id
-  conn.data.user = nil          # conn.data — SHU ulanish uchun map (sessiya)
+  ws.data.set conn :user nil    # ws.data — SHU ulanish uchun sessiya holati
 
 ws.on :message \conn msg ->     # msg — kelgan matn (JSON bo'lsa json.dec qiling)
   m = json.dec msg
@@ -853,6 +853,13 @@ ws.on :disconnect \conn ->
 
 ws.serve 9000
 ```
+
+- `ws.on :hodisa handler` — hodisa: `:connect`, `:message`, `:disconnect`.
+  `:message` handler `\conn msg ->` (msg — kelgan **matn**), qolganlari `\conn ->`.
+- `ws.send conn matn` — SHU ulanishga yuboradi (matn; JSON kerak bo'lsa `json.enc`).
+- `ws.data.set conn :kalit qiymat` / `ws.data.get conn :kalit` — SHU ulanish
+  uchun sessiya holati (Flux ulanish uzilguncha saqlaydi, uzilganda tozalaydi).
+- `ws.serve port` — serverni ishga tushiradi (bloklovchi).
 
 **Xona (room) — broadcast uchun.** Bir guruhga bir vaqtda yuborish. Flux
 xonalarni o'zi boshqaradi — siz qo'lda "kim qaysi xonada" map'ini yuritmaysiz:
