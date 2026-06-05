@@ -41,9 +41,13 @@ pub enum Parent {
 }
 
 pub struct Scope {
-    vars: HashMap<String, Value>,
-    // mutable (`<-`) sifatida e'lon qilingan nomlar — qayta tayinlashga ruxsat.
-    mutable: HashMap<String, bool>,
+    // Nomlar — kichik VEKTOR (HashMap emas). Fn chaqiruvi/blok scope'lari odatda
+    // 0-4 nom ushlaydi; bunday kichik to'plamda linear scan hash hisoblash +
+    // HashMap allocation'idan tezroq, va per-call allocation arzon (bitta Vec
+    // buffer, ikkita bo'sh HashMap o'rniga). Element: (nom, qiymat, mutable-mi).
+    // mutable = `<-` bilan qayta tayinlanishi mumkinmi (`=`/`exp`/param immutable;
+    // `<-` va loop var mutable).
+    vars: Vec<(Box<str>, Value, bool)>,
     parent: Parent,
     // Bu scope root (global)mi? lookup root'ga yetganda, agar Interp global'ni
     // muzlatgan bo'lsa, lock-free snapshot'dan o'qiydi (parallel contention yo'q).
@@ -53,8 +57,7 @@ pub struct Scope {
 impl Scope {
     pub fn root() -> Env {
         Arc::new(RwLock::new(Scope {
-            vars: HashMap::new(),
-            mutable: HashMap::new(),
+            vars: Vec::new(),
             parent: Parent::None,
             is_root: true,
         }))
@@ -65,8 +68,16 @@ impl Scope {
     // fn chaqiruvida root Arc'ga umuman tegilmaydi (contention yo'q).
     fn child(parent: Parent) -> Env {
         Arc::new(RwLock::new(Scope {
-            vars: HashMap::new(),
-            mutable: HashMap::new(),
+            vars: Vec::new(),
+            parent,
+            is_root: false,
+        }))
+    }
+    // Params soni bilan oldindan o'lchamlangan child (fn chaqiruvi — bind paytida
+    // qayta-allocate bo'lmaydi).
+    fn child_with_capacity(parent: Parent, cap: usize) -> Env {
+        Arc::new(RwLock::new(Scope {
+            vars: Vec::with_capacity(cap),
             parent,
             is_root: false,
         }))
@@ -86,10 +97,37 @@ impl Scope {
     fn child_of(env: &Env) -> Env {
         Scope::child(Scope::parent_link(env))
     }
+    // Nomni e'lon qiladi. Allaqachon mavjud bo'lsa qiymat+mutable'ni yangilaydi
+    // (shadow/qayta-bind — eski HashMap insert semantikasi: oxirgisi g'olib).
+    fn define(&mut self, name: &str, v: Value, mutable: bool) {
+        for slot in self.vars.iter_mut() {
+            if &*slot.0 == name {
+                slot.1 = v;
+                slot.2 = mutable;
+                return;
+            }
+        }
+        self.vars.push((name.into(), v, mutable));
+    }
+    // Nom qiymatini o'qiydi (oxirgi e'londan — orqadan oldinga scan).
+    fn get(&self, name: &str) -> Option<&Value> {
+        self.vars
+            .iter()
+            .rev()
+            .find(|(n, _, _)| &**n == name)
+            .map(|(_, v, _)| v)
+    }
+    // `<-` uchun: o'zgaruvchan slot'ni topadi. (slot, mutable-mi) qaytaradi.
+    fn get_mut_entry(&mut self, name: &str) -> Option<(&mut Value, bool)> {
+        self.vars
+            .iter_mut()
+            .rev()
+            .find(|(n, _, _)| &**n == name)
+            .map(|(_, v, m)| (v, *m))
+    }
     // Builtins o'rnatish uchun: global nomga immutable qiymat qo'yadi.
     pub fn set_global(&mut self, name: &str, v: Value) {
-        self.vars.insert(name.to_string(), v);
-        self.mutable.insert(name.to_string(), false);
+        self.define(name, v, false);
     }
 }
 
@@ -197,7 +235,12 @@ impl Interp {
     // ishga tushirishdan oldin chaqiradi. Bir marta — keyin global o'qish
     // lock'siz bo'ladi. (Top-level kod tugagan, mutatsiya kutilmaydi.)
     pub fn freeze_globals(&self) {
-        let snap = self.global.read().vars.clone();
+        // Frozen snapshot HASHMAP — global katta (builtin'lar + fn'lar), va u har
+        // request'da O(1) qidiriladi. Global Vec'dan (oxirgi e'lon g'olib) quramiz.
+        let mut snap: HashMap<String, Value> = HashMap::new();
+        for (name, v, _) in self.global.read().vars.iter() {
+            snap.insert(name.to_string(), v.clone());
+        }
         let _ = self.globals_frozen.set(Arc::new(snap));
     }
 
@@ -232,7 +275,7 @@ impl Interp {
                         parent: Parent::Root,
                         name: name.clone(),
                     }));
-                    self.global.write().vars.insert(name.clone(), f);
+                    self.global.write().define(name, f, false);
                 }
                 Stmt::Tbl { name, columns } => self.register_tbl(name, columns),
                 _ => {}
@@ -287,9 +330,7 @@ impl Interp {
         match stmt {
             Stmt::Bind { name, value } => {
                 let v = self.eval(value, env)?;
-                let mut s = env.write();
-                s.vars.insert(name.clone(), v);
-                s.mutable.insert(name.clone(), false);
+                env.write().define(name, v, false);
                 Ok(Value::Nil)
             }
             Stmt::Assign { name, value } => {
@@ -299,7 +340,8 @@ impl Interp {
             }
             Stmt::ExpBind { name, value } => {
                 let v = self.eval(value, env)?;
-                env.write().vars.insert(name.clone(), v);
+                // exp bind — eksport qilinadigan global; immutable (`=` kabi).
+                env.write().define(name, v, false);
                 Ok(Value::Nil)
             }
             Stmt::FnDecl {
@@ -311,7 +353,7 @@ impl Interp {
                     parent: Scope::parent_link(env),
                     name: name.clone(),
                 }));
-                env.write().vars.insert(name.clone(), f);
+                env.write().define(name, f, false);
                 Ok(Value::Nil)
             }
             Stmt::Ret(opt) => {
@@ -364,15 +406,14 @@ impl Interp {
             // olish (avval write + alohida read — ikki lock har leveldda edi).
             let parent = {
                 let mut s = cur.write();
-                if s.vars.contains_key(name) {
-                    if s.mutable.get(name) == Some(&false) {
+                if let Some((slot, mutable)) = s.get_mut_entry(name) {
+                    if !mutable {
                         return Err(Flow::err(format!(
                             "'{}' o'zgarmas (=) e'lon qilingan, '<-' bilan o'zgartirib bo'lmaydi",
                             name
                         )));
                     }
-                    s.vars.insert(name.to_string(), v);
-                    s.mutable.insert(name.to_string(), true);
+                    *slot = v;
                     return Ok(());
                 }
                 s.parent.clone()
@@ -393,9 +434,7 @@ impl Interp {
             }
         }
         // yangi mutable o'zgaruvchi
-        let mut s = env.write();
-        s.vars.insert(name.to_string(), v);
-        s.mutable.insert(name.to_string(), true);
+        env.write().define(name, v, true);
         Ok(())
     }
 
@@ -422,14 +461,16 @@ impl Interp {
             let loop_env = Scope::child_of(env);
             {
                 let mut s = loop_env.write();
+                // Loop o'zgaruvchilari mutable (tana ichida `<-` mumkin; har
+                // iteratsiyada qayta o'rnatiladi).
                 if vars.len() == 2 {
                     // each k, v in map
                     let k = key.unwrap_or(Value::Nil);
-                    s.vars.insert(vars[0].clone(), k);
-                    s.vars.insert(vars[1].clone(), val);
+                    s.define(&vars[0], k, true);
+                    s.define(&vars[1], val, true);
                 } else {
                     // each x in list  — map ustida bo'lsa, qiymat
-                    s.vars.insert(vars[0].clone(), val);
+                    s.define(&vars[0], val, true);
                 }
             }
             match self.exec_block(body, &loop_env) {
@@ -606,7 +647,7 @@ impl Interp {
                         .cloned()
                         .ok_or_else(|| Flow::err(format!("noma'lum nom: {}", name)));
                 }
-                if let Some(v) = s.vars.get(name) {
+                if let Some(v) = s.get(name) {
                     return Ok(v.clone());
                 }
                 s.parent.clone()
@@ -843,11 +884,16 @@ impl Interp {
                         args.len()
                     )));
                 }
-                let call_env = Scope::child(fv.parent.clone());
+                // Params soni bilan oldindan o'lchamlangan child — bind paytida
+                // Vec qayta-allocate bo'lmaydi. Params mutable: tana ichida `<-`
+                // bilan o'zgartirilishi mumkin (avval ruxsat etilardi).
+                let call_env = Scope::child_with_capacity(fv.parent.clone(), fv.params.len());
                 {
                     let mut s = call_env.write();
                     for (p, a) in fv.params.iter().zip(args) {
-                        s.vars.insert(p.clone(), a);
+                        // define o'rniga to'g'ridan push — params unikal (parser
+                        // takror param'ni bermaydi), dublikat tekshiruv shart emas.
+                        s.vars.push((p.as_str().into(), a, true));
                     }
                 }
                 match self.exec_block(&fv.body, &call_env) {
