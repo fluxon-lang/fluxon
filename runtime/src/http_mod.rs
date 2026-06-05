@@ -128,12 +128,20 @@ fn build_req(
 ) -> Value {
     let body = if body_bytes.is_empty() {
         Value::Nil
-    } else if is_json {
-        let s = String::from_utf8_lossy(&body_bytes);
-        // JSON dekod xato bo'lsa — xom matn sifatida qoldiramiz.
-        json_decode(&s).unwrap_or_else(|_| Value::Str(s.to_string()))
     } else {
-        Value::Str(String::from_utf8_lossy(&body_bytes).to_string())
+        let s = String::from_utf8_lossy(&body_bytes);
+        // Content-Type JSON bo'lsa, YOKI tana `{`/`[` bilan boshlansa — JSON
+        // parse'ga urinamiz. Sabab: `curl -d` standart holda
+        // x-www-form-urlencoded yuboradi, lekin tana ko'rinishidan JSON; agar
+        // Content-Type'ga qat'i bog'lansak, dasturchi sababsiz string oladi va
+        // `body.field` access chalg'ituvchi "str.field metodi" xatosi beradi.
+        let looks_like_json = matches!(s.trim_start().as_bytes().first(), Some(b'{') | Some(b'['));
+        if is_json || looks_like_json {
+            // JSON dekod xato bo'lsa — xom matn sifatida qoldiramiz.
+            json_decode(&s).unwrap_or_else(|_| Value::Str(s.to_string()))
+        } else {
+            Value::Str(s.to_string())
+        }
     };
 
     let mut m = BTreeMap::new();
@@ -455,4 +463,67 @@ fn http_client(method: &str, args: Vec<Value>) -> Result<Value, Flow> {
         m.insert("body".to_string(), resp_body);
         Ok(Value::Map(m))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // build_req'dan body Value'ni ajratib oluvchi yordamchi.
+    fn body_of(bytes: &str, is_json: bool) -> Value {
+        let v = build_req(
+            "POST".into(),
+            "/".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Bytes::from(bytes.to_string()),
+            is_json,
+        );
+        match v {
+            Value::Map(m) => m.get("body").cloned().unwrap(),
+            _ => panic!("build_req Map qaytarishi kerak"),
+        }
+    }
+
+    #[test]
+    fn bosh_tana_nil() {
+        assert!(matches!(body_of("", false), Value::Nil));
+    }
+
+    #[test]
+    fn content_type_json_parse_qiladi() {
+        // Content-Type JSON bo'lsa (eski xulq saqlangan).
+        assert!(matches!(body_of(r#"{"a":1}"#, true), Value::Map(_)));
+    }
+
+    #[test]
+    fn content_type_yoq_lekin_obyekt_korinishida_parse_qiladi() {
+        // Asosiy tuzatish: Content-Type JSON bo'lmasa ham `{` bilan boshlansa parse.
+        assert!(matches!(body_of(r#"{"a":1}"#, false), Value::Map(_)));
+    }
+
+    #[test]
+    fn content_type_yoq_lekin_royxat_korinishida_parse_qiladi() {
+        // `[` bilan boshlangan tana ham JSON deb urinish.
+        assert!(matches!(body_of("[1,2,3]", false), Value::List(_)));
+    }
+
+    #[test]
+    fn boshidagi_boshliq_belgi_eotiborga_olinadi() {
+        // Old whitespace bo'lsa ham `{` aniqlanadi.
+        assert!(matches!(body_of("  \n {\"a\":1}", false), Value::Map(_)));
+    }
+
+    #[test]
+    fn oddiy_matn_string_boladi() {
+        // JSON ko'rinishida bo'lmagan tana string bo'lib qoladi.
+        assert!(matches!(body_of("salom=dunyo", false), Value::Str(_)));
+    }
+
+    #[test]
+    fn buzilgan_json_xom_matn_qoladi() {
+        // `{` bilan boshlanadi, lekin yaroqsiz JSON — string sifatida qoladi.
+        assert!(matches!(body_of("{buzuq", false), Value::Str(_)));
+    }
 }
