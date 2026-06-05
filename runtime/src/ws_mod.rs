@@ -150,7 +150,10 @@ fn text_arg(v: Option<&Value>, ctx: &str) -> Result<String, Flow> {
     match v {
         Some(Value::Str(s)) => Ok(s.clone()),
         Some(other) => Ok(format!("{}", other)),
-        None => Err(Flow::err(format!("{}: yuboriladigan matn (str) kerak", ctx))),
+        None => Err(Flow::err(format!(
+            "{}: yuboriladigan matn (str) kerak",
+            ctx
+        ))),
     }
 }
 
@@ -228,12 +231,7 @@ impl Interp {
     fn ws_room_join(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let id = conn_id(args.first().unwrap_or(&Value::Nil), "ws.room.join")?;
         let room = text_arg(args.get(1), "ws.room.join")?;
-        self.ws
-            .rooms
-            .lock()
-            .entry(room)
-            .or_default()
-            .insert(id);
+        self.ws.rooms.lock().entry(room).or_default().insert(id);
         Ok(Value::Nil)
     }
 
@@ -281,12 +279,7 @@ impl Interp {
         let id = conn_id(args.first().unwrap_or(&Value::Nil), "ws.data.set")?;
         let key = key_str(args.get(1), "ws.data.set")?;
         let val = args.get(2).cloned().unwrap_or(Value::Nil);
-        self.ws
-            .data
-            .lock()
-            .entry(id)
-            .or_default()
-            .insert(key, val);
+        self.ws.data.lock().entry(id).or_default().insert(key, val);
         Ok(Value::Nil)
     }
 

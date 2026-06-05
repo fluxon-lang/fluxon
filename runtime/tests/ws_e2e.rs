@@ -20,8 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 // Berilgan port uchun ws skriptini vaqtinchalik faylga yozib, flux serverini
 // ishga tushiradi. Serverni o'chirish uchun `Child` qaytaradi.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
-    let path =
-        std::env::temp_dir().join(format!("flux_ws_test_{}.fx", port));
+    let path = std::env::temp_dir().join(format!("flux_ws_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
     f.write_all(script.as_bytes()).expect("temp fx yozish");
     drop(f);
@@ -52,8 +51,7 @@ async fn wait_port(port: u16) {
 // Keyingi matn xabarini kutadi (ping/pong/binary'ni o'tkazib yuboradi). Timeout.
 async fn next_text<S>(ws: &mut S) -> String
 where
-    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     let fut = async {
         loop {
@@ -136,25 +134,39 @@ async fn room_broadcast_reaches_other_client() {
     let _ = next_text(&mut b).await;
 
     // Ikkalasi ham "general" xonasiga qo'shiladi.
-    a.send(Message::text(r#"{"t":"join","room":"general","name":"alfa"}"#))
-        .await
-        .unwrap();
+    a.send(Message::text(
+        r#"{"t":"join","room":"general","name":"alfa"}"#,
+    ))
+    .await
+    .unwrap();
     // A o'zining join-broadcast'ini oladi.
     let _ = next_text(&mut a).await;
 
-    b.send(Message::text(r#"{"t":"join","room":"general","name":"beta"}"#))
-        .await
-        .unwrap();
+    b.send(Message::text(
+        r#"{"t":"join","room":"general","name":"beta"}"#,
+    ))
+    .await
+    .unwrap();
     // B qo'shilgach, joined broadcast IKKALA klientga ketadi (online:2).
     let a_join2 = next_text(&mut a).await;
     let b_join2 = next_text(&mut b).await;
-    assert!(a_join2.contains("\"online\":2"), "A online=2 kutdi: {}", a_join2);
-    assert!(b_join2.contains("beta"), "B o'z joinini ko'rdi: {}", b_join2);
+    assert!(
+        a_join2.contains("\"online\":2"),
+        "A online=2 kutdi: {}",
+        a_join2
+    );
+    assert!(
+        b_join2.contains("beta"),
+        "B o'z joinini ko'rdi: {}",
+        b_join2
+    );
 
     // A "say" yuboradi -> B ham, A ham oladi (xonadagi hammaga).
-    a.send(Message::text(r#"{"t":"say","room":"general","body":"salom"}"#))
-        .await
-        .unwrap();
+    a.send(Message::text(
+        r#"{"t":"say","room":"general","body":"salom"}"#,
+    ))
+    .await
+    .unwrap();
     let b_msg = next_text(&mut b).await;
     assert!(b_msg.contains("\"msg\""), "B msg kutdi: {}", b_msg);
     assert!(b_msg.contains("salom"), "B body 'salom' kutdi: {}", b_msg);
