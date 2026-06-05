@@ -591,6 +591,25 @@ impl Interp {
                 }
             }
             Expr::Field { target, name } => {
+                // `env.PORT` — muhit o'zgaruvchisi. `env` built-in ident bo'lib,
+                // o'zgaruvchi sifatida e'lon QILINMAGAN bo'lsa, std::env'dan o'qiymiz.
+                // Foydalanuvchi `env` nomli o'zgaruvchi yaratsa, u ustun bo'ladi.
+                if let Expr::Ident(id) = target.as_ref() {
+                    if id == "env" && self.lookup(id, env).is_err() {
+                        return Ok(match std::env::var(name) {
+                            Ok(v) => Value::Str(v),
+                            Err(_) => Value::Nil, // yo'q bo'lsa nil -> `?? "default"`
+                        });
+                    }
+                    // Argument'siz modul funksiyasi: `time.now` Call emas, Field
+                    // bo'lib keladi. Modul nomi o'zgaruvchi sifatida e'lon
+                    // qilinmagan bo'lsa, argument'siz modul funksiyasi sifatida
+                    // chaqiramiz. (str/math/rand argument talab qiladi; time.now —
+                    // yagona argumentsizi, lekin umumiy tutamiz.)
+                    if crate::builtins::is_module(id) && self.lookup(id, env).is_err() {
+                        return crate::builtins::call_module(id, name, vec![]);
+                    }
+                }
                 let t = self.eval(target, env)?;
                 self.get_field(&t, name, env)
             }

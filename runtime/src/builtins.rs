@@ -64,7 +64,7 @@ pub fn install(env: &Env) {
 
 // --- modul nomimi? ---
 pub fn is_module(name: &str) -> bool {
-    matches!(name, "str" | "math" | "rand" | "json")
+    matches!(name, "str" | "math" | "rand" | "json" | "time")
 }
 
 // --- modul funksiyasi chaqiruvi ---
@@ -74,6 +74,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "math" => math_module(func, args),
         "rand" => rand_module(func, args),
         "json" => json_module(func, args),
+        "time" => time_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }
@@ -178,6 +179,137 @@ fn rand_module(func: &str, args: Vec<Value>) -> R {
             func
         ))),
     }
+}
+
+// ---------------- time ----------------
+// Barcha vaqtlar UTC matn "YYYY-MM-DD HH:MM:SS" formatida — SQLite
+// CURRENT_TIMESTAMP (tbl `now` ustuni) bilan AYNAN bir xil, shuning uchun
+// `created > (time.ago 24 :hr)` kabi DB filtrlari to'g'ridan-to'g'ri ishlaydi.
+fn time_module(func: &str, args: Vec<Value>) -> R {
+    match func {
+        // hozirgi vaqt -> UTC matn timestamp
+        "now" => Ok(Value::Str(fmt_unix(now_unix()))),
+        // time.ago N :birlik -> hozirdan N birlik oldingi UTC matn
+        "ago" => {
+            let n = arg_int(&args, 0, "time.ago")?;
+            let unit = arg_str(&args, 1, "time.ago")?;
+            let secs = unit_secs(&unit).ok_or_else(|| {
+                Flow::err(format!(
+                    "time.ago: birlik :sec/:min/:hr/:day bo'lishi kerak, :{} berildi",
+                    unit
+                ))
+            })?;
+            Ok(Value::Str(fmt_unix(now_unix() - n * secs)))
+        }
+        // time.fmt timestamp "..." -> matn formatlash.
+        // Kirish: matn timestamp ("YYYY-MM-DD HH:MM:SS") yoki unix int.
+        // Token'lar: YYYY MM DD HH mm ss
+        "fmt" => {
+            let ts = match arg(&args, 0, "time.fmt")? {
+                Value::Str(s) => parse_ts(s).ok_or_else(|| {
+                    Flow::err(format!("time.fmt: timestamp matnini o'qib bo'lmadi: {}", s))
+                })?,
+                Value::Int(n) => *n,
+                other => {
+                    return Err(Flow::err(format!(
+                        "time.fmt: 1-argument timestamp (str/int) bo'lishi kerak, {} berildi",
+                        other.type_name()
+                    )));
+                }
+            };
+            let pat = arg_str(&args, 1, "time.fmt")?;
+            Ok(Value::Str(strftime(ts, &pat)))
+        }
+        _ => Err(Flow::err(format!(
+            "time modulida '{}' funksiyasi yo'q",
+            func
+        ))),
+    }
+}
+
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn unit_secs(unit: &str) -> Option<i64> {
+    match unit {
+        "sec" => Some(1),
+        "min" => Some(60),
+        "hr" => Some(3600),
+        "day" => Some(86_400),
+        _ => None,
+    }
+}
+
+// unix sekund -> (year, month, day, hour, min, sec) UTC.
+// civil_from_days: Howard Hinnant algoritmi (dependency'siz, doimiy vaqt).
+fn civil(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = unix.div_euclid(86_400);
+    let secs_of_day = unix.rem_euclid(86_400);
+    let (hh, mm, ss) = (
+        (secs_of_day / 3600) as u32,
+        ((secs_of_day % 3600) / 60) as u32,
+        (secs_of_day % 60) as u32,
+    );
+    // days: 1970-01-01 dan boshlab. Hinnant: era'ni mart'dan boshlaydi.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11] (mart=0)
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d, hh, mm, ss)
+}
+
+fn fmt_unix(unix: i64) -> String {
+    let (y, mo, d, h, mi, s) = civil(unix);
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, h, mi, s)
+}
+
+// "YYYY-MM-DD HH:MM:SS" (yoki "YYYY-MM-DDTHH:MM:SS") -> unix sekund (UTC).
+fn parse_ts(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let b = s.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse::<i64>().ok() };
+    let y = num(0, 4)?;
+    let mo = num(5, 7)?;
+    let d = num(8, 10)?;
+    let h = num(11, 13)?;
+    let mi = num(14, 16)?;
+    let se = num(17, 19)?;
+    Some(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se)
+}
+
+// (year, month, day) UTC -> 1970-01-01 dan kunlar (Hinnant teskari).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // mart=0
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn strftime(unix: i64, pat: &str) -> String {
+    let (y, mo, d, h, mi, s) = civil(unix);
+    pat.replace("YYYY", &format!("{:04}", y))
+        .replace("MM", &format!("{:02}", mo))
+        .replace("DD", &format!("{:02}", d))
+        .replace("HH", &format!("{:02}", h))
+        .replace("mm", &format!("{:02}", mi))
+        .replace("ss", &format!("{:02}", s))
 }
 
 // Oddiy xorshift RNG. Seed system time'dan bir marta olinadi.
@@ -549,5 +681,42 @@ fn arg_num(args: &[Value], i: usize, who: &str) -> Result<f64, Flow> {
             i + 1,
             other.type_name()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+
+    // Ma'lum unix nuqtalar (UTC) — chrono'siz civil algoritmini tekshiramiz.
+    #[test]
+    fn civil_known_points() {
+        assert_eq!(fmt_unix(0), "1970-01-01 00:00:00"); // epoch
+        assert_eq!(fmt_unix(1_700_000_000), "2023-11-14 22:13:20");
+        // 2024-02-29 (kabisa yili) — 12:00:00 UTC
+        assert_eq!(fmt_unix(1_709_208_000), "2024-02-29 12:00:00");
+    }
+
+    #[test]
+    fn parse_then_fmt_roundtrip() {
+        for &u in &[0i64, 1_700_000_000, 1_709_208_000, 4_102_444_800] {
+            let s = fmt_unix(u);
+            assert_eq!(parse_ts(&s), Some(u), "round-trip buzildi: {}", s);
+        }
+        // 'T' ajratuvchi ham qo'llab-quvvatlanadi (ISO).
+        assert_eq!(parse_ts("2023-11-14T22:13:20"), Some(1_700_000_000));
+    }
+
+    #[test]
+    fn ago_subtracts_units() {
+        let now = now_unix();
+        // 24 soat = 1 kun: ikki yo'l bir xil natija (matn).
+        assert_eq!(fmt_unix(now - 24 * 3600), fmt_unix(now - 86_400));
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert_eq!(parse_ts("salom"), None);
+        assert_eq!(parse_ts("2023-11-14"), None); // juda qisqa (vaqt yo'q)
     }
 }

@@ -143,6 +143,62 @@ log "parts=${parts} joined=${parts.join "-"}"
     }
 
     #[test]
+    fn time_module_fmt_and_roundtrip() {
+        // time.fmt unix int bilan deterministik: 1700000000 = 2023-11-14 22:13:20 UTC.
+        // time.now/time.ago matn formatini ("YYYY-MM-DD HH:MM:SS") tekshiramiz va
+        // fmt orqali round-trip qilamiz.
+        run(r#"
+d = time.fmt 1700000000 "YYYY-MM-DD"
+(d == "2023-11-14") | (fail "fmt sana noto'g'ri: ${d}")
+t = time.fmt 1700000000 "HH:mm:ss"
+(t == "22:13:20") | (fail "fmt vaqt noto'g'ri: ${t}")
+n = time.now
+(str.len n == 19) | (fail "time.now uzunligi 19 emas: ${n}")
+back = time.fmt n "YYYY"
+(str.len back == 4) | (fail "time.now -> fmt yil 4 raqam emas")
+"#);
+    }
+
+    #[test]
+    fn time_ago_is_earlier() {
+        // time.ago hozirdan oldin: ISO matn format leksikografik = xronologik,
+        // shuning uchun DB filtri (`created > $1`) SQL'da to'g'ri ishlaydi. Bu
+        // yerda yil/oy/kun bo'laklarini taqqoslab xronologik tartibni isbotlaymiz.
+        run(r#"
+now = time.now
+past = time.ago 1 :day
+ny = str.int (time.fmt now "YYYYMMDDHHmmss")
+py = str.int (time.fmt past "YYYYMMDDHHmmss")
+(py < ny) | (fail "time.ago kelajakda: past=${past} now=${now}")
+"#);
+    }
+
+    #[test]
+    fn env_member_access() {
+        // env.NOM -> std::env. Yo'q bo'lsa nil -> `??` default. Bor bo'lsa qiymat.
+        // FLUX_TEST_VAR'ni o'rnatib o'qiymiz (DB_TEST_LOCK kerak emas — boshqa env).
+        unsafe { std::env::set_var("FLUX_TEST_VAR", "salom") };
+        run(r#"
+v = env.FLUX_TEST_VAR
+(v == "salom") | (fail "env o'qish: ${v}")
+miss = env.FLUX_NONEXISTENT_XYZ ?? "default"
+(miss == "default") | (fail "yo'q env nil -> default emas: ${miss}")
+"#);
+        unsafe { std::env::remove_var("FLUX_TEST_VAR") };
+    }
+
+    #[test]
+    fn env_shadowed_by_local() {
+        // Foydalanuvchi `env` nomli o'zgaruvchi yaratsa, u built-in env'ni ustun
+        // bosadi (member access map'ga ishlaydi, std::env'ga emas).
+        run(r#"
+env = {PORT:"9999"}
+p = env.PORT
+(p == "9999") | (fail "local env shadow ishlamadi: ${p}")
+"#);
+    }
+
+    #[test]
     fn fail_as_expr_and_guard() {
         // fail ifoda kontekstida (guard) — oqimni uzadi, yuqoriga ko'tariladi.
         let err = run_source(
