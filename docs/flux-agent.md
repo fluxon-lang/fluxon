@@ -234,14 +234,12 @@ cron.on 30 9 * * 1-5 \-> report    # ish kunlari 09:30
 `ws.serve`) bo'lsa cron fonda ishlaydi; server yo'q skriptda `cron.run` processni ushlaydi.
 
 ### queue (fon)
-Webhook tez javob bersin: og'ir ishni fonga uzating. `push`/`on` bloklamaydi;
-worker fon thread'i navbatni FIFO (ketma-ket) bajaradi. handler bitta `job`
-argumenti oladi (push'dagi payload map). push handler'dan oldin yozilsa, ish
-navbatda kutadi.
+Og'ir ishni fonga uzat — `push`/`on` bloklamaydi, worker FIFO bajaradi:
 ```flux
-queue.on "send" \job -> tools.send job.ph job.body   # ishlovchi (avval)
-queue.push "send" {ph:p body:t}                       # navbatga (payload ixtiyoriy)
+queue.on "send" \job -> tools.send job.ph job.body   # job = push payload
+queue.push "send" {ph:p body:t}                       # payload ixtiyoriy
 ```
+push handler'dan oldin yozilsa ish navbatda kutadi.
 
 ### ws (websocket — realtime)
 ```flux
