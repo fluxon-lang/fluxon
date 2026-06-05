@@ -234,13 +234,14 @@ queue.on "send" \job -> tools.send job.ph job.body
 
 ### ws (websocket — realtime)
 ```flux
-ws.on :connect \conn -> conn.data.user = nil   # conn.id barqaror; conn.data = sessiya
-ws.on :message \conn msg ->
+ws.on :connect \conn -> ws.data.set conn :user nil   # conn.id barqaror; ws.data = sessiya
+ws.on :message \conn msg ->                    # msg — kelgan MATN (str)
   m = json.dec msg
-  ws.send conn (json.enc {ok:true})            # shu ulanishga
+  ws.send conn (json.enc {ok:true})            # shu ulanishga (matn yuboriladi)
 ws.on :disconnect \conn -> ws.room.leave conn "ch:5"
 ws.serve 9000
 ```
+Sessiya: `ws.data.set conn :kalit qiymat` · `ws.data.get conn :kalit` (shu ulanish, uzilgach tozalanadi).
 Xona (broadcast): `ws.room.join conn "ch:5"` · `ws.room.leave conn "ch:5"` ·
 `ws.room.send "ch:5" msg` (hammaga) · `ws.room.members "ch:5"` (presence).
 `http.serve` va `ws.serve` birga ishlaydi.
