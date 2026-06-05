@@ -11,6 +11,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod ast;
 mod builtins;
+mod cron_mod;
 mod db_mod;
 mod http_mod;
 mod interp;
@@ -468,5 +469,54 @@ db.tx \->
                 err
             );
         });
+    }
+
+    // --- cron battery ---
+
+    #[test]
+    fn cron_on_registratsiya_xatosiz() {
+        // Tirnoqsiz 5-maydon (nomli funksiya). cron.on bloklamaydi, dastur tugaydi.
+        run(r#"
+fn check
+  log "tekshiruv"
+cron.on 0 * * * * check
+"#);
+    }
+
+    #[test]
+    fn cron_on_lambda_va_murakkab_ifoda() {
+        // Inline lambda + step/range/list aralash ifoda.
+        run(r#"
+cron.on */15 9 1,15 * 1-5 \->
+  log "har 15 daqiqa, 9-soat, 1 va 15-kun, ish kunlari"
+"#);
+    }
+
+    #[test]
+    fn cron_on_tirnoqli_variant() {
+        // Tirnoqli str ham ishlaydi (inson uchun; AI docs'da yo'q).
+        run(r#"
+fn report
+  log "hisobot"
+cron.on "30 9 * * *" report
+"#);
+    }
+
+    #[test]
+    fn cron_on_notogri_ifoda_xato() {
+        // 99-daqiqa yo'q — cron.on xato qaytarishi kerak.
+        let err = run_source(
+            r#"
+fn f
+  log "x"
+cron.on 99 * * * * f
+"#,
+        )
+        .expect_err("noto'g'ri cron ifoda xato berishi kerak");
+        assert!(
+            err.contains("cron") && err.to_lowercase().contains("ifoda"),
+            "kutilgan cron ifoda xatosi, topildi: {}",
+            err
+        );
     }
 }
