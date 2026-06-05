@@ -51,10 +51,17 @@ http.serve 8080
 - Klient: `http.get url`, `http.post url body` (body map -> JSON). Natija
   `{status, body}`; javob JSON bo'lsa `body` dekod qilinadi.
 
-**Parallellik:** server tokio + hyper ustida, har request `spawn_blocking`'da
-alohida bajariladi (haqiqiy parallel). Runtime thread-safe (`Arc`/`RwLock`),
-global scope `http.serve` paytida lock-free snapshot'ga muzlatiladi. Misol:
-`examples/server.fx` (`curl localhost:8080/health` bilan sinaladi).
+**Parallellik va global state:** server tokio + hyper ustida, har request
+`spawn_blocking`'da alohida bajariladi (haqiqiy parallel). Runtime thread-safe
+(`Arc`/`RwLock`), global scope `http.serve` paytida lock-free snapshot'ga
+muzlatiladi. Handler'lar global funksiyalar va immutable qiymatlarni snapshot'dan
+o'qiydi. Handler ichida global mutable binding'ni `<-` bilan o'zgartirish
+qo'llab-quvvatlanmaydi: runtime aniq xato beradi va `counter <- counter + 1`
+kabi read-modify-write patternlarda RHS alohida o'qilib, yozish bilan race
+qilishiga yo'l qo'ymaydi. Shared state uchun keyingi batteries (`db`, `queue`)
+yoki kelajakdagi maxsus state primitive ishlatilishi kerak; handler ichidagi
+local `<-` esa request-local bo'lib qoladi. Misol: `examples/server.fx`
+(`curl localhost:8080/health` bilan sinaladi).
 
 ## Arxitektura
 

@@ -142,7 +142,9 @@ impl Interp {
                     closure: self.global.clone(),
                     name: name.clone(),
                 }));
-                self.global.write().vars.insert(name.clone(), f);
+                let mut g = self.global.write();
+                g.vars.insert(name.clone(), f);
+                g.mutable.insert(name.clone(), false);
             }
         }
         for stmt in prog {
@@ -185,6 +187,14 @@ impl Interp {
                 Ok(Value::Nil)
             }
             Stmt::Assign { name, value } => {
+                // HTTP server ishga tushgandan keyin handler'lar global snapshot
+                // ustida parallel ishlaydi. Global mutable assignment'ni RHS
+                // eval'idan oldin rad etamiz: `counter <- counter + 1` kabi
+                // read-modify-write patternlar snapshot'dan eski qiymat o'qib,
+                // keyin global'ga yozib race qilmasin.
+                if let Some(err) = self.global_mutable_after_freeze_error(name, env) {
+                    return Err(err);
+                }
                 let v = self.eval(value, env)?;
                 self.assign(name, v, env)?;
                 Ok(Value::Nil)
@@ -203,7 +213,9 @@ impl Interp {
                     closure: env.clone(),
                     name: name.clone(),
                 }));
-                env.write().vars.insert(name.clone(), f);
+                let mut s = env.write();
+                s.vars.insert(name.clone(), f);
+                s.mutable.insert(name.clone(), false);
                 Ok(Value::Nil)
             }
             Stmt::Ret(opt) => {
@@ -242,9 +254,56 @@ impl Interp {
         }
     }
 
+    // `http.serve` global scope'ni muzlatgandan keyin root'dagi mutable
+    // binding'ni handler ichida `<-` bilan o'zgartirish xavfsiz emas: RHS alohida
+    // snapshot'dan o'qilishi, yozish esa haqiqiy root'ga ketishi mumkin. Shuning
+    // uchun bunday assignment'ni RHS eval'idan oldin aniq runtime xato qilamiz.
+    fn global_mutable_after_freeze_error(&self, name: &str, env: &Env) -> Option<Flow> {
+        self.globals_frozen.get()?;
+
+        let mut cur = env.clone();
+        loop {
+            let (is_root, has_name, is_mutable, parent) = {
+                let s = cur.read();
+                (
+                    s.is_root,
+                    s.vars.contains_key(name),
+                    s.mutable.get(name) == Some(&true),
+                    s.parent.clone(),
+                )
+            };
+
+            if has_name {
+                if is_root && is_mutable {
+                    return Some(Flow::err(format!(
+                        "global mutable '{}' HTTP handler ichida '<-' bilan o'zgartirib bo'lmaydi: request'lar parallel ishlaydi va read-modify-write atomik kafolatlanmaydi; shared state uchun keyingi battery (`db`, `queue`) yoki maxsus state primitive'dan foydalaning",
+                        name
+                    )));
+                }
+                // Lokal shadow yoki immutable/global-immutable assignment odatiy
+                // assign oqimida tekshiriladi; bu helper faqat frozen global
+                // mutable holatini RHS'dan oldin ushlaydi.
+                return None;
+            }
+
+            if is_root {
+                return None;
+            }
+
+            match parent {
+                Some(p) => cur = p,
+                None => return None,
+            }
+        }
+    }
+
     // `<-` qayta tayinlash: o'zgaruvchini scope zanjirida topib yangilaydi.
     // Topilmasa — joriy scope'da mutable sifatida yaratadi.
     fn assign(&self, name: &str, v: Value, env: &Env) -> Result<(), Flow> {
+        if let Some(err) = self.global_mutable_after_freeze_error(name, env) {
+            return Err(err);
+        }
+
         let mut cur = env.clone();
         loop {
             {
@@ -810,4 +869,46 @@ fn flt_arith(op: BinOp, a: f64, b: f64) -> EvalResult {
         BinOp::Ge => Bool(a >= b),
         _ => return Err(Flow::err("ichki: kutilmagan flt operatori")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_handler_global_mutable_rejected_before_rhs_eval() {
+        let src = r#"
+counter <- 0
+fn handler req
+  counter <- (fail "rhs evaluated")
+  ret counter
+"#;
+        let toks = crate::lexer::lex(src).unwrap();
+        let prog = crate::parser::parse(toks).unwrap();
+        let interp = Interp::new_arc();
+        interp.run(&prog).unwrap();
+
+        // `http.serve` does this before serving requests. Calling the handler
+        // directly after freezing exercises the same interpreter path without
+        // binding a real TCP port in the test.
+        interp.freeze_globals();
+        let handler = {
+            let global = interp.global.read();
+            global.vars.get("handler").cloned().unwrap()
+        };
+
+        match interp.apply(handler, vec![Value::Nil]) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("global mutable 'counter'"), "xato: {e}");
+                assert!(e.contains("db"), "xato: {e}");
+                assert!(e.contains("queue"), "xato: {e}");
+                assert!(
+                    !e.contains("rhs evaluated"),
+                    "RHS baholanmasligi kerak: {e}"
+                );
+            }
+            Err(_) => panic!("global mutable assignment oddiy Error bo'lishi kerak"),
+            Ok(_) => panic!("global mutable assignment xato berishi kerak"),
+        }
+    }
 }
