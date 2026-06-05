@@ -4,38 +4,47 @@
 // orqali tarqatiladi: oddiy qiymatlar `Ok`, oqim-uzilishlari esa `Flow`.
 // Bu `?` operatori bilan tabiiy yuqoriga ko'tariladi.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+use parking_lot::RwLock;
 
 use crate::ast::*;
 use crate::value::{FnValue, Value};
 
-// Lexical scope: ota-muhitga havola bilan zanjir. Rc<RefCell<>> — closure'lar
-// va mutatsiya uchun.
-pub type Env = Rc<RefCell<Scope>>;
+// Lexical scope: ota-muhitga havola bilan zanjir. Arc<RwLock<>> — closure'lar,
+// mutatsiya VA thread'lar orasida ulashish uchun (haqiqiy parallel HTTP).
+// RwLock (Mutex emas): qidirish/o'qish ko'p o'quvchiga parallel ruxsat beradi,
+// shunda parallel request'lar global scope'dagi funksiyalarni (masalan rekursiv
+// `fib`) bir-birini bloklamasdan o'qiydi. Yozish (`<-`, bind) eksklyuziv.
+pub type Env = Arc<RwLock<Scope>>;
 
 pub struct Scope {
     vars: HashMap<String, Value>,
     // mutable (`<-`) sifatida e'lon qilingan nomlar — qayta tayinlashga ruxsat.
     mutable: HashMap<String, bool>,
     parent: Option<Env>,
+    // Bu scope root (global)mi? lookup root'ga yetganda, agar Interp global'ni
+    // muzlatgan bo'lsa, lock-free snapshot'dan o'qiydi (parallel contention yo'q).
+    is_root: bool,
 }
 
 impl Scope {
     pub fn root() -> Env {
-        Rc::new(RefCell::new(Scope {
+        Arc::new(RwLock::new(Scope {
             vars: HashMap::new(),
             mutable: HashMap::new(),
             parent: None,
+            is_root: true,
         }))
     }
     fn child(parent: &Env) -> Env {
-        Rc::new(RefCell::new(Scope {
+        Arc::new(RwLock::new(Scope {
             vars: HashMap::new(),
             mutable: HashMap::new(),
             parent: Some(parent.clone()),
+            is_root: false,
         }))
     }
     // Builtins o'rnatish uchun: global nomga immutable qiymat qo'yadi.
@@ -51,7 +60,10 @@ pub enum Flow {
     Skip,
     Stop,
     // fail [status] message — biznes yoki ichki xato.
-    Fail { status: Option<i64>, message: String },
+    Fail {
+        status: Option<i64>,
+        message: String,
+    },
     // Oddiy runtime xato (tip mosligi, noma'lum o'zgaruvchi, ...).
     Error(String),
 }
@@ -67,27 +79,70 @@ type ExecResult = Result<Value, Flow>; // blok oxirgi ifoda qiymatini qaytaradi
 
 pub struct Interp {
     pub global: Env,
+    // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi,
+    // `http.serve` o'qiydi. Arc<Mutex> — server thread'lari bilan ulashiladi.
+    pub routes: Arc<Mutex<Vec<crate::http_mod::Route>>>,
+    // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
+    // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
+    // qayta tiklaydi. `new_arc` o'rnatadi.
+    this: OnceLock<Weak<Interp>>,
+    // Muzlatilgan global snapshot. `http.serve` chaqirilganda o'rnatiladi —
+    // shundan keyin top-level kod tugagan, global o'zgarmaydi. `lookup` root'ga
+    // yetganda LOCK-FREE shundan o'qiydi (Arc orqali ulashilgan, read lock yo'q),
+    // shuning uchun parallel request'lar global qidiruvda bir-birini bloklamaydi.
+    globals_frozen: OnceLock<Arc<HashMap<String, Value>>>,
 }
 
 impl Interp {
     pub fn new() -> Self {
         let global = Scope::root();
         crate::builtins::install(&global);
-        Interp { global }
+        Interp {
+            global,
+            routes: Arc::new(Mutex::new(Vec::new())),
+            this: OnceLock::new(),
+            globals_frozen: OnceLock::new(),
+        }
     }
 
-    pub fn run(&mut self, prog: &Program) -> Result<(), String> {
+    // Global scope'ni lock-free snapshot'ga muzlatadi. `http.serve` server'ni
+    // ishga tushirishdan oldin chaqiradi. Bir marta — keyin global o'qish
+    // lock'siz bo'ladi. (Top-level kod tugagan, mutatsiya kutilmaydi.)
+    pub fn freeze_globals(&self) {
+        let snap = self.global.read().vars.clone();
+        let _ = self.globals_frozen.set(Arc::new(snap));
+    }
+
+    // Interp'ni Arc'ga o'rab, o'ziga zaif havolani o'rnatadi.
+    pub fn new_arc() -> Arc<Self> {
+        let arc = Arc::new(Self::new());
+        let _ = arc.this.set(Arc::downgrade(&arc));
+        arc
+    }
+
+    // `&self` dan `Arc<Interp>` ni qayta tiklaydi (http.serve uchun).
+    pub fn arc_self(&self) -> Arc<Interp> {
+        self.this
+            .get()
+            .and_then(|w| w.upgrade())
+            .expect("Interp Arc orqali yaratilishi kerak (new_arc)")
+    }
+
+    pub fn run(&self, prog: &Program) -> Result<(), String> {
         // Birinchi o'tish: top-level fn/tbl e'lonlarini oldindan ro'yxatga olamiz
         // (hoisting), shunda tartibdan qat'i nazar bir-birini chaqira oladi.
         for stmt in prog {
-            if let Stmt::FnDecl { name, params, body, .. } = stmt {
-                let f = Value::Fn(Rc::new(FnValue {
+            if let Stmt::FnDecl {
+                name, params, body, ..
+            } = stmt
+            {
+                let f = Value::Fn(Arc::new(FnValue {
                     params: params.clone(),
                     body: body.clone(),
                     closure: self.global.clone(),
                     name: name.clone(),
                 }));
-                self.global.borrow_mut().vars.insert(name.clone(), f);
+                self.global.write().vars.insert(name.clone(), f);
             }
         }
         for stmt in prog {
@@ -104,7 +159,7 @@ impl Interp {
                 }
                 Err(Flow::Return(_)) => {} // top-level ret — e'tiborsiz
                 Err(Flow::Skip) | Err(Flow::Stop) => {
-                    return Err("skip/stop loop tashqarisida ishlatildi".into())
+                    return Err("skip/stop loop tashqarisida ishlatildi".into());
                 }
             }
         }
@@ -124,7 +179,7 @@ impl Interp {
         match stmt {
             Stmt::Bind { name, value } => {
                 let v = self.eval(value, env)?;
-                let mut s = env.borrow_mut();
+                let mut s = env.write();
                 s.vars.insert(name.clone(), v);
                 s.mutable.insert(name.clone(), false);
                 Ok(Value::Nil)
@@ -136,17 +191,19 @@ impl Interp {
             }
             Stmt::ExpBind { name, value } => {
                 let v = self.eval(value, env)?;
-                env.borrow_mut().vars.insert(name.clone(), v);
+                env.write().vars.insert(name.clone(), v);
                 Ok(Value::Nil)
             }
-            Stmt::FnDecl { name, params, body, .. } => {
-                let f = Value::Fn(Rc::new(FnValue {
+            Stmt::FnDecl {
+                name, params, body, ..
+            } => {
+                let f = Value::Fn(Arc::new(FnValue {
                     params: params.clone(),
                     body: body.clone(),
                     closure: env.clone(),
                     name: name.clone(),
                 }));
-                env.borrow_mut().vars.insert(name.clone(), f);
+                env.write().vars.insert(name.clone(), f);
                 Ok(Value::Nil)
             }
             Stmt::Ret(opt) => {
@@ -166,13 +223,16 @@ impl Interp {
                             return Err(Flow::err(format!(
                                 "fail status int bo'lishi kerak, {} berildi",
                                 other.type_name()
-                            )))
+                            )));
                         }
                     },
                     None => None,
                 };
                 let msg = self.eval(message, env)?;
-                Err(Flow::Fail { status: st, message: format!("{}", msg) })
+                Err(Flow::Fail {
+                    status: st,
+                    message: format!("{}", msg),
+                })
             }
             Stmt::Each { vars, iter, body } => self.exec_each(vars, iter, body, env),
             Stmt::Expr(e) => self.eval(e, env),
@@ -188,7 +248,7 @@ impl Interp {
         let mut cur = env.clone();
         loop {
             {
-                let mut s = cur.borrow_mut();
+                let mut s = cur.write();
                 if s.vars.contains_key(name) {
                     if s.mutable.get(name) == Some(&false) {
                         return Err(Flow::err(format!(
@@ -201,14 +261,14 @@ impl Interp {
                     return Ok(());
                 }
             }
-            let parent = cur.borrow().parent.clone();
+            let parent = cur.read().parent.clone();
             match parent {
                 Some(p) => cur = p,
                 None => break,
             }
         }
         // yangi mutable o'zgaruvchi
-        let mut s = env.borrow_mut();
+        let mut s = env.write();
         s.vars.insert(name.to_string(), v);
         s.mutable.insert(name.to_string(), true);
         Ok(())
@@ -230,13 +290,13 @@ impl Interp {
                 return Err(Flow::err(format!(
                     "each faqat list/map/range/str ustidan yuradi, {} berildi",
                     other.type_name()
-                )))
+                )));
             }
         };
         for (key, val) in items {
             let loop_env = Scope::child(env);
             {
-                let mut s = loop_env.borrow_mut();
+                let mut s = loop_env.write();
                 if vars.len() == 2 {
                     // each k, v in map
                     let k = key.unwrap_or(Value::Nil);
@@ -363,7 +423,7 @@ impl Interp {
                 let k = self.eval(key, env)?;
                 self.get_index(&t, &k)
             }
-            Expr::Lambda { params, body } => Ok(Value::Fn(Rc::new(FnValue {
+            Expr::Lambda { params, body } => Ok(Value::Fn(Arc::new(FnValue {
                 params: params.clone(),
                 body: body.clone(),
                 closure: env.clone(),
@@ -386,13 +446,16 @@ impl Interp {
                             return Err(Flow::err(format!(
                                 "fail status int bo'lishi kerak, {} berildi",
                                 other.type_name()
-                            )))
+                            )));
                         }
                     },
                     None => None,
                 };
                 let msg = self.eval(message, env)?;
-                Err(Flow::Fail { status: st, message: format!("{}", msg) })
+                Err(Flow::Fail {
+                    status: st,
+                    message: format!("{}", msg),
+                })
             }
         }
     }
@@ -400,10 +463,23 @@ impl Interp {
     fn lookup(&self, name: &str, env: &Env) -> EvalResult {
         let mut cur = env.clone();
         loop {
-            if let Some(v) = cur.borrow().vars.get(name) {
-                return Ok(v.clone());
+            // root scope'ga yetdik va global muzlatilgan bo'lsa — LOCK-FREE
+            // o'qiymiz (Arc snapshot). Parallel request'lar bu yerda urilmaydi.
+            {
+                let s = cur.read();
+                if s.is_root
+                    && let Some(frozen) = self.globals_frozen.get()
+                {
+                    return frozen
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| Flow::err(format!("noma'lum nom: {}", name)));
+                }
+                if let Some(v) = s.vars.get(name) {
+                    return Ok(v.clone());
+                }
             }
-            let parent = cur.borrow().parent.clone();
+            let parent = cur.read().parent.clone();
             match parent {
                 Some(p) => cur = p,
                 None => return Err(Flow::err(format!("noma'lum nom: {}", name))),
@@ -513,6 +589,12 @@ impl Interp {
             // module.func (str.up, math.floor, ...) — `str` o'zgaruvchi emas,
             // shuning uchun target'ni baholashdan OLDIN modulni tekshiramiz.
             if let Expr::Ident(modname) = target.as_ref() {
+                // http — state'li va Interp'ga (handler apply uchun) muhtoj,
+                // shuning uchun call_module emas, http_dispatch'ga yo'naltiramiz.
+                if modname == "http" {
+                    let argv = self.eval_args(args, env)?;
+                    return self.arc_self().http_dispatch(name, argv);
+                }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;
                     return crate::builtins::call_module(modname, name, argv);
@@ -521,12 +603,12 @@ impl Interp {
             let recv = self.eval(target, env)?;
             // Avval haqiqiy map maydoni funksiya bo'lsa (masalan map ichidagi
             // lambda) — uni chaqiramiz; aks holda builtin metod.
-            if let Value::Map(m) = &recv {
-                if let Some(v @ (Value::Fn(_) | Value::Native(_))) = m.get(name) {
-                    let f = v.clone();
-                    let argv = self.eval_args(args, env)?;
-                    return self.apply(f, argv);
-                }
+            if let Value::Map(m) = &recv
+                && let Some(v @ (Value::Fn(_) | Value::Native(_))) = m.get(name)
+            {
+                let f = v.clone();
+                let argv = self.eval_args(args, env)?;
+                return self.apply(f, argv);
             }
             let argv = self.eval_args(args, env)?;
             // Yuqori tartibli list metodlari (lambda chaqiradi) — bu yerda,
@@ -550,9 +632,10 @@ impl Interp {
     fn list_hof(&self, xs: &[Value], method: &str, args: Vec<Value>) -> EvalResult {
         match method {
             "filter" => {
-                let f = args.into_iter().next().ok_or_else(|| {
-                    Flow::err("list.filter: funksiya argumenti kerak")
-                })?;
+                let f = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Flow::err("list.filter: funksiya argumenti kerak"))?;
                 let mut out = Vec::new();
                 for x in xs {
                     if self.apply(f.clone(), vec![x.clone()])?.truthy() {
@@ -562,9 +645,10 @@ impl Interp {
                 Ok(Value::List(out))
             }
             "map" => {
-                let f = args.into_iter().next().ok_or_else(|| {
-                    Flow::err("list.map: funksiya argumenti kerak")
-                })?;
+                let f = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Flow::err("list.map: funksiya argumenti kerak"))?;
                 let mut out = Vec::with_capacity(xs.len());
                 for x in xs {
                     out.push(self.apply(f.clone(), vec![x.clone()])?);
@@ -573,12 +657,12 @@ impl Interp {
             }
             "reduce" => {
                 let mut it = args.into_iter();
-                let mut acc = it.next().ok_or_else(|| {
-                    Flow::err("list.reduce: boshlang'ich qiymat kerak")
-                })?;
-                let f = it.next().ok_or_else(|| {
-                    Flow::err("list.reduce: funksiya argumenti kerak")
-                })?;
+                let mut acc = it
+                    .next()
+                    .ok_or_else(|| Flow::err("list.reduce: boshlang'ich qiymat kerak"))?;
+                let f = it
+                    .next()
+                    .ok_or_else(|| Flow::err("list.reduce: funksiya argumenti kerak"))?;
                 for x in xs {
                     acc = self.apply(f.clone(), vec![acc, x.clone()])?;
                 }
@@ -610,15 +694,15 @@ impl Interp {
                 }
                 let call_env = Scope::child(&fv.closure);
                 {
-                    let mut s = call_env.borrow_mut();
+                    let mut s = call_env.write();
                     for (p, a) in fv.params.iter().zip(args) {
                         s.vars.insert(p.clone(), a);
                     }
                 }
                 match self.exec_block(&fv.body, &call_env) {
-                    Ok(v) => Ok(v),                       // oxirgi ifoda — qaytadi
-                    Err(Flow::Return(v)) => Ok(v),        // erta ret
-                    Err(other) => Err(other),             // fail/err/skip/stop
+                    Ok(v) => Ok(v),                // oxirgi ifoda — qaytadi
+                    Err(Flow::Return(v)) => Ok(v), // erta ret
+                    Err(other) => Err(other),      // fail/err/skip/stop
                 }
             }
             other => Err(Flow::err(format!(
@@ -642,9 +726,7 @@ impl Interp {
                 Ok(Value::Nil)
             }
             // .len kabi argumentsiz metodlar maydon sifatida ham ishlaydi.
-            Value::List(_) | Value::Str(_) => {
-                crate::builtins::call_method(t, name, vec![])
-            }
+            Value::List(_) | Value::Str(_) => crate::builtins::call_method(t, name, vec![]),
             Value::Nil => Ok(Value::Nil), // nil.x -> nil (xavfsiz navigatsiya)
             other => Err(Flow::err(format!(
                 "{} tipida '.{}' maydoni yo'q",
@@ -664,12 +746,8 @@ impl Interp {
                     Ok(xs[idx as usize].clone())
                 }
             }
-            (Value::Map(m), Value::Str(key)) => {
-                Ok(m.get(key).cloned().unwrap_or(Value::Nil))
-            }
-            (Value::Map(m), Value::Sym(key)) => {
-                Ok(m.get(key).cloned().unwrap_or(Value::Nil))
-            }
+            (Value::Map(m), Value::Str(key)) => Ok(m.get(key).cloned().unwrap_or(Value::Nil)),
+            (Value::Map(m), Value::Sym(key)) => Ok(m.get(key).cloned().unwrap_or(Value::Nil)),
             (Value::Nil, _) => Ok(Value::Nil),
             (t, k) => Err(Flow::err(format!(
                 "{}[{}] indekslash qo'llab-quvvatlanmaydi",

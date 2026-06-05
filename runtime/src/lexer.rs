@@ -59,7 +59,10 @@ impl<'a> Lexer<'a> {
             }
         }
         // Fayl oxiri: oxirgi newline va qolgan bloklarni yopish.
-        if !matches!(self.tokens.last().map(|t| &t.tok), Some(Tok::Newline) | None) {
+        if !matches!(
+            self.tokens.last().map(|t| &t.tok),
+            Some(Tok::Newline) | None
+        ) {
             self.push(Tok::Newline);
         }
         while self.indents.len() > 1 {
@@ -134,6 +137,11 @@ impl<'a> Lexer<'a> {
                     self.line, self.indents, width
                 ));
             }
+            // Dedent statement chegarasi hamdir: blok yopilgandan keyin keyingi
+            // qator yangi statement. Aks holda qavssiz chaqirish (juxtaposition
+            // call) blok-tanali lambda/if'dan keyingi qatorni argument deb
+            // yutib yuborardi (masalan ketma-ket `http.on ... \req ->` bloklari).
+            self.push(Tok::Newline);
         }
         Ok(())
     }
@@ -158,11 +166,13 @@ impl<'a> Lexer<'a> {
                 // `)`/`]`/`"`) yopishgan bo'lsa — bu map ajratuvchi (Colon).
                 // Aks holda (oldin bo'shliq, `(`, `[`, `,` yoki qator boshi) va
                 // keyin ident kelsa — symbol. `status::open` -> Colon + Sym.
-                let prev = if self.pos > 0 { self.src[self.pos - 1] } else { b' ' };
-                let glued_to_atom = self.is_ident_cont(prev)
-                    || prev == b')'
-                    || prev == b']'
-                    || prev == b'"';
+                let prev = if self.pos > 0 {
+                    self.src[self.pos - 1]
+                } else {
+                    b' '
+                };
+                let glued_to_atom =
+                    self.is_ident_cont(prev) || prev == b')' || prev == b']' || prev == b'"';
                 self.advance();
                 if !glued_to_atom && self.is_ident_start(self.peek_or(0)) {
                     let s = self.read_ident();
@@ -285,7 +295,7 @@ impl<'a> Lexer<'a> {
                 return Err(format!(
                     "{}-qatorda kutilmagan belgi: '{}'",
                     line, c as char
-                ))
+                ));
             }
         };
         self.push_at(tok, line, col);
@@ -301,21 +311,27 @@ impl<'a> Lexer<'a> {
         }
         let mut is_float = false;
         // float nuqtasi, lekin '..' (range) emas
-        if !self.at_end() && self.peek() == b'.' && self.peek_or(1) != b'.' {
-            if self.peek_or(1).is_ascii_digit() {
-                is_float = true;
-                self.advance(); // '.'
-                while !self.at_end() && self.peek().is_ascii_digit() {
-                    self.advance();
-                }
+        if !self.at_end()
+            && self.peek() == b'.'
+            && self.peek_or(1) != b'.'
+            && self.peek_or(1).is_ascii_digit()
+        {
+            is_float = true;
+            self.advance(); // '.'
+            while !self.at_end() && self.peek().is_ascii_digit() {
+                self.advance();
             }
         }
         let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
         if is_float {
-            let v: f64 = text.parse().map_err(|_| format!("{}-qatorda noto'g'ri float: {}", line, text))?;
+            let v: f64 = text
+                .parse()
+                .map_err(|_| format!("{}-qatorda noto'g'ri float: {}", line, text))?;
             self.push_at(Tok::Flt(v), line, col);
         } else {
-            let v: i64 = text.parse().map_err(|_| format!("{}-qatorda juda katta son: {}", line, text))?;
+            let v: i64 = text
+                .parse()
+                .map_err(|_| format!("{}-qatorda juda katta son: {}", line, text))?;
             self.push_at(Tok::Int(v), line, col);
         }
         Ok(())
@@ -355,7 +371,9 @@ impl<'a> Lexer<'a> {
         while !self.at_end() && self.is_ident_cont(self.peek()) {
             self.advance();
         }
-        std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string()
+        std::str::from_utf8(&self.src[start..self.pos])
+            .unwrap()
+            .to_string()
     }
 
     // String literal: oddiy matn + ${expr} / $ident interpolatsiya.
@@ -415,7 +433,9 @@ impl<'a> Lexer<'a> {
                             }
                             self.advance();
                         }
-                        let expr = std::str::from_utf8(&self.src[estart..self.pos]).unwrap().to_string();
+                        let expr = std::str::from_utf8(&self.src[estart..self.pos])
+                            .unwrap()
+                            .to_string();
                         self.advance(); // yopuvchi }
                         parts.push(StrPart::Expr(expr));
                     } else if self.is_ident_start(self.peek_or(0)) {

@@ -4,13 +4,19 @@
 //   flux run <fayl.fx>     — Flux faylini bajaradi
 //   flux <fayl.fx>         — xuddi shu (qisqartma)
 
-mod token;
-mod lexer;
+// mimalloc — parallel'da system malloc'dan ancha kam contention beradi.
+// Interpreter qisqa umrli scope allokatsiyalarini ko'p qiladi (tree-walking).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod ast;
-mod parser;
-mod value;
-mod interp;
 mod builtins;
+mod http_mod;
+mod interp;
+mod lexer;
+mod parser;
+mod token;
+mod value;
 
 use std::process::ExitCode;
 
@@ -52,7 +58,9 @@ fn parse_args(args: &[String]) -> Option<String> {
 fn run_source(src: &str) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
-    let mut interp = interp::Interp::new();
+    // Arc<Interp>: http.serve handler'larni server thread'larida apply qiladi,
+    // shuning uchun interp thread'lar orasida ulashiladigan bo'lishi kerak.
+    let interp = interp::Interp::new_arc();
     interp.run(&prog)
 }
 

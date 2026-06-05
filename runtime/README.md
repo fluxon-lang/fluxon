@@ -1,7 +1,8 @@
 # Flux Runtime
 
-Flux tilining interpretatori (Rust, tree-walking). Hozircha **til yadrosi**
-ishlaydi — batteries (`http`, `db`, `ai`, ...) hali qo'shilmagan.
+Flux tilining interpretatori (Rust, tree-walking). **Til yadrosi** to'liq
+ishlaydi, va birinchi battery — **`http`** (server + klient) — qo'shildi.
+Qolgan batteries (`db`, `ai`, `ws`, `cron`, `queue`) hali yo'q.
 
 ## Qurish va ishga tushirish
 
@@ -28,8 +29,32 @@ Til yadrosining to'liq qismi:
 - **`log`** — stderr'ga chiqarish
 - **Xatolar:** `fail [status] "..."`, `!` (propagate o'tkazgich)
 
-`use` va `tbl` parse qilinadi, lekin yadroda e'tiborsiz qoldiriladi (batteries
-fazasi uchun).
+`tbl` parse qilinadi, lekin hali e'tiborsiz qoldiriladi (`db` battery uchun).
+
+### `http` battery (server + klient)
+
+```flux
+use http
+http.on :get "/health" \req -> rep 200 {ok:true}
+http.on :get "/notes/:id" \req -> rep 200 {id:req.params.id}
+http.on :post "/notes" \req -> rep 201 {received:req.body}
+http.serve 8080
+```
+
+- `http.on :metod "/yo'l" handler` — marshrut. `:get :post :put :del`. Yo'lda
+  `:id` — parametr (`req.params.id`).
+- `req` map: `method path query{} headers{} params{} body`. `Content-Type:
+  application/json` bo'lsa `body` avtomat map'ga dekod bo'ladi.
+- `rep status body` — javob. body map/list bo'lsa avtomat JSON, str bo'lsa matn.
+- `fail status "msg"` — handler ichida xato javob (`{"error":"msg"}` + status).
+- `http.serve port` — serverni **bloklab** ishga tushiradi.
+- Klient: `http.get url`, `http.post url body` (body map -> JSON). Natija
+  `{status, body}`; javob JSON bo'lsa `body` dekod qilinadi.
+
+**Parallellik:** server tokio + hyper ustida, har request `spawn_blocking`'da
+alohida bajariladi (haqiqiy parallel). Runtime thread-safe (`Arc`/`RwLock`),
+global scope `http.serve` paytida lock-free snapshot'ga muzlatiladi. Misol:
+`examples/server.fx` (`curl localhost:8080/health` bilan sinaladi).
 
 ## Arxitektura
 
@@ -41,7 +66,8 @@ src/
   parser.rs   — tokenlar -> AST (precedence climbing + qavssiz chaqirish)
   value.rs    — runtime qiymatlar
   interp.rs   — AST'ni walk qilib bajaruvchi (scope, control flow, chaqiruv)
-  builtins.rs — yadro funksiyalari (modullar + qiymat metodlari)
+  builtins.rs — yadro funksiyalari (modullar + qiymat metodlari + `rep`)
+  http_mod.rs — `http` battery: server (on/serve), routing, req/rep, klient
   main.rs     — CLI + integratsiya testlari
 ```
 
@@ -59,5 +85,5 @@ each, match, str/modullar, pipe/coalesce).
 
 ## Keyingi qadam
 
-Batteries: `http.serve`/`http.on`, in-memory `db`, keyin Postgres, `ai`, `ws`,
-`cron`, `queue`.
+Keyingi battery — **`db`** (haqiqiy SQLite/Postgres, `tbl` schema'ni o'qish,
+`db.q/one/ins/up/del/put`, `db.tx`). Keyin `ai`, `ws`, `cron`, `queue`.

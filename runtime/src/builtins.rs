@@ -9,7 +9,7 @@
 // bu spec'dagi farqni aniq aks ettiradi: `l.len` (a'zo) vs `str.len s` (modul).
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::interp::{Env, Flow};
 use crate::value::{NativeFn, Value};
@@ -18,9 +18,15 @@ type R = Result<Value, Flow>;
 
 // --- global funksiyalarni o'rnatish ---
 pub fn install(env: &Env) {
-    let mut s = env.borrow_mut();
-    let mut add = |name: &str, f: Box<dyn Fn(Vec<Value>) -> R>| {
-        s.set_global(name, Value::Native(Rc::new(NativeFn { name: name.into(), func: f })));
+    let mut s = env.write();
+    let mut add = |name: &str, f: Box<dyn Fn(Vec<Value>) -> R + Send + Sync>| {
+        s.set_global(
+            name,
+            Value::Native(Arc::new(NativeFn {
+                name: name.into(),
+                func: f,
+            })),
+        );
     };
     add(
         "log",
@@ -28,6 +34,30 @@ pub fn install(env: &Env) {
             let parts: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
             eprintln!("{}", parts.join(" "));
             Ok(Value::Nil)
+        }),
+    );
+    // rep status body — HTTP javobi. Yangi Value variant qo'shmaslik uchun
+    // maxsus kalitli map sifatida ifodalanadi: {__resp:true status:N body:V}.
+    // http_mod::value_to_response shu kalitni taniydi.
+    add(
+        "rep",
+        Box::new(|args: Vec<Value>| {
+            let status = match args.first() {
+                Some(Value::Int(n)) => *n,
+                Some(other) => {
+                    return Err(Flow::err(format!(
+                        "rep: 1-argument status (int) bo'lishi kerak, {} berildi",
+                        other.type_name()
+                    )));
+                }
+                None => return Err(Flow::err("rep: status argumenti kerak")),
+            };
+            let body = args.get(1).cloned().unwrap_or(Value::Nil);
+            let mut m = BTreeMap::new();
+            m.insert("__resp".to_string(), Value::Bool(true));
+            m.insert("status".to_string(), Value::Int(status));
+            m.insert("body".to_string(), body);
+            Ok(Value::Map(m))
         }),
     );
 }
@@ -92,7 +122,10 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "str" => Ok(Value::Str(format!("{}", arg(&args, 0, "str.str")?))),
-        _ => Err(Flow::err(format!("str modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!(
+            "str modulida '{}' funksiyasi yo'q",
+            func
+        ))),
     }
 }
 
@@ -110,7 +143,10 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "round" => Ok(Value::Int(x.round() as i64)),
-        _ => Err(Flow::err(format!("math modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!(
+            "math modulida '{}' funksiyasi yo'q",
+            func
+        ))),
     }
 }
 
@@ -137,7 +173,10 @@ fn rand_module(func: &str, args: Vec<Value>) -> R {
             }
             Ok(Value::Str(out))
         }
-        _ => Err(Flow::err(format!("rand modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!(
+            "rand modulida '{}' funksiyasi yo'q",
+            func
+        ))),
     }
 }
 
@@ -174,11 +213,14 @@ fn json_module(func: &str, args: Vec<Value>) -> R {
             let s = arg_str(&args, 0, "json.dec")?;
             json_decode(&s)
         }
-        _ => Err(Flow::err(format!("json modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!(
+            "json modulida '{}' funksiyasi yo'q",
+            func
+        ))),
     }
 }
 
-fn json_encode(v: &Value) -> String {
+pub fn json_encode(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
         Value::Flt(x) => x.to_string(),
@@ -217,8 +259,11 @@ fn json_str(s: &str) -> String {
 }
 
 // Minimal JSON dekoder (yadro versiyasi uchun yetarli).
-fn json_decode(s: &str) -> R {
-    let mut p = JsonParser { b: s.as_bytes(), i: 0 };
+pub fn json_decode(s: &str) -> R {
+    let mut p = JsonParser {
+        b: s.as_bytes(),
+        i: 0,
+    };
     p.skip_ws();
     let v = p.value()?;
     p.skip_ws();
@@ -438,7 +483,9 @@ fn map_method(m: &BTreeMap<String, Value>, method: &str, args: Vec<Value>) -> R 
             let k = key_of(arg(&args, 0, "map.has")?);
             Ok(Value::Bool(m.contains_key(&k)))
         }
-        "keys" => Ok(Value::List(m.keys().map(|k| Value::Str(k.clone())).collect())),
+        "keys" => Ok(Value::List(
+            m.keys().map(|k| Value::Str(k.clone())).collect(),
+        )),
         "vals" => Ok(Value::List(m.values().cloned().collect())),
         "set" => {
             let k = key_of(arg(&args, 0, "map.set")?);
