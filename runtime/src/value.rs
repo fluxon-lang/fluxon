@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::ast::Stmt;
 
@@ -25,9 +25,9 @@ pub enum Value {
     Map(BTreeMap<String, Value>),
     // Foydalanuvchi funksiyasi (closure): parametrlar, tana, qamrab olingan
     // muhit (lexical scope).
-    Fn(Rc<FnValue>),
+    Fn(Arc<FnValue>),
     // Rust'da yozilgan ichki funksiya (builtin).
-    Native(Rc<NativeFn>),
+    Native(Arc<NativeFn>),
 }
 
 pub struct FnValue {
@@ -39,7 +39,7 @@ pub struct FnValue {
 
 pub struct NativeFn {
     pub name: String,
-    pub func: Box<dyn Fn(Vec<Value>) -> Result<Value, crate::interp::Flow>>,
+    pub func: Box<dyn Fn(Vec<Value>) -> Result<Value, crate::interp::Flow> + Send + Sync>,
 }
 
 impl Value {
@@ -76,8 +76,7 @@ impl Value {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y))
             }
             (Value::Map(a), Value::Map(b)) => {
-                a.len() == b.len()
-                    && a.iter().all(|(k, v)| b.get(k).map_or(false, |w| v.equals(w)))
+                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w)))
             }
             _ => false,
         }

@@ -24,33 +24,58 @@ pub enum Expr {
     Map(Vec<MapEntry>),
 
     // Operatorlar
-    Unary { op: UnOp, expr: Box<Expr> },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Unary {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 
     // a.b  yoki  a.0 (member/index nuqta orqali)
-    Field { target: Box<Expr>, name: String },
+    Field {
+        target: Box<Expr>,
+        name: String,
+    },
     // a[k] (dinamik indeks)
-    Index { target: Box<Expr>, key: Box<Expr> },
+    Index {
+        target: Box<Expr>,
+        key: Box<Expr>,
+    },
 
     // Qavssiz chaqirish: callee arg1 arg2 ...
-    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
 
     // \a b -> tana   (lambda). Tana bir ifoda yoki blok bo'lishi mumkin.
-    Lambda { params: Vec<String>, body: Vec<Stmt> },
+    Lambda {
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
 
     // error-propagate: expr!
     Try(Box<Expr>),
 
     // fail [status] msg — ifoda sifatida ham (masalan `x ?? (fail "...")`).
     // Hech qachon qiymat qaytarmaydi; oqimni uzadi.
-    Fail { status: Option<Box<Expr>>, message: Box<Expr> },
+    Fail {
+        status: Option<Box<Expr>>,
+        message: Box<Expr>,
+    },
 
     // if/elif/else — expression sifatida (qiymat qaytaradi)
     If(Box<IfExpr>),
     // match — expression
     Match(Box<MatchExpr>),
     // 1..5 range
-    Range { start: Box<Expr>, end: Box<Expr> },
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -122,32 +147,58 @@ pub enum MatchPat {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     // x = expr   (immutable)
-    Bind { name: String, value: Expr },
+    Bind {
+        name: String,
+        value: Expr,
+    },
     // target <- expr  (mutable bind yoki qayta tayinlash; target oddiy ident
     // yoki member/index bo'lishi mumkin emas — faqat ident)
-    Assign { name: String, value: Expr },
+    Assign {
+        name: String,
+        value: Expr,
+    },
 
     // fn nom params... -> body
-    FnDecl { name: String, params: Vec<String>, body: Vec<Stmt>, exported: bool },
+    FnDecl {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        exported: bool,
+    },
 
     // each x in iter / each k, v in iter
-    Each { vars: Vec<String>, iter: Expr, body: Vec<Stmt> },
+    Each {
+        vars: Vec<String>,
+        iter: Expr,
+        body: Vec<Stmt>,
+    },
 
     Ret(Option<Expr>),
     Skip,
     Stop,
     // fail [status] "xabar"
-    Fail { status: Option<Expr>, message: Expr },
+    Fail {
+        status: Option<Expr>,
+        message: Expr,
+    },
 
     // use http db   /   use ./tools as t
-    Use { items: Vec<UseItem> },
+    Use {
+        items: Vec<UseItem>,
+    },
 
     // tbl nom ... (schema e'loni; yadro versiyada e'tiborga olinmaydi, lekin
     // parse qilinadi — DB battery kelganda ishlatiladi)
-    Tbl { name: String, columns: Vec<TblColumn> },
+    Tbl {
+        name: String,
+        columns: Vec<TblColumn>,
+    },
 
     // exp NAME = expr  (eksport qilingan qiymat)
-    ExpBind { name: String, value: Expr },
+    ExpBind {
+        name: String,
+        value: Expr,
+    },
 
     // Yakka ifoda statement sifatida (chaqiruv, if-as-statement, ...)
     Expr(Expr),
@@ -155,7 +206,7 @@ pub enum Stmt {
 
 #[derive(Debug, Clone)]
 pub struct UseItem {
-    pub path: String,      // "http" yoki "./tools"
+    pub path: String, // "http" yoki "./tools"
     pub alias: Option<String>,
 }
 

@@ -27,7 +27,11 @@ pub struct Parser {
 pub type ParseResult<T> = Result<T, String>;
 
 pub fn parse(toks: Vec<Token>) -> ParseResult<Program> {
-    let mut p = Parser { toks, pos: 0, no_app: false };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        no_app: false,
+    };
     p.parse_program()
 }
 
@@ -37,7 +41,10 @@ impl Parser {
         &self.toks[self.pos].tok
     }
     fn peek2(&self) -> &Tok {
-        self.toks.get(self.pos + 1).map(|t| &t.tok).unwrap_or(&Tok::Eof)
+        self.toks
+            .get(self.pos + 1)
+            .map(|t| &t.tok)
+            .unwrap_or(&Tok::Eof)
     }
     fn line(&self) -> usize {
         self.toks[self.pos].line
@@ -187,11 +194,21 @@ impl Parser {
         if self.eat(&Tok::Arrow) {
             // bir qatorli: fn double x -> x * 2
             let body = self.parse_arrow_body()?;
-            Ok(Stmt::FnDecl { name, params, body, exported })
+            Ok(Stmt::FnDecl {
+                name,
+                params,
+                body,
+                exported,
+            })
         } else {
             self.expect(&Tok::Newline, "funksiya tanasi")?;
             let body = self.parse_block()?;
-            Ok(Stmt::FnDecl { name, params, body, exported })
+            Ok(Stmt::FnDecl {
+                name,
+                params,
+                body,
+                exported,
+            })
         }
     }
 
@@ -238,7 +255,10 @@ impl Parser {
                 message: Box::new(message),
             })
         } else {
-            Ok(Expr::Fail { status: None, message: Box::new(first) })
+            Ok(Expr::Fail {
+                status: None,
+                message: Box::new(first),
+            })
         }
     }
 
@@ -253,9 +273,7 @@ impl Parser {
                 }
                 // ./tools  ->  Slash? aslida lexer'da './tools' qanday chiqadi?
                 // './tools' = Dot Slash Ident. Buni yig'amiz.
-                Tok::Dot => {
-                    self.parse_module_path()?
-                }
+                Tok::Dot => self.parse_module_path()?,
                 _ => break,
             };
             let alias = if self.eat(&Tok::As) {
@@ -319,10 +337,15 @@ impl Parser {
                 modifiers.push(m);
             }
             // ref:tbl.col yoki uniq(...) kabilarni qator oxirigacha o'tkazib yuboramiz
-            while !self.check(&Tok::Newline) && !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
+            while !self.check(&Tok::Newline) && !self.check(&Tok::Dedent) && !self.check(&Tok::Eof)
+            {
                 self.advance();
             }
-            columns.push(TblColumn { name: col_name, type_name, modifiers });
+            columns.push(TblColumn {
+                name: col_name,
+                type_name,
+                modifiers,
+            });
             self.skip_newlines();
         }
         self.expect(&Tok::Dedent, "jadval oxiri")?;
@@ -365,7 +388,11 @@ impl Parser {
             self.advance();
             // chap-assotsiativ: o'ng tomon yuqoriroq ustuvorlik bilan
             let rhs = self.parse_binary(prec + 1)?;
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         Ok(lhs)
     }
@@ -376,7 +403,10 @@ impl Parser {
         if self.check(&Tok::DotDot) {
             self.advance();
             let rhs = self.parse_application()?;
-            return Ok(Expr::Range { start: Box::new(lhs), end: Box::new(rhs) });
+            return Ok(Expr::Range {
+                start: Box::new(lhs),
+                end: Box::new(rhs),
+            });
         }
         Ok(lhs)
     }
@@ -396,7 +426,10 @@ impl Parser {
         while self.is_atom_start() {
             args.push(self.parse_postfix()?);
         }
-        Ok(Expr::Call { callee: Box::new(first), args })
+        Ok(Expr::Call {
+            callee: Box::new(first),
+            args,
+        })
     }
 
     // postfix: .field, [index], ! (try)
@@ -410,7 +443,10 @@ impl Parser {
                     match self.peek().clone() {
                         Tok::Ident(name) => {
                             self.advance();
-                            e = Expr::Field { target: Box::new(e), name };
+                            e = Expr::Field {
+                                target: Box::new(e),
+                                name,
+                            };
                         }
                         Tok::Int(n) => {
                             self.advance();
@@ -432,7 +468,10 @@ impl Parser {
                     self.advance();
                     let key = self.parse_expr()?;
                     self.expect(&Tok::RBracket, "']'")?;
-                    e = Expr::Index { target: Box::new(e), key: Box::new(key) };
+                    e = Expr::Index {
+                        target: Box::new(e),
+                        key: Box::new(key),
+                    };
                 }
                 Tok::Bang => {
                     self.advance();
@@ -481,12 +520,18 @@ impl Parser {
             Tok::Minus => {
                 self.advance();
                 let e = self.parse_postfix()?;
-                Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(e) })
+                Ok(Expr::Unary {
+                    op: UnOp::Neg,
+                    expr: Box::new(e),
+                })
             }
             Tok::Bang => {
                 self.advance();
                 let e = self.parse_postfix()?;
-                Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(e) })
+                Ok(Expr::Unary {
+                    op: UnOp::Not,
+                    expr: Box::new(e),
+                })
             }
             Tok::LParen => {
                 self.advance();
@@ -521,7 +566,11 @@ impl Parser {
                     // ifoda manbasini mustaqil tokenize + parse qilamiz
                     let toks = crate::lexer::lex(&src)
                         .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
-                    let mut sub = Parser { toks, pos: 0, no_app: false };
+                    let mut sub = Parser {
+                        toks,
+                        pos: 0,
+                        no_app: false,
+                    };
                     sub.skip_newlines();
                     let e = sub.parse_expr()?;
                     pieces.push(StrPiece::Expr(e));
@@ -592,7 +641,7 @@ impl Parser {
                             "{}-qatorda map kaliti kutilgan, {:?} topildi",
                             self.line(),
                             other
-                        ))
+                        ));
                     }
                 };
                 self.expect(&Tok::Colon, "':'")?;
@@ -672,7 +721,7 @@ impl Parser {
                         "{}-qatorda match patterni (symbol/son/_) kutilgan, {:?} topildi",
                         self.line(),
                         other
-                    ))
+                    ));
                 }
             };
             self.expect(&Tok::Arrow, "'->'")?;
