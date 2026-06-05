@@ -155,8 +155,6 @@ o'ylang va test bilan himoyalang:
 runtime'da **hali implementatsiya qilinmagan:**
 
 - `ai` (LLM primitiv — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`)
-- `cron` (vaqt jadvali)
-- `queue` (fon vazifalari)
 
 Bularni qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb oling —
 sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan bir xil.

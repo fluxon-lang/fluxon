@@ -17,6 +17,7 @@ mod http_mod;
 mod interp;
 mod lexer;
 mod parser;
+mod queue_mod;
 mod reg_mod;
 mod token;
 mod value;
@@ -516,6 +517,80 @@ cron.on 99 * * * * f
         assert!(
             err.contains("cron") && err.to_lowercase().contains("ifoda"),
             "kutilgan cron ifoda xatosi, topildi: {}",
+            err
+        );
+    }
+
+    // --- queue battery ---
+
+    #[test]
+    fn queue_on_push_registratsiya_xatosiz() {
+        // queue.on handler ro'yxatga oladi, queue.push ish qo'shadi — ikkalasi ham
+        // bloklamaydi, dastur tugaydi (worker fonda ishlayveradi). Handler bittagina
+        // `job` map argumenti oladi.
+        run(r#"
+queue.on "send" \job ->
+  log "yuborilmoqda: ${job.ph}"
+queue.push "send" {ph:"+99890" body:"salom"}
+"#);
+    }
+
+    #[test]
+    fn queue_push_payloadsiz() {
+        // Payload ixtiyoriy — berilmasa job Nil bo'ladi.
+        run(r#"
+queue.on "tozala" \job ->
+  log "tozalandi"
+queue.push "tozala"
+"#);
+    }
+
+    #[test]
+    fn queue_push_nom_str_bolmasa_xato() {
+        // 1-argument ish nomi str bo'lishi shart.
+        let err = run_source(r#"queue.push 5"#).expect_err("nom str bo'lmasa xato kutiladi");
+        assert!(
+            err.contains("queue.push"),
+            "kutilgan queue.push xatosi, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn queue_argumentsiz_dispatch_ga_yetadi() {
+        // Argumentsiz `queue.X` (Call emas, Field bo'lib keladi) modul dispatch'iga
+        // yetishi kerak — `queue` ident o'zgaruvchi deb qidirilib "noma'lum nom"
+        // bermasin. Noma'lum funksiya bilan sinaymiz: dispatch'ga yetsa "queue
+        // modulida ... yo'q" xatosi keladi (noma'lum nom EMAS). [cron.run regressiyasi]
+        let err = run_source(r#"queue.yoq"#).expect_err("argumentsiz queue.yoq xato berishi kerak");
+        assert!(
+            err.contains("queue modulida") && !err.contains("noma'lum nom"),
+            "argumentsiz queue dispatch'ga yetishi kerak, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn cron_argumentsiz_dispatch_ga_yetadi() {
+        // `cron.run` argumentsiz — Field bo'lib keladi va dispatch'ga yetishi kerak
+        // (aks holda "noma'lum nom: cron"). cron.run bloklaydi, shuning uchun mavjud
+        // funksiya o'rniga noma'lum funksiya bilan dispatch'ga yetganini tekshiramiz.
+        let err = run_source(r#"cron.yoq"#).expect_err("argumentsiz cron.yoq xato berishi kerak");
+        assert!(
+            err.contains("cron modulida") && !err.contains("noma'lum nom"),
+            "argumentsiz cron dispatch'ga yetishi kerak, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn queue_on_handler_fn_bolmasa_xato() {
+        // 2-argument handler fn bo'lishi shart.
+        let err =
+            run_source(r#"queue.on "send" 5"#).expect_err("handler fn bo'lmasa xato kutiladi");
+        assert!(
+            err.contains("queue.on"),
+            "kutilgan queue.on xatosi, topildi: {}",
             err
         );
     }

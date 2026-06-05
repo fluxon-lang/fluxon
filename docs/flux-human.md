@@ -859,9 +859,21 @@ Webhook tez javob berishi uchun og'ir ishni fonga uzatasiz:
 ```flux
 use queue
 
-queue.push "send" {ph:phone body:text}    # navbatga qo'shish
-queue.on "send" \job -> tools.send job.ph job.body   # ishlovchi
+queue.on "send" \job -> tools.send job.ph job.body   # ishlovchi (handler)
+queue.push "send" {ph:phone body:text}               # navbatga qo'shish
 ```
+
+- `queue.on <nom> <handler>` — shu nomli ishlar uchun ishlovchi. Handler bittagina
+  `job` argumenti oladi — bu `queue.push`'ga berilgan payload (map).
+- `queue.push <nom> <payload>` — navbatga ish qo'shadi. Payload ixtiyoriy
+  (berilmasa `nil`). **Bloklamaydi** — darhol qaytadi, ish fonda bajariladi.
+- Ishlar **bitta worker thread'da, FIFO (kelgan tartibda)** bajariladi —
+  ketma-ketlik kafolatlangan. Handler ichidagi xato worker'ni o'ldirmaydi.
+- `push` `on`'dan oldin yozilsa, ish **navbatda kutadi** va handler ro'yxatga
+  olingach bajariladi (tartibga bog'liq emas).
+- Worker fon thread'i — server (`http.serve`/`ws.serve`) yoki `cron.run` processni
+  ushlab turganda navbatni qayta ishlaydi. Faqat-queue skriptda processni ushlash
+  uchun shu bloklovchi chaqiruvlardan biri kerak.
 
 ### 9.10 `ws` — websocket (realtime)
 

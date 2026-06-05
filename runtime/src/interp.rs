@@ -190,6 +190,10 @@ pub struct Interp {
     // cron battery: rejalashtirilgan vazifalar + scheduler fon thread'i. `cron.on`
     // ro'yxatga oladi (bloklamaydi), fon thread o'qib o'z vaqtida handler chaqiradi.
     pub cron: Arc<crate::cron_mod::CronState>,
+    // queue battery: fon navbati + bitta FIFO worker thread'i. `queue.push` ish
+    // qo'shadi (bloklamaydi), `queue.on` handler ro'yxatga oladi; worker navbatdan
+    // olib ketma-ket bajaradi.
+    pub queue: Arc<crate::queue_mod::QueueState>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -215,6 +219,7 @@ impl Interp {
             ws: Arc::new(crate::ws_mod::WsState::new()),
             reg: Arc::new(crate::reg_mod::RegState::new()),
             cron: Arc::new(crate::cron_mod::CronState::new()),
+            queue: Arc::new(crate::queue_mod::QueueState::new()),
         }
     }
 
@@ -646,6 +651,19 @@ impl Interp {
                     if id == "reg" && self.lookup(id, env).is_err() {
                         return self.reg_dispatch(name, vec![]);
                     }
+                    // `cron.run` argumentsiz -> Call emas, Field bo'lib keladi. cron
+                    // o'zgaruvchi sifatida e'lon qilinmagan bo'lsa, argumentsiz cron
+                    // funksiyasi (run) sifatida chaqiramiz. (Aks holda `cron` ident
+                    // o'zgaruvchi deb qidirilib "noma'lum nom" beradi.)
+                    if id == "cron" && self.lookup(id, env).is_err() {
+                        return self.arc_self().cron_dispatch(name, vec![]);
+                    }
+                    // queue ham state'li modul — argumentsiz chaqiruvi (kelajakda)
+                    // shu yerda ushlanadi; aks holda `queue` ident o'zgaruvchi deb
+                    // qidirilib "noma'lum nom" beradi.
+                    if id == "queue" && self.lookup(id, env).is_err() {
+                        return self.arc_self().queue_dispatch(name, vec![]);
+                    }
                 }
                 let t = self.eval(target, env)?;
                 self.get_field(&t, name, env)
@@ -891,6 +909,13 @@ impl Interp {
                 if modname == "cron" {
                     let argv = self.eval_args(args, env)?;
                     return self.arc_self().cron_dispatch(name, argv);
+                }
+                // queue — state'li (fon navbati). `queue.push` nom+payload oladi,
+                // `queue.on` nom+handler oladi. Worker handler'ni apply qiladi —
+                // shuning uchun Interp'ga muhtoj (call_module emas).
+                if modname == "queue" {
+                    let argv = self.eval_args(args, env)?;
+                    return self.arc_self().queue_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;
