@@ -2,10 +2,14 @@
 # Flux .fx test to'plamini ishga tushiruvchi. Toza master ustida mavjud
 # imkoniyatlarni (yadro til, kolleksiyalar+modullar, db, time+env, http) sinaydi.
 #
-# Ishga: ./tests-fx/run_all.sh   (runtime/ papkasidan)
+# Ishga (lokal):  ./tests-fx/run_all.sh        # runtime/ papkasidan
+# Ishga (CI):     FLUX_BIN=target/release/flux ./tests-fx/run_all.sh
+#
+# FLUX_BIN — flux binary'ga yo'l (standart: ./target/release/flux). DIR esa shu
+# skript joylashgan papkadan aniqlanadi, qaysi cwd'dan chaqirilsa ham ishlaydi.
 set -u
-BIN=./target/release/flux
-DIR=tests-fx
+BIN="${FLUX_BIN:-./target/release/flux}"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pass=0; fail=0
 
 run() {  # run <label> <env...> -- <fx-fayl>
