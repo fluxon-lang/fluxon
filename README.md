@@ -100,11 +100,37 @@ flux-lang/
 
 ## Hozirgi holat
 
-⚠️ **Flux hozircha dizayn-bosqichida.** Til to'liq spetsifikatsiyalangan va
-ko'plab real loyihalarda (qog'ozда) sinalgan, lekin **interpreter/compiler hali
-yozilmagan**. Bu repo — tilning dizayni, qo'llanmasi va misollar.
+🚧 **Faol ishlab chiqilmoqda.** Til yadrosi ishlaydigan **runtime** (Rust,
+tree-walking interpreter) mavjud — `.fx` fayllarni ishga tushira oladi.
 
-Keyingi qadam: `.fx` fayllarni ishga tushiradigan runtime (Rust asosida).
+**Ishlaydi:**
+
+- Til yadrosi: tiplar, bindings (`=`/`<-`), `fn`/lambda/closure, `if`/`each`/
+  `match`, operatorlar, string interpolatsiya, `fail`/`!`/`??`/`|>`.
+- Yadro modullari: `str`, `math`, `rand`, `json`, `time`, `env`.
+- Batareyalar: **`http`** (server + klient), **`db`** (SQLite, tranzaksiya,
+  schema, auto-migration).
+
+**Hali yo'q (spec'da bor):** `ai`, `reg`, `ws`, `cron`, `queue`.
+
+Ishga tushirish:
+
+```sh
+cd runtime
+cargo run -- run examples/demo.fx
+```
+
+---
+
+## Hissa qo'shish
+
+Flux ochiq manba — yordamingizni kutamiz.
+
+- **Odam contributor'lar:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, build,
+  test, PR jarayoni.
+- **AI agentlar (Claude Code va h.k.):** [`CLAUDE.md`](CLAUDE.md) — qoidalar,
+  navigatsiya, "qayer nima".
+- **Runtime ichki tuzilishi:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
