@@ -91,6 +91,21 @@ pub struct Interp {
     // yetganda LOCK-FREE shundan o'qiydi (Arc orqali ulashilgan, read lock yo'q),
     // shuning uchun parallel request'lar global qidiruvda bir-birini bloklamaydi.
     globals_frozen: OnceLock<Arc<HashMap<String, Value>>>,
+    // DB battery: lazy ochilgan backend (jarayonga bitta, `$DATABASE_URL` bilan
+    // tanlanadi). Birinchi `db.*` chaqiruvida ochiladi + auto-migration.
+    db: OnceLock<Arc<dyn crate::db_mod::Db>>,
+    // tbl schema registry: jadval -> (ustun -> meta). `Stmt::Tbl` to'ldiradi,
+    // db natijalarini post-process qilish (sym/json/bool) va auto-migration uchun.
+    // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
+    pub schema: Arc<RwLock<HashMap<String, BTreeMap<String, ColMeta>>>>,
+}
+
+// tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
+// (CREATE TABLE: pk/uniq/null).
+#[derive(Clone)]
+pub struct ColMeta {
+    pub type_name: String,
+    pub modifiers: Vec<String>,
 }
 
 impl Interp {
@@ -102,7 +117,41 @@ impl Interp {
             routes: Arc::new(Mutex::new(Vec::new())),
             this: OnceLock::new(),
             globals_frozen: OnceLock::new(),
+            db: OnceLock::new(),
+            schema: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    // DB backend'ni lazy ochadi (birinchi `db.*` da). Ochilganda tbl schema
+    // registry'ni replay qilib auto-migration (`CREATE TABLE IF NOT EXISTS`)
+    // bajaradi — `tbl` e'lon qilingan jadvallar zero-setup paydo bo'ladi.
+    pub fn db(&self) -> Result<Arc<dyn crate::db_mod::Db>, Flow> {
+        if let Some(d) = self.db.get() {
+            return Ok(d.clone());
+        }
+        let d = crate::db_mod::open_from_env().map_err(Flow::err)?;
+        self.migrate(d.as_ref())?;
+        // Race: agar boshqa thread ham ochgan bo'lsa, biznikini tashlaymiz.
+        let _ = self.db.set(d);
+        Ok(self.db.get().unwrap().clone())
+    }
+
+    // schema registry'dagi har jadval uchun CREATE TABLE IF NOT EXISTS.
+    fn migrate(&self, db: &dyn crate::db_mod::Db) -> Result<(), Flow> {
+        let schema = self.schema.read();
+        for (table, cols) in schema.iter() {
+            let coldefs: Vec<crate::db_mod::ColDef> = cols
+                .iter()
+                .map(|(name, meta)| crate::db_mod::ColDef {
+                    name: name.clone(),
+                    type_name: meta.type_name.clone(),
+                    modifiers: meta.modifiers.clone(),
+                })
+                .collect();
+            let sql = db.build_create_table(table, &coldefs);
+            db.exec(&sql, &[]).map_err(Flow::err)?;
+        }
+        Ok(())
     }
 
     // Global scope'ni lock-free snapshot'ga muzlatadi. `http.serve` server'ni
@@ -130,24 +179,28 @@ impl Interp {
 
     pub fn run(&self, prog: &Program) -> Result<(), String> {
         // Birinchi o'tish: top-level fn/tbl e'lonlarini oldindan ro'yxatga olamiz
-        // (hoisting), shunda tartibdan qat'i nazar bir-birini chaqira oladi.
+        // (hoisting), shunda tartibdan qat'i nazar bir-birini chaqira oladi va
+        // har qanday `db.*` chaqiruvidan oldin schema tayyor bo'ladi.
         for stmt in prog {
-            if let Stmt::FnDecl {
-                name, params, body, ..
-            } = stmt
-            {
-                let f = Value::Fn(Arc::new(FnValue {
-                    params: params.clone(),
-                    body: body.clone(),
-                    closure: self.global.clone(),
-                    name: name.clone(),
-                }));
-                self.global.write().vars.insert(name.clone(), f);
+            match stmt {
+                Stmt::FnDecl {
+                    name, params, body, ..
+                } => {
+                    let f = Value::Fn(Arc::new(FnValue {
+                        params: params.clone(),
+                        body: body.clone(),
+                        closure: self.global.clone(),
+                        name: name.clone(),
+                    }));
+                    self.global.write().vars.insert(name.clone(), f);
+                }
+                Stmt::Tbl { name, columns } => self.register_tbl(name, columns),
+                _ => {}
             }
         }
         for stmt in prog {
-            // fn'lar allaqachon ro'yxatda — qayta bajarmaymiz.
-            if matches!(stmt, Stmt::FnDecl { .. }) {
+            // fn/tbl allaqachon ro'yxatda — qayta bajarmaymiz.
+            if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
             match self.exec_stmt(stmt, &self.global.clone()) {
@@ -164,6 +217,21 @@ impl Interp {
             }
         }
         Ok(())
+    }
+
+    // tbl e'lonini schema registry'ga yozadi (ustun -> tip+modifikatorlar).
+    fn register_tbl(&self, name: &str, columns: &[TblColumn]) {
+        let mut cols = BTreeMap::new();
+        for c in columns {
+            cols.insert(
+                c.name.clone(),
+                ColMeta {
+                    type_name: c.type_name.clone(),
+                    modifiers: c.modifiers.clone(),
+                },
+            );
+        }
+        self.schema.write().insert(name.to_string(), cols);
     }
 
     // Blokni ketma-ket bajaradi; qiymati — oxirgi ifoda (Flux'da blok ifoda).
@@ -236,9 +304,13 @@ impl Interp {
             }
             Stmt::Each { vars, iter, body } => self.exec_each(vars, iter, body, env),
             Stmt::Expr(e) => self.eval(e, env),
-            // Yadro versiyada use/tbl e'tiborsiz (batteries kelganda ishlaydi).
+            // use — modul import (dispatch nom asosida, ro'yxatga olish shart emas).
             Stmt::Use { .. } => Ok(Value::Nil),
-            Stmt::Tbl { .. } => Ok(Value::Nil),
+            // tbl — schema registry'ga yoziladi (sym/json konversiya + migration).
+            Stmt::Tbl { name, columns } => {
+                self.register_tbl(name, columns);
+                Ok(Value::Nil)
+            }
         }
     }
 
@@ -594,6 +666,12 @@ impl Interp {
                 if modname == "http" {
                     let argv = self.eval_args(args, env)?;
                     return self.arc_self().http_dispatch(name, argv);
+                }
+                // db — http kabi state'li (connection + tx konteksti); Interp'ga
+                // muhtoj. db.tx argumenti lambda bo'lib keladi (Value::Fn).
+                if modname == "db" {
+                    let argv = self.eval_args(args, env)?;
+                    return self.arc_self().db_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;

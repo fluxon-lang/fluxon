@@ -20,6 +20,9 @@ pub struct Lexer<'a> {
     // Qavs ichida ekanmizmi? Qavs ichida newline/indent e'tiborga olinmaydi
     // (ko'p qatorli list/map literallari uchun).
     paren_depth: usize,
+    // Keyingi push qilinadigan token oldidan bo'shliq (yoki tab/newline) bormi.
+    // Bo'shliq ko'rilganda true bo'ladi, token push'da o'qilib reset qilinadi.
+    pending_space: bool,
 }
 
 pub type LexResult<T> = Result<T, String>;
@@ -34,6 +37,7 @@ impl<'a> Lexer<'a> {
             indents: vec![0],
             tokens: Vec::new(),
             paren_depth: 0,
+            pending_space: true, // fayl boshi ham "bo'shliqdan keyin" kabi
         }
     }
 
@@ -46,10 +50,15 @@ impl<'a> Lexer<'a> {
             match c {
                 b' ' | b'\t' | b'\r' => {
                     self.advance();
+                    self.pending_space = true;
                 }
-                b'#' => self.skip_comment(),
+                b'#' => {
+                    self.skip_comment();
+                    self.pending_space = true;
+                }
                 b'\n' => {
                     self.advance_newline();
+                    self.pending_space = true;
                     if self.paren_depth == 0 {
                         self.push(Tok::Newline);
                         self.handle_line_start()?;
@@ -509,7 +518,14 @@ impl<'a> Lexer<'a> {
         self.push_at(tok, line, col);
     }
     fn push_at(&mut self, tok: Tok, line: usize, col: usize) {
-        self.tokens.push(Token { tok, line, col });
+        let spaced = self.pending_space;
+        self.pending_space = false;
+        self.tokens.push(Token {
+            tok,
+            line,
+            col,
+            spaced,
+        });
     }
 }
 

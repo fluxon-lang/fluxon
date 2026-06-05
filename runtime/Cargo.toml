@@ -11,3 +11,6 @@ http-body-util = "0.1"
 bytes = "1"
 parking_lot = "0.12"
 mimalloc = "0.1"
+# db battery: SQLite (bundled — tizim kutubxonasi/server kerak emas, CI'da yashil).
+# Boshqa backendlar (postgres/mysql) keyin Db trait orqasiga additiv ulanadi.
+rusqlite = { version = "0.40", features = ["bundled"] }

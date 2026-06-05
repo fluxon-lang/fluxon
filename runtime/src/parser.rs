@@ -49,6 +49,10 @@ impl Parser {
     fn line(&self) -> usize {
         self.toks[self.pos].line
     }
+    // Joriy token oldidan bo'shliq bormi (grammatik ajratish uchun).
+    fn spaced(&self) -> bool {
+        self.toks[self.pos].spaced
+    }
     fn advance(&mut self) -> Tok {
         let t = self.toks[self.pos].tok.clone();
         if self.pos < self.toks.len() - 1 {
@@ -464,7 +468,10 @@ impl Parser {
                         }
                     }
                 }
-                Tok::LBracket => {
+                // `[` postfix indeks BO'LADI faqat tutash bo'lsa (`arr[i]`).
+                // Bo'shliq bilan kelsa (`f "x" [a]`) bu alohida list argument —
+                // parse_application uni o'zi oladi.
+                Tok::LBracket if !self.spaced() => {
                     self.advance();
                     let key = self.parse_expr()?;
                     self.expect(&Tok::RBracket, "']'")?;
