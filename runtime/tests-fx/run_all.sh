@@ -71,6 +71,9 @@ echo
 echo "############ 06 reg (funksiya registri) ############"
 run "06_reg"                $BIN run $DIR/06_reg.fx
 
+echo "############ 07 cron (rejalashtirilgan vazifalar) ############"
+run "07_cron"               $BIN run $DIR/07_cron.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

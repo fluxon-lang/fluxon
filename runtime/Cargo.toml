@@ -19,3 +19,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 tokio-tungstenite = "0.24"
 # WS stream'ni read/write yo'nalishlarga split qilish (SplitSink/SplitStream).
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# cron battery: standart Unix 5-maydonli ifodani (`0 * * * *`) parse qiladi va
+# keyingi ishga tushish vaqtini hisoblaydi (Schedule::upcoming).
+cron = "0.12"
+# cron crate UTC sana-vaqt arifmetikasi uchun chrono'ga tayanadi (next-run hisoblash).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

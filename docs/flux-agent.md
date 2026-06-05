@@ -221,9 +221,19 @@ db.one "select count(*) c from t where created > $1" [time.ago 24 :hr]
 json.enc v · json.dec s · env.PORT ?? "8080" · log "xabar"
 ```
 
-### cron
+### cron (rejalashtirilgan fon vazifalari)
+Standart Unix 5-maydonli cron ifoda — TIRNOQSIZ (`*` bu yerda ko'paytirish emas):
 ```flux
-cron.wk :sun 18 0 fn (kun soat daqiqa) · cron.dy 9 0 fn · cron.hr 30 fn
+cron.on 0 * * * * check_prices    # daqiqa soat kun oy hafta-kuni — har soat boshida
+cron.on */15 9 * * 1-5 \-> ...     # ish kunlari 9:00-9:45 har 15 daqiqa (inline lambda)
+cron.on 30 9 * * * daily_report   # har kun 09:30
+```
+`cron.on` bloklamaydi (faqat ro'yxatga oladi, `http.on` kabi). Server bo'lsa
+(`http.serve`/`ws.serve`) cron fonda ishlaydi. Server YO'Q, faqat cron bo'lsa —
+`cron.run` processni ushlab turadi:
+```flux
+cron.on 0 9 * * * daily_report
+cron.run                          # server yo'q skript: processni tirik ushlaydi
 ```
 
 ### queue (fon)

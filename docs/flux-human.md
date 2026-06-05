@@ -816,13 +816,33 @@ key = env.AI_KEY
 ```
 
 ### 9.8 `cron` — rejalashtirish
-Cron — fe'l. Inglizcha o'qiladi:
+Standart **Unix 5-maydonli** cron ifoda: `daqiqa soat kun oy hafta-kuni`. Har
+AI agent shu formatni biladi (crontab, GitHub Actions, ...). `cron.on` ifodani
+**tirnoqsiz** o'qiydi — `*` bu yerda ko'paytirish emas, cron belgisi:
 ```flux
 use cron
-cron.wk :sun 18 0 briefing      # haftalik: kun, soat, daqiqa
-cron.dy 9 0 daily_check         # kunlik: soat, daqiqa
-cron.hr 30 every_30min          # soatlik: daqiqa
+cron.on 0 * * * * check_prices    # har soat boshida (daqiqa=0)
+cron.on 30 9 * * * daily_check    # har kun 09:30
+cron.on 0 18 * * 0 briefing       # yakshanba (0) 18:00
+cron.on */15 * * * * poll         # har 15 daqiqada
+cron.on 0 9 * * 1-5 \->           # ish kunlari 09:00 (inline lambda)
+  log "ish kuni"
 ```
+Maydonlar: `*` har qiymat, `*/N` har N, `A-B` diapazon, `A,B,C` ro'yxat.
+Hafta-kuni: 0=yakshanba ... 6=shanba.
+
+`cron.on` **bloklamaydi** — `http.on` kabi faqat ro'yxatga oladi va scheduler
+fonda ishga tushadi. Server (`http.serve`/`ws.serve`) processni tirik ushlaydi,
+cron fonda o'z vaqtida ishlaydi. Tartib: `cron.on` lar `http.serve` dan **oldin**.
+
+Faqat-cron skript (server yo'q) uchun — `cron.run` processni o'z qo'liga oladi:
+```flux
+cron.on 0 9 * * * daily_check
+cron.run                          # bloklaydi: dastur tugamaydi, cron ishlayveradi
+```
+
+> Qulaylik: ifodani tirnoq bilan ham yozsa bo'ladi (`cron.on "0 9 * * *" f`) —
+> natija bir xil. AI uchun kanonik shakl tirnoqsiz (kam token).
 
 ### 9.9 `queue` — fon navbati
 Webhook tez javob berishi uchun og'ir ishni fonga uzatasiz:

@@ -187,6 +187,9 @@ pub struct Interp {
     // reg battery: nom -> funksiya registri (dinamik dispatch). `reg.add` to'ldiradi,
     // `reg.call` o'qiydi (istalgan thread'dan — http/ws handler ichidan ham).
     pub reg: Arc<crate::reg_mod::RegState>,
+    // cron battery: rejalashtirilgan vazifalar + scheduler fon thread'i. `cron.on`
+    // ro'yxatga oladi (bloklamaydi), fon thread o'qib o'z vaqtida handler chaqiradi.
+    pub cron: Arc<crate::cron_mod::CronState>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -211,6 +214,7 @@ impl Interp {
             env_file: OnceLock::new(),
             ws: Arc::new(crate::ws_mod::WsState::new()),
             reg: Arc::new(crate::reg_mod::RegState::new()),
+            cron: Arc::new(crate::cron_mod::CronState::new()),
         }
     }
 
@@ -880,6 +884,13 @@ impl Interp {
                 if modname == "reg" {
                     let argv = self.eval_args(args, env)?;
                     return self.reg_dispatch(name, argv);
+                }
+                // cron — state'li (rejalashtirilgan vazifalar). `cron.on` ifoda + handler
+                // oladi, `cron.run` argumentsiz bloklaydi. Ifoda parser'da tirnoqsiz
+                // 5-maydonli str sifatida keladi (quyida parser maxsus ushlaydi).
+                if modname == "cron" {
+                    let argv = self.eval_args(args, env)?;
+                    return self.arc_self().cron_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;

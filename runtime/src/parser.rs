@@ -429,6 +429,13 @@ impl Parser {
         if self.no_app {
             return Ok(first);
         }
+        // `cron.on` MAXSUS: birinchi argument standart Unix 5-maydonli cron ifoda
+        // bo'lib, TIRNOQSIZ yoziladi (`cron.on 0 * * * * f`). `*` bu yerda ko'paytirish
+        // EMAS — cron belgisi. Tirnoqli variant (`cron.on "0 * * * *" f`) maxsus
+        // rejimsiz, oddiy str sifatida o'tadi (quyidagi shart `Str`da yonmaydi).
+        if is_cron_on(&first) && self.is_cron_field_start() {
+            return self.parse_cron_application(first);
+        }
         // Keyingi token yana atom boshlasa — bu chaqiruv.
         if !self.is_atom_start() {
             return Ok(first);
@@ -441,6 +448,68 @@ impl Parser {
             callee: Box::new(first),
             args,
         })
+    }
+
+    // `cron.on <5 maydon> <handler...>` — cron ifodani str'ga yig'ib, qolgan
+    // argumentlarni odatdagidek o'qiydi. FAQAT callee aynan `cron.on` bo'lganda
+    // chaqiriladi, shuning uchun boshqa chaqiruvlarga ta'sir qilmaydi.
+    fn parse_cron_application(&mut self, callee: Expr) -> ParseResult<Expr> {
+        let expr = self.parse_cron_fields()?;
+        let mut args = vec![Expr::Str(vec![StrPiece::Lit(expr)])];
+        // Qolgan argumentlar (nomli funksiya yoki lambda) — odatdagi juxtaposition.
+        while self.is_atom_start() {
+            args.push(self.parse_postfix()?);
+        }
+        Ok(Expr::Call {
+            callee: Box::new(callee),
+            args,
+        })
+    }
+
+    // Cron 5-maydon ketma-ketligini (`0 */15 1,2,3 * 1-5`) token oqimidan o'qib,
+    // bitta str'ga yig'adi. Cron token'lari: Int/Star/Slash/Minus/Comma. Token
+    // oldida `spaced` bo'lsa orasiga bo'shliq qo'yamiz (maydon ajratuvchisi).
+    // Birinchi NO-cron token (Ident/Backslash/Newline...) kelganda to'xtaymiz —
+    // u handler argumenti yoki qator oxiri.
+    fn parse_cron_fields(&mut self) -> ParseResult<String> {
+        let mut out = String::new();
+        let mut first = true;
+        while self.is_cron_field_token() {
+            if !first && self.spaced() {
+                out.push(' ');
+            }
+            first = false;
+            match self.peek().clone() {
+                Tok::Int(n) => out.push_str(&n.to_string()),
+                Tok::Star => out.push('*'),
+                Tok::Slash => out.push('/'),
+                Tok::Minus => out.push('-'),
+                Tok::Comma => out.push(','),
+                _ => unreachable!("is_cron_field_token kafolatlaydi"),
+            }
+            self.advance();
+        }
+        if out.is_empty() {
+            return Err(format!(
+                "{}-qatorda cron.on dan keyin cron ifoda kutilgan",
+                self.line()
+            ));
+        }
+        Ok(out)
+    }
+
+    // Joriy token cron maydon belgisini boshlaydimi (5-maydon yig'ish uchun).
+    // Int yoki Star — maydon boshi (Slash/Minus/Comma faqat maydon ichida keladi).
+    fn is_cron_field_start(&self) -> bool {
+        matches!(self.peek(), Tok::Int(_) | Tok::Star)
+    }
+
+    // Joriy token cron ifoda tarkibidagi belgimi.
+    fn is_cron_field_token(&self) -> bool {
+        matches!(
+            self.peek(),
+            Tok::Int(_) | Tok::Star | Tok::Slash | Tok::Minus | Tok::Comma
+        )
     }
 
     // postfix: .field, [index], ! (try)
@@ -787,4 +856,14 @@ impl Parser {
                 | Tok::Backslash
         )
     }
+}
+
+// Callee aynan `cron.on` (Field{Ident("cron"), "on"}) ekanini tekshiradi.
+// Cron ifodani tirnoqsiz o'qish maxsus rejimini faqat shu chaqiruv yoqadi.
+fn is_cron_on(callee: &Expr) -> bool {
+    matches!(
+        callee,
+        Expr::Field { target, name }
+            if name == "on" && matches!(target.as_ref(), Expr::Ident(m) if m == "cron")
+    )
 }
