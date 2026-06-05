@@ -287,10 +287,9 @@ impl Interp {
                         let interp = interp.clone();
                         async move { handle_request(interp, req).await }
                     });
-                    if let Err(e) =
-                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                            .serve_connection(io, service)
-                            .await
+                    if let Err(e) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
                     {
                         eprintln!("ulanish xatosi: {}", e);
                     }
