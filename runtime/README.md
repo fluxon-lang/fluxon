@@ -48,13 +48,21 @@ http.serve 8080
 - `rep status body` — javob. body map/list bo'lsa avtomat JSON, str bo'lsa matn.
 - `fail status "msg"` — handler ichida xato javob (`{"error":"msg"}` + status).
 - `http.serve port` — serverni **bloklab** ishga tushiradi.
-- Klient: `http.get url`, `http.post url body` (body map -> JSON). Natija
-  `{status, body}`; javob JSON bo'lsa `body` dekod qilinadi.
+- Klient: `http.get url`, `http.post url body`, `http.put url body`,
+  `http.del url` (body map -> JSON). Natija `{status, body}`; javob JSON
+  bo'lsa `body` dekod qilinadi.
+- `http.get/post/put/del` chaqiruvlari bitta global Hyper klientni qayta
+  ishlatadi. Shu sabab ketma-ket yoki parallel chaqiruvlarda yangi klient har
+  safar qurilmaydi, Hyper connection pool esa bir xil hostlarga ulanishlarni
+  qayta ishlatadi.
 
 **Parallellik:** server tokio + hyper ustida, har request `spawn_blocking`'da
 alohida bajariladi (haqiqiy parallel). Runtime thread-safe (`Arc`/`RwLock`),
 global scope `http.serve` paytida lock-free snapshot'ga muzlatiladi. Misol:
-`examples/server.fx` (`curl localhost:8080/health` bilan sinaladi).
+`examples/server.fx` (`curl localhost:8080/health` bilan sinaladi). Klient
+API soddaligi va pool reuse uchun `examples/http_client_pool.fx` lokal serverga
+ketma-ket `http.get` qiladi; fayl boshidagi `for ... & ... wait` komandasi shu
+Flux klientini parallel ishga tushirib ham tekshiradi.
 
 ## Arxitektura
 

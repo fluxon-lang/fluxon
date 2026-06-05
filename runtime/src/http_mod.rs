@@ -18,6 +18,8 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
@@ -364,6 +366,10 @@ async fn handle_request(
 
 // --- HTTP klient: http.get/post/put/del ---
 
+// Request body hozir sodda bytes buffer: alias client tipini o'qilishi oson qiladi.
+type ClientBody = Full<Bytes>;
+type PooledHttpClient = Client<HttpConnector, ClientBody>;
+
 // Klient so'rovlari uchun bir martalik global runtime (Flux skripti sinxron).
 fn client_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -373,6 +379,15 @@ fn client_runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("klient tokio runtime")
     })
+}
+
+// Hyper client ichida connection pool bor; global saqlab, clone() orqali
+// requestlar orasida bitta poolni qayta ishlatamiz.
+fn pooled_http_client() -> PooledHttpClient {
+    static CLIENT: OnceLock<PooledHttpClient> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+        .clone()
 }
 
 // http.get url  /  http.post url body
@@ -389,8 +404,6 @@ fn http_client(method: &str, args: Vec<Value>) -> Result<Value, Flow> {
     let body = args.get(1).cloned();
 
     client_runtime().block_on(async move {
-        use hyper_util::client::legacy::Client;
-
         let uri: hyper::Uri = url
             .parse()
             .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
@@ -412,8 +425,7 @@ fn http_client(method: &str, args: Vec<Value>) -> Result<Value, Flow> {
             .body(Full::new(Bytes::from(body_str)))
             .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
 
-        let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
-        let resp = client
+        let resp = pooled_http_client()
             .request(req)
             .await
             .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
