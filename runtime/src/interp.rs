@@ -175,6 +175,11 @@ pub struct Interp {
     // db natijalarini post-process qilish (sym/json/bool) va auto-migration uchun.
     // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
     pub schema: Arc<RwLock<HashMap<String, BTreeMap<String, ColMeta>>>>,
+    // .env fayl cache: LAZY — faqat birinchi `env.X` ishlatilganda joriy
+    // katalogdagi `.env` o'qiladi va parse qilinadi. `env.X` umuman bo'lmasa,
+    // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
+    // .env fayl (deployda real muhit o'zgaruvchisi muhim).
+    env_file: OnceLock<HashMap<String, String>>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -196,6 +201,21 @@ impl Interp {
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),
             schema: Arc::new(RwLock::new(HashMap::new())),
+            env_file: OnceLock::new(),
+        }
+    }
+
+    // `env.NOM` qiymatini topadi. Ustunlik: OS env (std::env) > .env fayl.
+    // .env fayl LAZY — birinchi chaqiruvda bir marta o'qiladi va cache'lanadi;
+    // `env.X` umuman ishlatilmasa, bu metod chaqirilmaydi -> fayl o'qilmaydi.
+    fn env_lookup(&self, name: &str) -> Value {
+        if let Ok(v) = std::env::var(name) {
+            return Value::Str(v); // OS env ustun
+        }
+        let file = self.env_file.get_or_init(load_dotenv);
+        match file.get(name) {
+            Some(v) => Value::Str(v.clone()),
+            None => Value::Nil, // topilmadi -> `?? "default"`
         }
     }
 
@@ -596,10 +616,8 @@ impl Interp {
                 // Foydalanuvchi `env` nomli o'zgaruvchi yaratsa, u ustun bo'ladi.
                 if let Expr::Ident(id) = target.as_ref() {
                     if id == "env" && self.lookup(id, env).is_err() {
-                        return Ok(match std::env::var(name) {
-                            Ok(v) => Value::Str(v),
-                            Err(_) => Value::Nil, // yo'q bo'lsa nil -> `?? "default"`
-                        });
+                        // OS env > .env fayl (lazy o'qiladi, faqat shu yerdan).
+                        return Ok(self.env_lookup(name));
                     }
                     // Argument'siz modul funksiyasi: `time.now` Call emas, Field
                     // bo'lib keladi. Modul nomi o'zgaruvchi sifatida e'lon
@@ -987,6 +1005,51 @@ impl Interp {
     }
 }
 
+// Joriy katalogdagi `.env` faylini o'qiydi va parse qiladi. Fayl yo'q bo'lsa
+// yoki o'qib bo'lmasa — bo'sh map (xato emas; .env ixtiyoriy). Format:
+//   KEY=VALUE        # izoh
+//   export KEY=VALUE   (export prefiksi e'tiborga olinmaydi)
+//   KEY="qiymat"  /  KEY='qiymat'   (tashqi qo'shtirnoq/apostrof olinadi)
+// Bo'sh qatorlar va `#` bilan boshlanadigan qatorlar tashlanadi.
+fn load_dotenv() -> HashMap<String, String> {
+    match std::fs::read_to_string(".env") {
+        Ok(c) => parse_dotenv(&c),
+        Err(_) => HashMap::new(), // .env yo'q -> bo'sh (ixtiyoriy)
+    }
+}
+
+// .env matn -> map. load_dotenv'dan ajratilgan (test qilinadigan sof funksiya).
+fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // `export KEY=VAL` -> `KEY=VAL`
+        let line = line.strip_prefix("export ").map(str::trim).unwrap_or(line);
+        let Some((key, val)) = line.split_once('=') else {
+            continue; // `=` yo'q -> noto'g'ri qator, tashlaymiz
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let val = val.trim();
+        // Tashqi juft qo'shtirnoq yoki apostrofni olib tashlaymiz.
+        let val = if val.len() >= 2
+            && ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
+        {
+            &val[1..val.len() - 1]
+        } else {
+            val
+        };
+        map.insert(key.to_string(), val.to_string());
+    }
+    map
+}
+
 // ---- arifmetika yordamchilari ----
 fn is_num(v: &Value) -> bool {
     matches!(v, Value::Int(_) | Value::Flt(_))
@@ -1039,4 +1102,34 @@ fn flt_arith(op: BinOp, a: f64, b: f64) -> EvalResult {
         BinOp::Ge => Bool(a >= b),
         _ => return Err(Flow::err("ichki: kutilmagan flt operatori")),
     })
+}
+
+#[cfg(test)]
+mod dotenv_tests {
+    use super::parse_dotenv;
+
+    #[test]
+    fn parses_basic_and_comments() {
+        let m = parse_dotenv("# izoh\nPORT=8080\n\nNAME=Aziza   \n  # yana izoh\nEMPTY=\n");
+        assert_eq!(m.get("PORT").map(String::as_str), Some("8080"));
+        assert_eq!(m.get("NAME").map(String::as_str), Some("Aziza"));
+        assert_eq!(m.get("EMPTY").map(String::as_str), Some(""));
+        assert_eq!(m.len(), 3); // izohlar/bo'sh qatorlar tashlandi
+    }
+
+    #[test]
+    fn strips_quotes_and_export() {
+        let m = parse_dotenv("export KEY=\"qiymat\"\nTOKEN='abc123'\nURL=http://x?a=1&b=2\n");
+        assert_eq!(m.get("KEY").map(String::as_str), Some("qiymat"));
+        assert_eq!(m.get("TOKEN").map(String::as_str), Some("abc123"));
+        // = belgisi qiymat ichida bo'lsa, faqat BIRINCHI = ajratadi
+        assert_eq!(m.get("URL").map(String::as_str), Some("http://x?a=1&b=2"));
+    }
+
+    #[test]
+    fn skips_malformed_lines() {
+        let m = parse_dotenv("noequalsign\n=novalue\nGOOD=ok\n");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("GOOD").map(String::as_str), Some("ok"));
+    }
 }
