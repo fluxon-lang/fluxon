@@ -79,9 +79,10 @@ type ExecResult = Result<Value, Flow>; // blok oxirgi ifoda qiymatini qaytaradi
 
 pub struct Interp {
     pub global: Env,
-    // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi,
-    // `http.serve` o'qiydi. Arc<Mutex> — server thread'lari bilan ulashiladi.
-    pub routes: Arc<Mutex<Vec<crate::http_mod::Route>>>,
+    // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi.
+    // `http.serve` boshlanishida immutable snapshot olinadi, shuning uchun
+    // request handler'lari bu mutex'ga qayta murojaat qilmaydi.
+    pub routes: Mutex<Vec<crate::http_mod::Route>>,
     // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
     // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
     // qayta tiklaydi. `new_arc` o'rnatadi.
@@ -91,6 +92,9 @@ pub struct Interp {
     // yetganda LOCK-FREE shundan o'qiydi (Arc orqali ulashilgan, read lock yo'q),
     // shuning uchun parallel request'lar global qidiruvda bir-birini bloklamaydi.
     globals_frozen: OnceLock<Arc<HashMap<String, Value>>>,
+    // HTTP routing `http.serve` boshlangan paytda canonical tarzda muzlaydi.
+    // Shundan keyin `http.on` yangi marshrut qo'shmasligi kerak.
+    pub routes_frozen: OnceLock<()>,
 }
 
 impl Interp {
@@ -99,9 +103,10 @@ impl Interp {
         crate::builtins::install(&global);
         Interp {
             global,
-            routes: Arc::new(Mutex::new(Vec::new())),
+            routes: Mutex::new(Vec::new()),
             this: OnceLock::new(),
             globals_frozen: OnceLock::new(),
+            routes_frozen: OnceLock::new(),
         }
     }
 

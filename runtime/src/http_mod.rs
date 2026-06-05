@@ -243,7 +243,13 @@ impl Interp {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
             _ => return Err(Flow::err("http.on: 3-argument handler (fn) bo'lishi kerak")),
         };
-        self.routes.lock().unwrap().push(Route {
+        let mut routes = self.routes.lock().unwrap();
+        if self.routes_frozen.get().is_some() {
+            return Err(Flow::err(
+                "http.on: http.serve boshlanganidan keyin marshrut qo'shib bo'lmaydi; routing snapshot muzlatilgan",
+            ));
+        }
+        routes.push(Route {
             method,
             pattern: parse_pattern(&path),
             handler,
@@ -257,6 +263,14 @@ impl Interp {
             Some(Value::Int(n)) => *n as u16,
             _ => return Err(Flow::err("http.serve: port (int) bo'lishi kerak")),
         };
+        // Routing canonical snapshot'i server boshlanishida muzlaydi. Keyingi
+        // request'lar mutex'ga kirmaydi va keyingi `http.on` aniq xato beradi.
+        let routes: Arc<[Route]> = {
+            let routes = self.routes.lock().unwrap();
+            let _ = self.routes_frozen.set(());
+            Arc::from(routes.clone().into_boxed_slice())
+        };
+
         // Top-level kod tugadi — global'ni lock-free snapshot'ga muzlatamiz,
         // shunda parallel handler'lar global qidiruvda RwLock'ga urilmaydi.
         self.freeze_globals();
@@ -280,10 +294,12 @@ impl Interp {
                     .map_err(|e| Flow::err(format!("accept: {}", e)))?;
                 let io = TokioIo::new(stream);
                 let interp = interp.clone();
+                let routes = routes.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| {
                         let interp = interp.clone();
-                        async move { handle_request(interp, req).await }
+                        let routes = routes.clone();
+                        async move { handle_request(interp, routes, req).await }
                     });
                     if let Err(e) =
                         hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
@@ -302,6 +318,7 @@ impl Interp {
 // spawn_blocking'da (sinxron interp) chaqirish -> javob.
 async fn handle_request(
     interp: Arc<Interp>,
+    routes: Arc<[Route]>,
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().as_str().to_lowercase();
@@ -323,10 +340,7 @@ async fn handle_request(
     }
 
     // Marshrutni topamiz (handler'ni baytlardan oldin, 404 ni tez qaytarish uchun).
-    let matched = {
-        let routes = interp.routes.lock().unwrap();
-        match_route(&routes, &method, &path)
-    };
+    let matched = match_route(&routes, &method, &path);
 
     let (route, params) = match matched {
         Some(x) => x,
@@ -444,4 +458,41 @@ fn http_client(method: &str, args: Vec<Value>) -> Result<Value, Flow> {
         m.insert("body".to_string(), resp_body);
         Ok(Value::Map(m))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::NativeFn;
+
+    fn noop_handler() -> Value {
+        Value::Native(Arc::new(NativeFn {
+            name: "noop".to_string(),
+            func: Box::new(|_| Ok(Value::Nil)),
+        }))
+    }
+
+    #[test]
+    fn http_on_rejects_routes_after_routing_is_frozen() {
+        let interp = Interp::new_arc();
+        let _ = interp.routes_frozen.set(());
+
+        let err = match interp.http_on(vec![
+            Value::Sym("get".to_string()),
+            Value::Str("/late".to_string()),
+            noop_handler(),
+        ]) {
+            Ok(_) => panic!("http.on muzlatilgan routing ustida muvaffaqiyatli bo'lmasligi kerak"),
+            Err(err) => err,
+        };
+
+        match err {
+            Flow::Error(msg) => {
+                assert!(msg.contains("http.serve"));
+                assert!(msg.contains("muzlatilgan"));
+            }
+            _ => panic!("kutilgan runtime xato"),
+        }
+        assert!(interp.routes.lock().unwrap().is_empty());
+    }
 }
