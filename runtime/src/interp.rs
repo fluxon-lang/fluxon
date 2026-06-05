@@ -184,6 +184,9 @@ pub struct Interp {
     // http `routes` kabi top-level kod (`ws.on`) to'ldiradi, `ws.serve` thread'lari
     // o'qiydi/yozadi. Arc — server thread'lari bilan ulashiladi.
     pub ws: Arc<crate::ws_mod::WsState>,
+    // reg battery: nom -> funksiya registri (dinamik dispatch). `reg.add` to'ldiradi,
+    // `reg.call` o'qiydi (istalgan thread'dan — http/ws handler ichidan ham).
+    pub reg: Arc<crate::reg_mod::RegState>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -207,6 +210,7 @@ impl Interp {
             schema: Arc::new(RwLock::new(HashMap::new())),
             env_file: OnceLock::new(),
             ws: Arc::new(crate::ws_mod::WsState::new()),
+            reg: Arc::new(crate::reg_mod::RegState::new()),
         }
     }
 
@@ -632,6 +636,12 @@ impl Interp {
                     if crate::builtins::is_module(id) && self.lookup(id, env).is_err() {
                         return crate::builtins::call_module(id, name, vec![]);
                     }
+                    // `reg.names` argumentsiz -> Call emas, Field bo'lib keladi
+                    // (time.now kabi). `reg` o'zgaruvchi sifatida e'lon qilinmagan
+                    // bo'lsa, argumentsiz reg funksiyasi sifatida chaqiramiz.
+                    if id == "reg" && self.lookup(id, env).is_err() {
+                        return self.reg_dispatch(name, vec![]);
+                    }
                 }
                 let t = self.eval(target, env)?;
                 self.get_field(&t, name, env)
@@ -863,6 +873,13 @@ impl Interp {
                 if modname == "ws" {
                     let argv = self.eval_args(args, env)?;
                     return self.arc_self().ws_dispatch(name, argv);
+                }
+                // reg — state'li (funksiya registri); `reg.add`/`reg.call` argument
+                // sifatida funksiya/argumentlar oladi. `reg.names` argumentsiz —
+                // Field shoxida (quyiroqda) ushlanadi.
+                if modname == "reg" {
+                    let argv = self.eval_args(args, env)?;
+                    return self.reg_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;

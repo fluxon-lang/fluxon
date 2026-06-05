@@ -68,6 +68,9 @@ else
 fi
 echo
 
+echo "############ 06 reg (funksiya registri) ############"
+run "06_reg"                $BIN run $DIR/06_reg.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"
