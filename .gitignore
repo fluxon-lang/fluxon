@@ -8,7 +8,8 @@ Thumbs.db
 *.swp
 *~
 
-# Kelajakdagi runtime artefaktlari
+# Rust runtime artefaktlari
 /target/
+runtime/target/
 *.log
 .env
