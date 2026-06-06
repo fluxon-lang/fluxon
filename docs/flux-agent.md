@@ -320,7 +320,9 @@ ws.serve 9000
 Session: `ws.data.set conn :key value` · `ws.data.get conn :key` (this connection, cleared on disconnect).
 Room (broadcast): `ws.room.join conn "ch:5"` · `ws.room.leave conn "ch:5"` ·
 `ws.room.send "ch:5" msg` (to all) · `ws.room.members "ch:5"` (presence).
-`http.serve` and `ws.serve` run together.
+`http.serve` and `ws.serve` run together in ONE process — declare both; they don't
+block until top-level ends, then share one event-loop. An HTTP handler can call
+`ws.room.send` to push realtime updates (REST + realtime, e.g. live poll/chat).
 
 ## Full example
 ```flux

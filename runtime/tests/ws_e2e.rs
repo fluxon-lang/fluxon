@@ -175,6 +175,78 @@ async fn room_broadcast_reaches_other_client() {
     let _ = std::fs::remove_file(&path);
 }
 
+// HTTP + WS bir jarayonda: http.serve va ws.serve birga e'lon qilingan server.
+// HTTP POST /vote -> handler ichidan ws.room.send "live" broadcast. WS klient
+// shu broadcast'ni oladi. Bu issue #18 markazidagi cross-protocol oqim.
+const POLL_SCRIPT: &str = r#"
+ws.on :connect \conn ->
+  ws.room.join conn "live"
+
+http.on :post "/vote" \req ->
+  msg = req.body.msg ?? "ovoz"
+  ws.room.send "live" (json.enc {vote: msg})
+  rep 200 {ok: true}
+
+http.serve HTTP_PORT
+ws.serve WS_PORT
+"#;
+
+// Raw HTTP/1.1 POST (reqwest'siz) — tokio TcpStream ustida. JSON body yuborib,
+// status qatorini qaytaradi (tasdiq uchun "200" qidiriladi).
+async fn http_post_json(port: u16, path: &str, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("http ulanish");
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path,
+        body.len(),
+        body
+    );
+    stream.write_all(req.as_bytes()).await.expect("http yozish");
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).await.expect("http o'qish");
+    String::from_utf8_lossy(&resp).to_string()
+}
+
+#[tokio::test]
+async fn http_and_ws_serve_together_cross_protocol() {
+    let ws_port = 9314;
+    let http_port = 8314;
+    let script = POLL_SCRIPT
+        .replace("HTTP_PORT", &http_port.to_string())
+        .replace("WS_PORT", &ws_port.to_string());
+    // spawn_server skript yo'lini WS portga bog'lab nomlaydi — to'qnashuv yo'q.
+    let (child, path) = spawn_server(ws_port, &script);
+    let _killer = Killer(child);
+    // Ikkala server ham ko'tarilishini kutamiz (bir jarayonda birga).
+    wait_port(ws_port).await;
+    wait_port(http_port).await;
+
+    // WS klient ulanadi va "live" xonasiga qo'shiladi (:connect handler).
+    let url = format!("ws://127.0.0.1:{}", ws_port);
+    let (mut ws, _) = connect_async(&url).await.expect("ws ulanish");
+    // room.join darhol bo'ladi; klientga xabar yuborilmaydi — kichik pauza.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // HTTP POST yuboramiz — handler ichidan WS room'ga broadcast qo'zg'aladi.
+    let resp = http_post_json(http_port, "/vote", r#"{"msg":"alfa"}"#).await;
+    assert!(resp.contains("200"), "HTTP 200 kutilgan: {}", resp);
+
+    // WS klient HTTP handler qo'zg'agan broadcast'ni oladi — birga ishlash isboti.
+    let got = next_text(&mut ws).await;
+    assert!(got.contains("\"vote\""), "vote broadcast kutilgan: {}", got);
+    assert!(
+        got.contains("alfa"),
+        "broadcast body 'alfa' kutilgan: {}",
+        got
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn disconnect_cleans_room_membership() {
     let port = 9313;

@@ -275,48 +275,59 @@ impl Interp {
     }
 
     // http.serve port — bloklovchi tokio multi-thread server.
+    // `http.serve PORT` — serverni DARHOL bloklamaydi, balki kutilayotgan
+    // serverlar ro'yxatiga qo'shadi (deferred). Top-level kod tugagach
+    // (`serve_mod::run_pending`) hammasi BITTA umumiy tokio runtime'da
+    // spawn qilinadi — shunda HTTP + WS bir jarayonda birga ishlaydi.
     fn http_serve(self: &Arc<Self>, args: Vec<Value>) -> Result<Value, Flow> {
         let port = match args.first() {
             Some(Value::Int(n)) => *n as u16,
             _ => return Err(Flow::err("http.serve: port (int) bo'lishi kerak")),
         };
-        // Top-level kod tugadi — global'ni lock-free snapshot'ga muzlatamiz,
-        // shunda parallel handler'lar global qidiruvda RwLock'ga urilmaydi.
-        self.freeze_globals();
-        let interp = self.clone();
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Flow::err(format!("tokio runtime: {}", e)))?;
+        self.pending_servers
+            .lock()
+            .unwrap()
+            .push(crate::serve_mod::PendingServer::Http { port });
+        Ok(Value::Nil)
+    }
+}
 
-        rt.block_on(async move {
-            let addr = SocketAddr::from(([0, 0, 0, 0], port));
-            let listener = TcpListener::bind(addr)
-                .await
-                .map_err(|e| Flow::err(format!("port {} bind: {}", port, e)))?;
-            eprintln!("Flux HTTP server: http://localhost:{}", port);
+// Bitta HTTP server uchun accept loop — umumiy event-loop ichida spawn qilinadi
+// (`serve_mod`). Port bind'ni shu yerda bajaradi (deferred: top-level tugagandan
+// keyin), shuning uchun bind xatosi shu loopda chiqadi.
+pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Flux HTTP port {} bind xatosi: {}", port, e);
+            return;
+        }
+    };
+    eprintln!("Flux HTTP server: http://localhost:{}", port);
 
-            loop {
-                let (stream, _) = listener
-                    .accept()
-                    .await
-                    .map_err(|e| Flow::err(format!("accept: {}", e)))?;
-                let io = TokioIo::new(stream);
-                let interp = interp.clone();
-                tokio::spawn(async move {
-                    let service = service_fn(move |req: Request<Incoming>| {
-                        let interp = interp.clone();
-                        async move { handle_request(interp, req).await }
-                    });
-                    if let Err(e) = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, service)
-                        .await
-                    {
-                        eprintln!("ulanish xatosi: {}", e);
-                    }
-                });
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("http accept xatosi: {}", e);
+                continue;
             }
-        })
+        };
+        let io = TokioIo::new(stream);
+        let interp = interp.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |req: Request<Incoming>| {
+                let interp = interp.clone();
+                async move { handle_request(interp, req).await }
+            });
+            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+            {
+                eprintln!("ulanish xatosi: {}", e);
+            }
+        });
     }
 }
 
