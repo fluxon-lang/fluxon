@@ -85,6 +85,9 @@ else
 fi
 echo
 
+echo "############ 09 fs (lokal fayl tizimi) ############"
+run "09_fs"                 $BIN run $DIR/09_fs.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

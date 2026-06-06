@@ -64,7 +64,10 @@ pub fn install(env: &Env) {
 
 // --- modul nomimi? ---
 pub fn is_module(name: &str) -> bool {
-    matches!(name, "str" | "math" | "rand" | "json" | "time" | "io")
+    matches!(
+        name,
+        "str" | "math" | "rand" | "json" | "time" | "io" | "fs"
+    )
 }
 
 // --- modul funksiyasi chaqiruvi ---
@@ -76,6 +79,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "json" => json_module(func, args),
         "time" => time_module(func, args),
         "io" => io_module(func, args),
+        "fs" => fs_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }
@@ -271,6 +275,92 @@ fn io_module(func: &str, args: Vec<Value>) -> R {
             io_module("read_line", vec![])
         }
         _ => Err(Flow::err(format!("io modulida '{}' funksiyasi yo'q", func))),
+    }
+}
+
+// ---------------- fs (lokal fayl tizimi) ----------------
+//
+// Konvensiya: muvaffaqiyatda foydali qiymat (matn/bool/ro'yxat) yoki :ok sym;
+// haqiqiy IO xatosida Flow::err — sababni yo'qotmaslik uchun (io battery shunday).
+// Yagona istisno: fs.read fayl yo'qligida nil qaytaradi (bu kutilgan holat, xato
+// emas — "fayl bormi?" tekshiruvini read ichida birlashtirish uchun qulay).
+fn fs_module(func: &str, args: Vec<Value>) -> R {
+    match func {
+        // fs.read path -> fayl matni (str), yoki fayl yo'q bo'lsa nil.
+        // UTF-8 emas faylda yoki ruxsat xatosida Flow::err.
+        "read" => {
+            let path = arg_str(&args, 0, "fs.read")?;
+            match std::fs::read_to_string(&path) {
+                Ok(s) => Ok(Value::Str(s)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
+                Err(e) => Err(Flow::err(format!("fs.read {}: {}", path, e))),
+            }
+        }
+        // fs.write path content -> faylni ustiga yozadi (oldingi mazmun o'chadi).
+        // Oraliq papkalar mavjud bo'lishi kerak (kerak bo'lsa fs.mkdirp).
+        "write" => {
+            let path = arg_str(&args, 0, "fs.write")?;
+            let content = arg_str(&args, 1, "fs.write")?;
+            std::fs::write(&path, content)
+                .map_err(|e| Flow::err(format!("fs.write {}: {}", path, e)))?;
+            Ok(Value::Sym("ok".into()))
+        }
+        // fs.append path content -> mavjud fayl oxiriga qo'shadi (yo'q bo'lsa yaratadi).
+        "append" => {
+            use std::io::Write;
+            let path = arg_str(&args, 0, "fs.append")?;
+            let content = arg_str(&args, 1, "fs.append")?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| Flow::err(format!("fs.append {}: {}", path, e)))?;
+            f.write_all(content.as_bytes())
+                .map_err(|e| Flow::err(format!("fs.append {}: {}", path, e)))?;
+            Ok(Value::Sym("ok".into()))
+        }
+        // fs.exists path -> bool (fayl YOKI papka mavjudmi).
+        "exists" => {
+            let path = arg_str(&args, 0, "fs.exists")?;
+            Ok(Value::Bool(std::path::Path::new(&path).exists()))
+        }
+        // fs.ls path -> papka ichidagi nomlar ro'yxati [str] (to'liq yo'l emas,
+        // faqat nom). Tartib deterministik bo'lishi uchun saralanadi.
+        "ls" => {
+            let path = arg_str(&args, 0, "fs.ls")?;
+            let entries = std::fs::read_dir(&path)
+                .map_err(|e| Flow::err(format!("fs.ls {}: {}", path, e)))?;
+            let mut names = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| Flow::err(format!("fs.ls {}: {}", path, e)))?;
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+            names.sort();
+            Ok(Value::List(names.into_iter().map(Value::Str).collect()))
+        }
+        // fs.del path -> faylni yoki bo'sh papkani o'chiradi -> :ok.
+        // Papka bo'sh bo'lmasa Flow::err (rekursiv o'chirish ataylab yo'q —
+        // tasodifiy butun daraxtni o'chirib qo'ymaslik uchun xavfsizroq).
+        "del" => {
+            let path = arg_str(&args, 0, "fs.del")?;
+            let p = std::path::Path::new(&path);
+            let res = if p.is_dir() {
+                std::fs::remove_dir(p)
+            } else {
+                std::fs::remove_file(p)
+            };
+            res.map_err(|e| Flow::err(format!("fs.del {}: {}", path, e)))?;
+            Ok(Value::Sym("ok".into()))
+        }
+        // fs.mkdirp path -> papkani (kerakli oraliq papkalar bilan) yaratadi -> :ok.
+        // Papka allaqachon mavjud bo'lsa xato emas (idempotent).
+        "mkdirp" => {
+            let path = arg_str(&args, 0, "fs.mkdirp")?;
+            std::fs::create_dir_all(&path)
+                .map_err(|e| Flow::err(format!("fs.mkdirp {}: {}", path, e)))?;
+            Ok(Value::Sym("ok".into()))
+        }
+        _ => Err(Flow::err(format!("fs modulida '{}' funksiyasi yo'q", func))),
     }
 }
 
@@ -804,5 +894,170 @@ mod io_tests {
     #[test]
     fn io_is_module() {
         assert!(is_module("io"));
+    }
+}
+
+#[cfg(test)]
+mod fs_tests {
+    use super::*;
+
+    // Har test uchun noyob vaqtinchalik papka (boshqa testlar bilan to'qnashmasin).
+    // Process pid + test nomi yetarli noyob — testlar parallel ishlasa ham.
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("flux_fs_test_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&p); // oldingi qoldiqni tozalash
+        std::fs::create_dir_all(&p).expect("tmp dir yaratilmadi");
+        p
+    }
+
+    fn path_str(dir: &std::path::Path, name: &str) -> String {
+        dir.join(name).to_string_lossy().into_owned()
+    }
+
+    // write + read aylanasi: yozilgan matn aynan o'qiladi.
+    #[test]
+    fn write_then_read() {
+        let dir = tmp_dir("write_read");
+        let f = path_str(&dir, "a.txt");
+        match fs_module(
+            "write",
+            vec![Value::Str(f.clone()), Value::Str("salom".into())],
+        ) {
+            Ok(Value::Sym(s)) if s == "ok" => {}
+            _ => panic!("fs.write :ok qaytarishi kerak"),
+        }
+        match fs_module("read", vec![Value::Str(f)]) {
+            Ok(Value::Str(s)) => assert_eq!(s, "salom"),
+            _ => panic!("fs.read yozilgan matnni qaytarishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Yo'q faylni o'qish nil qaytaradi (xato emas) — issue talabi.
+    #[test]
+    fn read_missing_is_nil() {
+        let dir = tmp_dir("read_missing");
+        let f = path_str(&dir, "yoq.txt");
+        match fs_module("read", vec![Value::Str(f)]) {
+            Ok(Value::Nil) => {}
+            _ => panic!("yo'q fayl nil qaytarishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // append bo'lmagan faylni yaratadi va ketma-ket qo'shadi.
+    #[test]
+    fn append_accumulates() {
+        let dir = tmp_dir("append");
+        let f = path_str(&dir, "log.txt");
+        let _ = fs_module(
+            "append",
+            vec![Value::Str(f.clone()), Value::Str("a".into())],
+        );
+        let _ = fs_module(
+            "append",
+            vec![Value::Str(f.clone()), Value::Str("b".into())],
+        );
+        match fs_module("read", vec![Value::Str(f)]) {
+            Ok(Value::Str(s)) => assert_eq!(s, "ab"),
+            _ => panic!("append matnni to'plashi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // exists: mavjud fayl true, yo'q fayl false.
+    #[test]
+    fn exists_reflects_reality() {
+        let dir = tmp_dir("exists");
+        let f = path_str(&dir, "bor.txt");
+        let _ = fs_module("write", vec![Value::Str(f.clone()), Value::Str("x".into())]);
+        match fs_module("exists", vec![Value::Str(f)]) {
+            Ok(Value::Bool(true)) => {}
+            _ => panic!("mavjud fayl true bo'lishi kerak"),
+        }
+        match fs_module("exists", vec![Value::Str(path_str(&dir, "yoq.txt"))]) {
+            Ok(Value::Bool(false)) => {}
+            _ => panic!("yo'q fayl false bo'lishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ls: papka ichidagi nomlarni saralangan holda qaytaradi.
+    #[test]
+    fn ls_lists_sorted_names() {
+        let dir = tmp_dir("ls");
+        let _ = fs_module(
+            "write",
+            vec![Value::Str(path_str(&dir, "b.txt")), Value::Str("".into())],
+        );
+        let _ = fs_module(
+            "write",
+            vec![Value::Str(path_str(&dir, "a.txt")), Value::Str("".into())],
+        );
+        match fs_module("ls", vec![Value::Str(dir.to_string_lossy().into_owned())]) {
+            Ok(Value::List(items)) => {
+                let names: Vec<String> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Str(s) => s.clone(),
+                        _ => panic!("ls str ro'yxati qaytarishi kerak"),
+                    })
+                    .collect();
+                assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
+            }
+            _ => panic!("ls ro'yxat qaytarishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // del: faylni o'chiradi, keyin exists false bo'ladi.
+    #[test]
+    fn del_removes_file() {
+        let dir = tmp_dir("del");
+        let f = path_str(&dir, "o.txt");
+        let _ = fs_module("write", vec![Value::Str(f.clone()), Value::Str("x".into())]);
+        match fs_module("del", vec![Value::Str(f.clone())]) {
+            Ok(Value::Sym(s)) if s == "ok" => {}
+            _ => panic!("fs.del :ok qaytarishi kerak"),
+        }
+        match fs_module("exists", vec![Value::Str(f)]) {
+            Ok(Value::Bool(false)) => {}
+            _ => panic!("o'chirilgan fayl mavjud bo'lmasligi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // mkdirp: rekursiv papka yaratadi va idempotent (ikkinchi marta ham :ok).
+    #[test]
+    fn mkdirp_recursive_and_idempotent() {
+        let dir = tmp_dir("mkdirp");
+        let nested = path_str(&dir, "a/b/c");
+        match fs_module("mkdirp", vec![Value::Str(nested.clone())]) {
+            Ok(Value::Sym(s)) if s == "ok" => {}
+            _ => panic!("fs.mkdirp :ok qaytarishi kerak"),
+        }
+        assert!(std::path::Path::new(&nested).is_dir());
+        // ikkinchi chaqiruv xato bermasligi kerak (idempotent)
+        match fs_module("mkdirp", vec![Value::Str(nested)]) {
+            Ok(Value::Sym(s)) if s == "ok" => {}
+            _ => panic!("mkdirp idempotent bo'lishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Noma'lum fs funksiyasi aniq xato beradi.
+    #[test]
+    fn unknown_func_errors() {
+        match fs_module("yoq", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("fs modulida")),
+            _ => panic!("Flow::Error kutilgan edi"),
+        }
+    }
+
+    // fs modul sifatida tanilishi kerak.
+    #[test]
+    fn fs_is_module() {
+        assert!(is_module("fs"));
     }
 }

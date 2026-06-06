@@ -242,6 +242,25 @@ repl = \n ->
 repl 0
 ```
 
+### fs (lokal fayl tizimi)
+Nomlash `db.*` uslubida (`fs.read`/`fs.del`). Xato bo'lsa `Flow::err` (try bilan ushla);
+`fs.read` yagona istisno — fayl yo'q bo'lsa `nil`:
+```flux
+fs.read path           # → str, yoki fayl yo'q bo'lsa nil
+fs.write path content  # ustiga yozadi (oldingi mazmun o'chadi) → :ok
+fs.append path content # oxiriga qo'shadi (fayl yo'q bo'lsa yaratadi) → :ok
+fs.exists path         # fayl YOKI papka mavjudmi → bool
+fs.ls path             # papka ichidagi nomlar (saralangan, faqat nom) → [str]
+fs.del path            # fayl yoki BO'SH papka → :ok (rekursiv o'chirish yo'q)
+fs.mkdirp path         # oraliq papkalar bilan yaratadi, idempotent → :ok
+```
+```flux
+if !(fs.exists "data")
+  fs.mkdirp "data"
+fs.write "data/conf.json" (json.enc {port:8080})
+cfg = json.dec (fs.read "data/conf.json")
+```
+
 ### cron (fon vazifa)
 Standart Unix 5-maydon (daqiqa soat kun oy hafta), TIRNOQSIZ — `*` cron belgisi:
 ```flux
