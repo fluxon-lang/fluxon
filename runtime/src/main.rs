@@ -734,4 +734,25 @@ ai = {ask:"shadowed"}
 log "ai.ask = ${ai.ask}"
 "#);
     }
+
+    // sh.run -> {stdout stderr code}: echo natijasi va muvaffaqiyat kodi to'g'ri.
+    // (Unix-mos echo, CI ubuntu+macOS da ishlaydi.)
+    #[test]
+    fn sh_run_echo_natija_va_kod() {
+        run(r#"
+r = sh.run "printf salom"
+(r.code == 0) | (fail "code 0 bo'lishi kerak: ${r.code}")
+(r.stdout == "salom") | (fail "stdout noto'g'ri: ${r.stdout}")
+(r.stderr == "") | (fail "stderr bo'sh bo'lishi kerak: ${r.stderr}")
+"#);
+    }
+
+    // Non-zero exit -> Flow::err EMAS, `code` orqali tekshiriladi (kutilgan natija).
+    #[test]
+    fn sh_run_nolik_bolmagan_kod_xato_emas() {
+        run(r#"
+r = sh.run "exit 7"
+(r.code == 7) | (fail "code 7 bo'lishi kerak: ${r.code}")
+"#);
+    }
 }

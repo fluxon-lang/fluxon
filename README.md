@@ -44,7 +44,7 @@ Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
    ko'rgan AI ham darhol tushunadi.
 
 3. **Batteries included.** `http`, `db` (tranzaksiya + concurrency kafolati),
-   `ai`, `reg` (tool registry), `ws`, `cron`, `queue`, `json` — hammasi tilning
+   `ai`, `reg` (tool registry), `ws`, `cron`, `queue`, `sh` (shell), `json` — hammasi tilning
    ichida. `npm install` yo'q. Compile vaqtida faqat ishlatilgani binary'ga
    kiradi (tree-shaking).
 

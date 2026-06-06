@@ -66,7 +66,7 @@ pub fn install(env: &Env) {
 pub fn is_module(name: &str) -> bool {
     matches!(
         name,
-        "str" | "math" | "rand" | "json" | "time" | "io" | "fs"
+        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh"
     )
 }
 
@@ -80,6 +80,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "time" => time_module(func, args),
         "io" => io_module(func, args),
         "fs" => fs_module(func, args),
+        "sh" => sh_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }
@@ -361,6 +362,54 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
             Ok(Value::Sym("ok".into()))
         }
         _ => Err(Flow::err(format!("fs modulida '{}' funksiyasi yo'q", func))),
+    }
+}
+
+// ---------------- sh (tashqi shell buyruqlari) ----------------
+//
+// sh.run cmd -> {stdout: str  stderr: str  code: int}.
+// Buyruq SHELL orqali ishga tushiriladi (Unix: `sh -c`, Windows: `cmd /C`) —
+// shunda `cd x && cargo build`, quvurlar (`|`), `&&`, glob kabi shell xususiyatlari
+// ishlaydi (issue #26 da Sonnet aynan shu naqshni taxmin qildi). Bu coding agent,
+// CI skript, build avtomatizatsiyasi uchun kerak.
+//
+// `code == 0` muvaffaqiyat (Unix konvensiyasi). Jarayon signal bilan o'lsa (Unix'da
+// exit code yo'q) code = -1. Buyruqning O'ZI muvaffaqiyatsiz bo'lishi (non-zero code)
+// Flow::err EMAS — bu kutilgan natija, chaqiruvchi `code` orqali tekshiradi. Faqat
+// jarayonni umuman boshlab bo'lmasa (masalan shell topilmasa) Flow::err.
+//
+// Xavfli buyruqlarni bloklash ataylab YO'Q — bu foydalanuvchi mas'uliyati (issue #26).
+fn sh_module(func: &str, args: Vec<Value>) -> R {
+    match func {
+        "run" => {
+            let cmd = arg_str(&args, 0, "sh.run")?;
+            let mut command;
+            #[cfg(windows)]
+            {
+                command = std::process::Command::new("cmd");
+                command.arg("/C").arg(&cmd);
+            }
+            #[cfg(not(windows))]
+            {
+                command = std::process::Command::new("sh");
+                command.arg("-c").arg(&cmd);
+            }
+            let output = command
+                .output()
+                .map_err(|e| Flow::err(format!("sh.run: buyruqni boshlab bo'lmadi: {}", e)))?;
+            // stdout/stderr ni lossy UTF-8 sifatida o'qiymiz — ikkilik chiqishda ham
+            // panic bo'lmaydi (json dekoderdan farqli, bu yerda matn kafolati yo'q).
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // signal bilan tugagan jarayonda kod None bo'ladi -> -1.
+            let code = output.status.code().unwrap_or(-1) as i64;
+            let mut m = BTreeMap::new();
+            m.insert("stdout".to_string(), Value::Str(stdout));
+            m.insert("stderr".to_string(), Value::Str(stderr));
+            m.insert("code".to_string(), Value::Int(code));
+            Ok(Value::Map(m))
+        }
+        _ => Err(Flow::err(format!("sh modulida '{}' funksiyasi yo'q", func))),
     }
 }
 
@@ -1106,5 +1155,82 @@ mod fs_tests {
     #[test]
     fn fs_is_module() {
         assert!(is_module("fs"));
+    }
+}
+
+#[cfg(test)]
+mod sh_tests {
+    use super::*;
+
+    // Buyruq turlarini matn sifatida olish (xato matnlarini soddalashtirish uchun).
+    fn run(cmd: &str) -> BTreeMap<String, Value> {
+        match sh_module("run", vec![Value::Str(cmd.into())]) {
+            Ok(Value::Map(m)) => m,
+            other => panic!("sh.run map qaytarishi kerak, {:?} keldi", other.is_ok()),
+        }
+    }
+
+    // Oddiy echo: stdout to'g'ri, code 0, stderr bo'sh.
+    #[test]
+    fn echo_stdout_and_code() {
+        let m = run("echo salom");
+        match m.get("stdout") {
+            Some(Value::Str(s)) => assert_eq!(s.trim_end(), "salom"),
+            _ => panic!("stdout str bo'lishi kerak"),
+        }
+        assert!(matches!(m.get("code"), Some(Value::Int(0))));
+        match m.get("stderr") {
+            Some(Value::Str(s)) => assert!(s.is_empty()),
+            _ => panic!("stderr str bo'lishi kerak"),
+        }
+    }
+
+    // Non-zero exit: buyruq muvaffaqiyatsiz -> Flow::err EMAS, code != 0.
+    #[test]
+    fn nonzero_exit_is_not_error() {
+        let m = run("exit 3");
+        assert!(matches!(m.get("code"), Some(Value::Int(3))));
+    }
+
+    // stderr alohida tutiladi (stdout bilan aralashmaydi).
+    #[test]
+    fn stderr_captured_separately() {
+        let m = run("echo xato 1>&2");
+        match m.get("stderr") {
+            Some(Value::Str(s)) => assert_eq!(s.trim_end(), "xato"),
+            _ => panic!("stderr str bo'lishi kerak"),
+        }
+        match m.get("stdout") {
+            Some(Value::Str(s)) => assert!(s.is_empty()),
+            _ => panic!("stdout str bo'lishi kerak"),
+        }
+    }
+
+    // Shell xususiyatlari (`&&`, quvur) ishlaydi — buyruq shell orqali boradi.
+    #[test]
+    fn shell_features_work() {
+        let m = run("echo bir && echo ikki");
+        match m.get("stdout") {
+            Some(Value::Str(s)) => {
+                assert!(s.contains("bir") && s.contains("ikki"));
+            }
+            _ => panic!("stdout str bo'lishi kerak"),
+        }
+        assert!(matches!(m.get("code"), Some(Value::Int(0))));
+    }
+
+    // Noma'lum sh funksiyasi aniq xato beradi.
+    #[test]
+    fn unknown_func_errors() {
+        match sh_module("yoq", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("sh modulida")),
+            _ => panic!("Flow::Error kutilgan edi"),
+        }
+    }
+
+    // sh modul sifatida tanilishi kerak.
+    #[test]
+    fn sh_is_module() {
+        assert!(is_module("sh"));
     }
 }

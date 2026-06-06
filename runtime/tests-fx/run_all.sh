@@ -93,6 +93,9 @@ echo "############ 10 ai (LLM primitiv — tarmoqsiz) ############"
 # shadowing va tool-loop'ning Flux tomonini sinaydi (token sarflamaydi).
 run "10_ai"                 $BIN run $DIR/10_ai.fx
 
+echo "############ 11 sh (tashqi shell buyruqlari) ############"
+run "11_sh"                 $BIN run $DIR/11_sh.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

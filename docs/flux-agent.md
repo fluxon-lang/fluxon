@@ -275,6 +275,21 @@ fs.write "data/conf.json" (json.enc {port:8080})
 cfg = json.dec (fs.read "data/conf.json")
 ```
 
+### sh (external shell command)
+Runs a command through the shell (`sh -c` / on Windows `cmd /C`), so `&&`, pipes (`|`),
+glob all work. `code == 0` is success; a non-zero exit is NOT a `Flow::err` — check `code`.
+```flux
+sh.run cmd             # → {stdout: str  stderr: str  code: int}
+```
+```flux
+r = sh.run "git status --short"
+if r.code == 0
+  log r.stdout
+else
+  fail "git failed: ${r.stderr}"
+```
+Dangerous commands are NOT blocked — that's the caller's responsibility.
+
 ### cron (background task)
 Standard Unix 5-field (minute hour day month weekday), UNQUOTED — `*` is the cron char:
 ```flux
