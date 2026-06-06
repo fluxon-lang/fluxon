@@ -550,6 +550,27 @@ impl Parser {
                         },
                     }
                 }
+                // `()` tutash bo'lsa — argumentsiz (nullary) chaqiruv (`new_id()`).
+                // Qavssiz chaqirish argument bilan aniqlanadi, shuning uchun 0-arity
+                // funksiyani chaqirishning yagona yo'li shu. `f` (qavssiz) funksiya
+                // QIYMATI, `f()` esa CHAQIRUV — ikki ma'no aniq ajraladi.
+                // Faqat BO'SH qavs: `f(x)` emas (canonical shakl `f x`). Bo'shliqli
+                // `f ()` ham emas — u parse_application'da argument bo'lib o'qiladi.
+                Tok::LParen if !self.spaced() => {
+                    self.advance();
+                    if !self.check(&Tok::RParen) {
+                        return Err(format!(
+                            "{}-qatorda `f()` faqat argumentsiz chaqiruv uchun; \
+                             argument bilan chaqirish qavssiz yoziladi (`f x`)",
+                            self.line()
+                        ));
+                    }
+                    self.advance(); // )
+                    e = Expr::Call {
+                        callee: Box::new(e),
+                        args: Vec::new(),
+                    };
+                }
                 // `[` postfix indeks BO'LADI faqat tutash bo'lsa (`arr[i]`).
                 // Bo'shliq bilan kelsa (`f "x" [a]`) bu alohida list argument —
                 // parse_application uni o'zi oladi.

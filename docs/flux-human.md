@@ -268,6 +268,17 @@ Qavs faqat **guruhlash** uchun kerak (funksiya natijasini boshqasiga uzatish):
 double (add 2 3)   # avval add 2 3 = 5, keyin double 5 = 10
 ```
 
+**Argumentsiz funksiya — bo'sh qavs `()` bilan chaqiriladi.** Qavssiz chaqirish
+argument bilan aniqlangani uchun, parametri yo'q funksiyani chaqirishning yagona
+yo'li shu. Bu nom (qiymat) bilan chaqiruvni aniq ajratadi:
+```flux
+fn new_id -> rand.str 8
+new_id()           # CHAQIRUV → har safar yangi tasodifiy id
+new_id             # CHAQIRMAYDI → funksiya QIYMATI (callback/reg uchun)
+```
+> `f(x)` (qavs ichida argument) **ishlamaydi** — canonical shakl `f x`. Bo'sh
+> `()` faqat argumentsiz chaqiruv uchun (bir ish = bir yo'l).
+
 ### Lambda (anonim funksiya)
 `\` belgisi bilan, inline ishlatiladi:
 ```flux

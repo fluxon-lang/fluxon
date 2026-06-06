@@ -92,6 +92,61 @@ each i in 0..10
 "#);
     }
 
+    // Argumentsiz (nullary) chaqiruv: `f()`. Qavssiz chaqirish argument bilan
+    // aniqlangani uchun 0-arity funksiyani chaqirishning yagona yo'li shu.
+    // `f` (qavssiz) funksiya QIYMATI, `f()` esa CHAQIRUV.
+    #[test]
+    fn nullary_call() {
+        run(r#"
+fn new_id
+  ret rand.str 8
+
+a = new_id()
+b = new_id()
+(str.len a == 8) | (fail "new_id() chaqirilmadi: ${a}")
+(a != b) | (fail "har chaqiruv yangi qiymat bermadi")
+
+# qavssiz: funksiya qiymati (chaqirilmaydi) — boolean truthy
+f = new_id
+(f != nil) | (fail "qavssiz nom funksiya qiymati bo'lishi kerak")
+
+# lambda nullary
+g = \->
+  ret 42
+(g() == 42) | (fail "lambda nullary chaqiruv ishlamadi: ${g()}")
+"#);
+    }
+
+    // Argumentsiz rekursiya: `tick()` o'zini chaqiradi. Ilgari dummy argument
+    // (`tick n`) kiritishga majbur edik — endi shart emas.
+    #[test]
+    fn nullary_recursion() {
+        run(r#"
+n <- 0
+fn tick
+  n <- n + 1
+  if n < 3
+    tick()
+  ret n
+(tick() == 3) | (fail "nullary rekursiya ishlamadi: ${n}")
+"#);
+    }
+
+    // `f(x)` (argument bilan qavsli chaqiruv) RAD ETILADI — canonical shakl `f x`.
+    // Bo'sh `()` faqat nullary uchun; bir ish = bir yo'l.
+    #[test]
+    fn paren_call_with_arg_errors() {
+        let err = run_source(
+            r#"
+fn g x
+  ret x
+g(5)
+"#,
+        )
+        .expect_err("f(x) qavsli argument xato berishi kerak");
+        assert!(err.contains("argumentsiz"), "kutilmagan xato: {}", err);
+    }
+
     #[test]
     fn list_methods() {
         run(r#"

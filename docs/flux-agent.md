@@ -43,6 +43,9 @@ fn add a b
   ret a + b               # ret (early) or last expression (implicit)
 fn double x -> x * 2      # one-liner
 add 2 3                   # paren-free call; parens only group: f (g x)
+fn new_id -> rand.str 8   # no params
+new_id()                  # nullary call (empty parens REQUIRED to call)
+new_id                    # NOT a call — the function VALUE (for callbacks/reg)
 \x -> x * 2               # lambda
 ```
 `ret` works INSIDE a lambda too — guard-clause (instead of deep nesting):

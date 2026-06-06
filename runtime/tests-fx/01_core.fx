@@ -134,6 +134,16 @@ fn inc x -> x + 1
 fn sq x -> x * x
 eq (5 |> inc |> sq) 36 "pipe"
 
+# --- Argumentsiz (nullary) chaqiruv: f() ---
+fn answer -> 42
+eq (answer()) 42 "nullary chaqiruv"
+# qavssiz nom = funksiya qiymati; () bilan chaqiriladi
+fv = answer
+eq (fv()) 42 "nullary qiymat keyin chaqiruv"
+# lambda nullary
+lam = \-> 7
+eq (lam()) 7 "lambda nullary"
+
 # --- String interpolatsiya ---
 nm = "Aziza"
 eq "salom ${nm}" "salom Aziza" "interp expr"
