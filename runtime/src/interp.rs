@@ -234,7 +234,9 @@ impl Interp {
     // `env.NOM` qiymatini topadi. Ustunlik: OS env (std::env) > .env fayl.
     // .env fayl LAZY — birinchi chaqiruvda bir marta o'qiladi va cache'lanadi;
     // `env.X` umuman ishlatilmasa, bu metod chaqirilmaydi -> fayl o'qilmaydi.
-    fn env_lookup(&self, name: &str) -> Value {
+    // pub(crate): `ai` battery `$AI_KEY`/`$AI_MODEL`ni shu yo'l bilan (OS env >
+    // .env) o'qiydi — `env.X` bilan bir xil ustunlik qoidasi.
+    pub(crate) fn env_lookup(&self, name: &str) -> Value {
         if let Ok(v) = std::env::var(name) {
             return Value::Str(v); // OS env ustun
         }
@@ -973,6 +975,14 @@ impl Interp {
                 if modname == "queue" {
                     let argv = self.eval_args(args, env)?;
                     return self.arc_self().queue_dispatch(name, argv);
+                }
+                // ai — LLM primitiv (Anthropic). `$AI_KEY`ni env_lookup orqali
+                // o'qish uchun Interp'ga muhtoj (call_module emas). Holatsiz —
+                // har chaqiruv mustaqil https POST. `ai` o'zgaruvchi sifatida
+                // e'lon qilingan bo'lsa, modul emas — o'zgaruvchi sifatida ko'riladi.
+                if modname == "ai" && self.lookup(modname, env).is_err() {
+                    let argv = self.eval_args(args, env)?;
+                    return self.ai_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;

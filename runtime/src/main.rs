@@ -9,6 +9,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod ai_mod;
 mod ast;
 mod builtins;
 mod cron_mod;
@@ -260,6 +261,27 @@ miss = env.FLUX_NONEXISTENT_XYZ ?? "default"
 env = {PORT:"9999"}
 p = env.PORT
 (p == "9999") | (fail "local env shadow ishlamadi: ${p}")
+"#);
+    }
+
+    #[test]
+    fn json_unicode_roundtrip() {
+        // json.dec ko'p baytli UTF-8 (emoji, o'zbekcha) va \u escape (surrogate
+        // juftligi) ni TO'G'RI dekodlasin — avval bayt-bayt `as char` mojibake
+        // berardi (🙂 -> ð...). Bu yadro tuzatishi http/db/ai hammasiga taalluqli.
+        run(r#"
+# Xom UTF-8 baytlar (escape'siz): emoji + o'zbekcha — bayt-bayt as char BUZARDI
+r = json.dec "{\"s\":\"o'zbek 🙂 g'ayrat\"}"
+(r.s == "o'zbek 🙂 g'ayrat") | (fail "xom UTF-8 buzildi: ${r.s}")
+# \u escape: BMP belgisi (ü = ü). \\u -> manbada literal \u bo'ladi.
+u = json.dec "{\"c\":\"\\u00fc\"}"
+(u.c == "ü") | (fail "\\u00fc dekod buzildi: ${u.c}")
+# \u surrogate juftligi (🙂 = 🙂)
+e = json.dec "{\"c\":\"\\ud83d\\ude42\"}"
+(e.c == "🙂") | (fail "\\u surrogate juftligi buzildi: ${e.c}")
+# enc -> dec round-trip
+back = json.dec (json.enc {x:"salom 🙂 dünyo"})
+(back.x == "salom 🙂 dünyo") | (fail "round-trip buzildi: ${back.x}")
 "#);
     }
 
@@ -654,5 +676,62 @@ queue.push "tozala"
             "kutilgan queue.on xatosi, topildi: {}",
             err
         );
+    }
+
+    // `ai` testlari env'ga (kalitlarga) bog'liq — global mutex bilan serializatsiya
+    // qilamiz (boshqa testlar parallel env'ni o'zgartirmasin). Bu testlar
+    // TARMOQQA CHIQMAYDI: kalit yo'qligida API chaqiruvidan OLDIN xato berilishini
+    // tekshiramiz.
+    static AI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn ai_kalit_yoq_bolsa_aniq_xato() {
+        let _guard = AI_ENV_LOCK.lock().unwrap();
+        // Hamma kalit env'larini vaqtincha o'chiramiz (auto-detect hech qaysisini
+        // topmasligi kerak). runtime/ da .env yo'q -> aniq "kaliti topilmadi" xatosi,
+        // tarmoqqa chiqilmaydi. Oldingi qiymatlarni saqlab, testdan keyin tiklaymiz.
+        let saved: Vec<(&str, Option<String>)> = ["AI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            unsafe { std::env::remove_var(k) };
+        }
+        let err = run_source(r#"x = ai.ask "salom""#).expect_err("kalit yo'qligida xato kutiladi");
+        // env'ni tiklaymiz (boshqa testlarga ta'sir qilmasin).
+        for (k, v) in &saved {
+            if let Some(val) = v {
+                unsafe { std::env::set_var(k, val) };
+            }
+        }
+        assert!(
+            err.contains("kaliti topilmadi") || err.contains("kalit"),
+            "kutilgan kalit-topilmadi xatosi, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ai_noma_lum_funksiya_xato() {
+        let _guard = AI_ENV_LOCK.lock().unwrap();
+        // ai.foo -> dispatch'ga yetib "ai.foo yo'q" beradi (noma'lum nom EMAS).
+        // Kalit bo'lsa ham bo'lmasa ham bu funksiya nomini tekshirishdan oldin keladi.
+        let err =
+            run_source(r#"ai.foo "x""#).expect_err("noma'lum ai funksiyasi xato berishi kerak");
+        assert!(
+            err.contains("ai.foo") && !err.contains("noma'lum nom"),
+            "ai dispatch'ga yetib funksiya xatosi berishi kerak, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ai_ozgaruvchi_modulni_yopadi() {
+        // `ai` o'zgaruvchi sifatida e'lon qilinsa, u modul emas — oddiy map maydoni
+        // sifatida o'qiladi (http/db kabi emas, lekin ai dispatch lookup tekshiradi).
+        run(r#"
+ai = {ask:"shadowed"}
+log "ai.ask = ${ai.ask}"
+"#);
     }
 }

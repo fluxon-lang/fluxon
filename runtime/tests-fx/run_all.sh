@@ -88,6 +88,11 @@ echo
 echo "############ 09 fs (lokal fayl tizimi) ############"
 run "09_fs"                 $BIN run $DIR/09_fs.fx
 
+echo "############ 10 ai (LLM primitiv — tarmoqsiz) ############"
+# ai.ask/json/run haqiqiy chaqiruvi $AI_KEY + tarmoq talab qiladi; bu test faqat
+# shadowing va tool-loop'ning Flux tomonini sinaydi (token sarflamaydi).
+run "10_ai"                 $BIN run $DIR/10_ai.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

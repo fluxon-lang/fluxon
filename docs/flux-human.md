@@ -658,7 +658,16 @@ db.q "select * from tickets where category=$1" [:billing]
 ### 9.3 `ai` — LLM (birinchi darajali primitiv)
 
 Bu Flux'ni boshqa tillardan ajratib turadigan eng katta narsa. LLM — kalit
-so'z, SDK emas. Kalit `$AI_KEY` dan avtomat o'qiladi.
+so'z, SDK emas. **Provayder avtomatik aniqlanadi** (OS env yoki `.env`) — hech
+narsa sozlash shart emas:
+
+- `ANTHROPIC_API_KEY` bo'lsa → Claude (default `claude-opus-4-8`)
+- `OPENAI_API_KEY` bo'lsa → GPT (default `gpt-4o`)
+- Ikkalasi bo'lsa Anthropic ustun. Override: `$AI_PROVIDER` (`anthropic|openai`),
+  `$AI_KEY` (umumiy kalit), `$AI_MODEL` (model nomi).
+
+Bu `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` kabi keng tarqalgan standart nomlarga
+moslashadi — boshqa toollar bilan bir xil `.env` ishlaydi.
 
 ```flux
 use ai

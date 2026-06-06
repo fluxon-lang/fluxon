@@ -393,7 +393,9 @@ type ClientBody = Full<Bytes>;
 type PooledHttpClient = Client<HttpsConnector<HttpConnector>, ClientBody>;
 
 // Klient so'rovlari uchun bir martalik global runtime (Flux skripti sinxron).
-fn client_runtime() -> &'static tokio::runtime::Runtime {
+// pub(crate): `ai` battery ham shu runtime/poolni qayta ishlatadi (LLM API ham
+// oddiy https POST), takror tokio runtime/pool qurmaslik uchun.
+pub(crate) fn client_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -405,7 +407,8 @@ fn client_runtime() -> &'static tokio::runtime::Runtime {
 
 // Hyper client ichida connection pool bor; global saqlab, clone() orqali
 // requestlar orasida bitta poolni qayta ishlatamiz.
-fn pooled_http_client() -> PooledHttpClient {
+// pub(crate): `ai` battery ham shu poolni qayta ishlatadi.
+pub(crate) fn pooled_http_client() -> PooledHttpClient {
     static CLIENT: OnceLock<PooledHttpClient> = OnceLock::new();
     CLIENT
         .get_or_init(|| {

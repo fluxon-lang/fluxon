@@ -54,6 +54,7 @@ Yangi battery yoki o'zgarish kiritishdan oldin tegishli faylni biling:
 | Interpreter: scope, control flow, dispatch | `runtime/src/interp.rs` |
 | Yadro modullari (`str/math/rand/json/time`) | `runtime/src/builtins.rs` |
 | `http` battery (server + klient) | `runtime/src/http_mod.rs` |
+| `ai` battery (LLM — Anthropic Messages API) | `runtime/src/ai_mod.rs` |
 | `db` battery (SQLite, tx, schema) | `runtime/src/db_mod.rs` |
 | CLI kirish nuqtasi + integratsiya testlari | `runtime/src/main.rs` |
 
@@ -151,13 +152,13 @@ o'ylang va test bilan himoyalang:
 
 ## 8. Spec'da bor, lekin hali yo'q (kelajak ishlar)
 
-`docs/flux-agent.md` da quyidagi batareyalar spetsifikatsiyalangan, lekin
-runtime'da **hali implementatsiya qilinmagan:**
+`docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar endi
+runtime'da **implementatsiya qilingan** (`ai` ham — `ai.ask`/`ai.json`/`ai.run`,
+`$AI_KEY`, Anthropic Messages API orqali; `runtime/src/ai_mod.rs`).
 
-- `ai` (LLM primitiv — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`)
-
-Bularni qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb oling —
-sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan bir xil.
+Yangi battery qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb
+oling — sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan
+bir xil.
 
 ## 9. Kutilmagan xatolar va kamchiliklar
 

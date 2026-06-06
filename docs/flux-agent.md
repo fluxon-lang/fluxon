@@ -162,7 +162,7 @@ match t.status
 db.q "select * from t where status=$1" [:new]    # filter: symbol → text
 ```
 
-### ai (LLM — first-class, $AI_KEY auto)
+### ai (LLM — first-class, key auto-detected)
 ```flux
 txt = ai.ask "question ${x}"                 # → text
 r = ai.json "extract: ${text}" {intent::a items:[{product:str qty:int}]}  # → map
@@ -176,16 +176,25 @@ elif r._.conf >= 0.6
 else
   escalate r
 ```
+Provider auto-detected from env (OS env > .env), nothing to configure:
+`ANTHROPIC_API_KEY` → Claude (default `claude-opus-4-8`); `OPENAI_API_KEY` → GPT
+(default `gpt-4o`). Both present → Anthropic wins. Override: `$AI_PROVIDER`
+(`anthropic|openai`), `$AI_KEY` (provider-agnostic), `$AI_MODEL`.
+
 `ai.run` — ONE step of a tool-loop (doesn't execute; returns what it wants to do;
-the loop is yours → logging/cost/approval control):
+the loop is yours → logging/cost/approval control). Returns one of:
+`{kind::final text}` or `{kind::call tool args id}`.
 ```flux
 msgs <- [{role::user content:text}]
 each i in 1..10
   r = ai.run msgs tools                # tools: [{name desc params}]
   if r.kind == :final
     ret r.text
+  # r.kind == :call → model wants a tool
   out = reg.call r.tool r.args         # run the tool by name
-  msgs <- msgs.push {role::tool name:r.tool content:(json.enc out)}
+  # feed back: assistant tool_use + tool result (id ties them)
+  msgs <- msgs.push {role::assistant content:[{type:"tool_use" id:r.id name:r.tool input:r.args}]}
+  msgs <- msgs.push {role::tool id:r.id content:(json.enc out)}
 ```
 
 ### reg (function registry — dynamic dispatch)

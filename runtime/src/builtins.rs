@@ -628,29 +628,76 @@ impl<'a> JsonParser<'a> {
             return Err(Flow::err("json: satr kutilgan"));
         }
         self.i += 1;
-        let mut out = String::new();
+        // Natijani BAYTLAR sifatida yig'amiz, oxirida UTF-8 str'ga aylantiramiz —
+        // ko'p baytli belgilar (emoji, o'zbekcha o'/g') bayt-bayt `as char` bilan
+        // BUZILADI (mojibake). \u escape'lari esa char'ga dekodlanib UTF-8 yoziladi.
+        let mut out: Vec<u8> = Vec::new();
         while self.i < self.b.len() {
             let c = self.b[self.i];
             self.i += 1;
             match c {
-                b'"' => return Ok(out),
+                b'"' => {
+                    return String::from_utf8(out)
+                        .map_err(|_| Flow::err("json: satr noto'g'ri UTF-8"));
+                }
                 b'\\' => {
                     let e = self.b[self.i];
                     self.i += 1;
                     match e {
-                        b'n' => out.push('\n'),
-                        b't' => out.push('\t'),
-                        b'r' => out.push('\r'),
-                        b'"' => out.push('"'),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        _ => out.push(e as char),
+                        b'n' => out.push(b'\n'),
+                        b't' => out.push(b'\t'),
+                        b'r' => out.push(b'\r'),
+                        b'"' => out.push(b'"'),
+                        b'\\' => out.push(b'\\'),
+                        b'/' => out.push(b'/'),
+                        b'b' => out.push(0x08),
+                        b'f' => out.push(0x0C),
+                        b'u' => {
+                            // \uXXXX — 16-bitli kod birligi. Surrogate juftligi
+                            // (\uD800..DBFF + \uDC00..DFFF) bitta belgini beradi
+                            // (emoji va BMP'dan tashqari hamma narsa shunday keladi).
+                            let hi = self.hex4()?;
+                            let ch = if (0xD800..=0xDBFF).contains(&hi) {
+                                // yuqori surrogate -> past surrogatni kutamiz.
+                                if self.b.get(self.i) == Some(&b'\\')
+                                    && self.b.get(self.i + 1) == Some(&b'u')
+                                {
+                                    self.i += 2;
+                                    let lo = self.hex4()?;
+                                    let cp = 0x10000
+                                        + (((hi as u32 - 0xD800) << 10) | (lo as u32 - 0xDC00));
+                                    char::from_u32(cp).unwrap_or('\u{FFFD}')
+                                } else {
+                                    '\u{FFFD}' // juftsiz surrogate
+                                }
+                            } else {
+                                char::from_u32(hi as u32).unwrap_or('\u{FFFD}')
+                            };
+                            // char'ni UTF-8 baytlar sifatida qo'shamiz.
+                            let mut buf = [0u8; 4];
+                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                        }
+                        other => out.push(other), // noma'lum escape — baytni o'zini
                     }
                 }
-                _ => out.push(c as char),
+                // Oddiy bayt (ASCII yoki ko'p baytli UTF-8 ketma-ketligining bir
+                // qismi) — o'z holicha qo'shiladi, str konversiyasi oxirida.
+                _ => out.push(c),
             }
         }
         Err(Flow::err("json: yopilmagan satr"))
+    }
+
+    // Joriy pozitsiyadan 4 hex raqamni o'qib u16 qaytaradi (\uXXXX uchun).
+    fn hex4(&mut self) -> Result<u16, Flow> {
+        if self.i + 4 > self.b.len() {
+            return Err(Flow::err("json: \\u uchun 4 hex raqam kerak"));
+        }
+        let slice = &self.b[self.i..self.i + 4];
+        let s = std::str::from_utf8(slice).map_err(|_| Flow::err("json: \\u noto'g'ri"))?;
+        let v = u16::from_str_radix(s, 16).map_err(|_| Flow::err("json: \\u noto'g'ri hex"))?;
+        self.i += 4;
+        Ok(v)
     }
     fn boolean(&mut self) -> R {
         if self.b[self.i..].starts_with(b"true") {
