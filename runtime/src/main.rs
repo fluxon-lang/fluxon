@@ -20,6 +20,7 @@ mod lexer;
 mod parser;
 mod queue_mod;
 mod reg_mod;
+mod serve_mod;
 mod token;
 mod value;
 mod ws_mod;

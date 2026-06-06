@@ -133,7 +133,12 @@ bo'lsa argument'siz `call_module(id, name, vec![])` chaqiriladi.
 - `http.on :method "/path/:id" \req -> ...` — Route/Seg, `match_route`.
 - `rep status body` — `{__resp:true status body}` map (builtins).
 - Klient: `http.get/post/put/del` — pooled hyper Client.
-- `http.serve port` global'ni `freeze_globals` bilan muzlatadi (lock-free).
+- `http.serve port` / `ws.serve port` **darhol bloklamaydi** — serverni
+  `Interp.pending_servers` ro'yxatiga qo'shadi (deferred). Top-level kod tugagach
+  `serve_mod::run_pending` global'ni bir marta `freeze_globals` bilan muzlatadi,
+  BITTA umumiy tokio runtime yaratib har serverni `spawn` qiladi va bloklaydi.
+  Shuning uchun HTTP + WS bir jarayonda birga ishlaydi va HTTP handler ichidan
+  `ws.room.send` chaqirilsa WS ulanishlariga yetadi (shared `Interp`).
 
 ### 4.2 `db` (db_mod.rs)
 

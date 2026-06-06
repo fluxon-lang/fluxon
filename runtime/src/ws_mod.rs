@@ -299,38 +299,46 @@ impl Interp {
     }
 
     // ws.serve port — bloklovchi tokio multi-thread WebSocket server.
+    // `ws.serve PORT` — http.serve kabi DARHOL bloklamaydi; kutilayotgan
+    // serverlar ro'yxatiga qo'shadi. Top-level tugagach umumiy event-loopda
+    // (`serve_mod`) HTTP bilan birga spawn qilinadi.
     fn ws_serve(self: &Arc<Self>, args: Vec<Value>) -> Result<Value, Flow> {
         let port = match args.first() {
             Some(Value::Int(n)) => *n as u16,
             _ => return Err(Flow::err("ws.serve: port (int) bo'lishi kerak")),
         };
-        // http.serve kabi: top-level tugadi -> global'ni lock-free muzlatamiz,
-        // parallel handler'lar global qidiruvda RwLock'ga urilmaydi.
-        self.freeze_globals();
-        let interp = self.clone();
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Flow::err(format!("tokio runtime: {}", e)))?;
+        self.pending_servers
+            .lock()
+            .unwrap()
+            .push(crate::serve_mod::PendingServer::Ws { port });
+        Ok(Value::Nil)
+    }
+}
 
-        rt.block_on(async move {
-            let addr = SocketAddr::from(([0, 0, 0, 0], port));
-            let listener = TcpListener::bind(addr)
-                .await
-                .map_err(|e| Flow::err(format!("port {} bind: {}", port, e)))?;
-            eprintln!("Flux WS server: ws://localhost:{}", port);
+// Bitta WS server uchun accept loop — umumiy event-loop ichida spawn qilinadi.
+pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Flux WS port {} bind xatosi: {}", port, e);
+            return;
+        }
+    };
+    eprintln!("Flux WS server: ws://localhost:{}", port);
 
-            loop {
-                let (stream, _) = listener
-                    .accept()
-                    .await
-                    .map_err(|e| Flow::err(format!("accept: {}", e)))?;
-                let interp = interp.clone();
-                tokio::spawn(async move {
-                    handle_conn(interp, stream).await;
-                });
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ws accept xatosi: {}", e);
+                continue;
             }
-        })
+        };
+        let interp = interp.clone();
+        tokio::spawn(async move {
+            handle_conn(interp, stream).await;
+        });
     }
 }
 

@@ -202,6 +202,11 @@ pub struct Interp {
     // qo'shadi (bloklamaydi), `queue.on` handler ro'yxatga oladi; worker navbatdan
     // olib ketma-ket bajaradi.
     pub queue: Arc<crate::queue_mod::QueueState>,
+    // Kutilayotgan (deferred) serverlar: `http.serve`/`ws.serve` darhol bloklamaydi,
+    // balki bu yerga server tavsifini qo'shadi. Top-level kod tugagach (`run` oxiri)
+    // hammasi BITTA umumiy tokio runtime'da spawn qilinadi — shunda HTTP + WS bir
+    // jarayonda birga ishlaydi va `ws.room.send` HTTP handler ichidan chaqirila oladi.
+    pub pending_servers: Arc<Mutex<Vec<crate::serve_mod::PendingServer>>>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -228,6 +233,7 @@ impl Interp {
             reg: Arc::new(crate::reg_mod::RegState::new()),
             cron: Arc::new(crate::cron_mod::CronState::new()),
             queue: Arc::new(crate::queue_mod::QueueState::new()),
+            pending_servers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -346,6 +352,13 @@ impl Interp {
                     return Err("skip/stop loop tashqarisida ishlatildi".into());
                 }
             }
+        }
+        // Top-level tugadi — kutilayotgan serverlar (http.serve/ws.serve) bo'lsa,
+        // hammasini bitta umumiy event-loopda ishga tushirib bloklaymiz. Server
+        // bo'lmasa darhol qaytadi (oddiy skript normal tugaydi).
+        // run_pending faqat Flow::Error qaytaradi (tokio runtime qura olmasa).
+        if let Err(Flow::Error(e)) = crate::serve_mod::run_pending(&self.arc_self()) {
+            return Err(e);
         }
         Ok(())
     }
