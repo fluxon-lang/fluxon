@@ -838,4 +838,53 @@ r = sh.run "exit 7"
 (r.code == 7) | (fail "code 7 bo'lishi kerak: ${r.code}")
 "#);
     }
+
+    // `each i in inf` — cheksiz loop. `stop` chiqaradi, `i` 0 dan ortadi.
+    // REPL/event-loop uchun (issue #27): oldin model 1..1000 hiylasiga murojaat
+    // qilardi; endi tabiiy cheksiz takror bor.
+    #[test]
+    fn each_inf_stop_va_hisoblagich() {
+        run(r#"
+sum <- 0
+each i in inf
+  if i == 5
+    stop
+  sum <- sum + i
+(sum == 10) | (fail "0+1+2+3+4 = 10 bo'lishi kerak: ${sum}")
+"#);
+    }
+
+    // `skip` cheksiz loop'da keyingi iteratsiyaga o'tadi (i baribir ortadi).
+    #[test]
+    fn each_inf_skip() {
+        run(r#"
+cnt <- 0
+each i in inf
+  if i >= 10
+    stop
+  if i % 2 == 0
+    skip
+  cnt <- cnt + 1
+(cnt == 5) | (fail "toq sonlar 1,3,5,7,9 = 5 ta: ${cnt}")
+"#);
+    }
+
+    // inf qiymat sifatida ishlatib bo'lmaydi — faqat `each i in inf` da.
+    #[test]
+    fn inf_qiymat_sifatida_xato() {
+        let err = run_source("x = inf\n").expect_err("inf qiymat bo'lishi xato berishi kerak");
+        assert!(err.contains("inf"), "kutilmagan xato: {}", err);
+    }
+
+    // `each k, v in inf` — ikki o'zgaruvchi ma'nosiz (cheksiz oddiy hisoblagich).
+    #[test]
+    fn each_inf_ikki_ozgaruvchi_xato() {
+        let err = run_source("each k, v in inf\n  stop\n")
+            .expect_err("inf bilan ikki o'zgaruvchi xato berishi kerak");
+        assert!(
+            err.contains("bitta o'zgaruvchi"),
+            "kutilmagan xato: {}",
+            err
+        );
+    }
 }

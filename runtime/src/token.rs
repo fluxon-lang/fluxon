@@ -16,6 +16,7 @@ pub enum Tok {
     True,
     False,
     Nil,
+    Inf, // cheksiz iterator (each i in inf)
 
     // Kalit so'zlar
     Fn,

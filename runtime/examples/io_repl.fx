@@ -18,15 +18,16 @@ io.print "!\n"
 yosh = io.prompt "Yoshing: "
 log "Demak sen ${yosh} yoshdasan."
 
-# --- REPL tsikli: `while`/`for` yo'q — rekursiya bilan, EOF (nil) to'xtatadi ---
-# (argumentsiz funksiyani qavssiz chaqirib bo'lmaydi, shu sababli dummy `n`.)
-repl = \n ->
+# --- REPL tsikli: cheksiz loop `each i in inf` (i = 0,1,2,...) ---
+# `while`/`for` yo'q; `inf` faqat `each` iteratori sifatida ma'noli.
+# EOF (nil) yoki "exit" yozilsa `stop` bilan chiqamiz.
+log "--- echo REPL (chiqish uchun Ctrl-D yoki 'exit') ---"
+each i in inf
   satr = io.prompt "echo> "
   if satr == nil
     log "xayr!"
-    ret nil
+    stop
+  if satr == "exit"
+    log "xayr!"
+    stop
   log "siz: ${satr}"
-  repl n
-
-log "--- echo REPL (chiqish uchun Ctrl-D) ---"
-repl 0

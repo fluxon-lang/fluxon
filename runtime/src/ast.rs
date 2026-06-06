@@ -76,6 +76,8 @@ pub enum Expr {
         start: Box<Expr>,
         end: Box<Expr>,
     },
+    // inf — cheksiz iterator. Faqat `each i in inf` da ma'noli (i = 0,1,2,...).
+    Inf,
 }
 
 #[derive(Debug, Clone)]

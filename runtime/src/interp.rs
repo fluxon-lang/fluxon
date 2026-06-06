@@ -559,6 +559,11 @@ impl Interp {
     }
 
     fn exec_each(&self, vars: &[String], iter: &Expr, body: &[Stmt], env: &Env) -> ExecResult {
+        // `each i in inf` — cheksiz loop (REPL/event-loop uchun). i = 0,1,2,...
+        // `stop`/`skip` bilan boshqariladi. Eager Vec yig'maydi (cheksiz bo'lardi).
+        if matches!(iter, Expr::Inf) {
+            return self.exec_each_inf(vars, body, env);
+        }
         let iterable = self.eval(iter, env)?;
         let items: Vec<(Option<Value>, Value)> = match iterable {
             Value::List(xs) => xs.into_iter().map(|x| (None, x)).collect(),
@@ -598,6 +603,37 @@ impl Interp {
                 Err(Flow::Skip) => continue,
                 Err(Flow::Stop) => break,
                 Err(other) => return Err(other),
+            }
+        }
+        Ok(Value::Nil)
+    }
+
+    // `each i in inf` — cheksiz takror. Hisoblagich i 0 dan boshlab har
+    // iteratsiyada 1 ga ortadi (i64 overflow'da to'xtaydi — amalda yetib
+    // bormaydi). `stop` chiqaradi, `skip` keyingisiga o'tadi.
+    fn exec_each_inf(&self, vars: &[String], body: &[Stmt], env: &Env) -> ExecResult {
+        if vars.len() != 1 {
+            return Err(Flow::err(
+                "each ... in inf bitta o'zgaruvchi kutadi (each i in inf)",
+            ));
+        }
+        let mut i: i64 = 0;
+        loop {
+            let loop_env = Scope::child_of(env);
+            {
+                let mut s = loop_env.write();
+                // Loop o'zgaruvchisi mutable (tana ichida `<-` mumkin).
+                s.define(&vars[0], Value::Int(i), true);
+            }
+            match self.exec_block(body, &loop_env) {
+                Ok(_) => {}
+                Err(Flow::Skip) => {}
+                Err(Flow::Stop) => break,
+                Err(other) => return Err(other),
+            }
+            match i.checked_add(1) {
+                Some(n) => i = n,
+                None => break, // i64 chegarasi — amalda yetib bo'lmaydi
             }
         }
         Ok(Value::Nil)
@@ -700,6 +736,10 @@ impl Interp {
                     ))),
                 }
             }
+            // inf faqat `each i in inf` da ma'noli — qiymat sifatida ishlatib bo'lmaydi.
+            Expr::Inf => Err(Flow::err(
+                "inf faqat `each i in inf` da ishlatiladi (qiymat emas)",
+            )),
             Expr::Field { target, name } => {
                 // `env.PORT` — muhit o'zgaruvchisi. `env` built-in ident bo'lib,
                 // o'zgaruvchi sifatida e'lon QILINMAGAN bo'lsa, std::env'dan o'qiymiz.

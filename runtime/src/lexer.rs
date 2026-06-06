@@ -354,6 +354,7 @@ impl<'a> Lexer<'a> {
             "true" => Tok::True,
             "false" => Tok::False,
             "nil" => Tok::Nil,
+            "inf" => Tok::Inf,
             "fn" => Tok::Fn,
             "ret" => Tok::Ret,
             "if" => Tok::If,
