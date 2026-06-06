@@ -284,7 +284,8 @@ impl Parser {
                 }
                 // ./tools  ->  Slash? aslida lexer'da './tools' qanday chiqadi?
                 // './tools' = Dot Slash Ident. Buni yig'amiz.
-                Tok::Dot => self.parse_module_path()?,
+                // ../lib/x ham ('..' yuqori papka) — parse_module_path ikkalasini ham yig'adi.
+                Tok::Dot | Tok::DotDot => self.parse_module_path()?,
                 _ => break,
             };
             let alias = if self.eat(&Tok::As) {

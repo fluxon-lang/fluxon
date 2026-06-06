@@ -904,7 +904,13 @@ r = sh.run "exit 7"
     fn run_modules(files: &[(&str, &str)]) -> Result<(), String> {
         let dir = temp_module_dir();
         for (name, src) in files {
-            std::fs::write(dir.join(name), src).unwrap();
+            // Fayl nomi subkatalogli bo'lishi mumkin ("sub/test.fx") — `../`
+            // (yuqori papka) modul yo'llarini sinash uchun papka ierarxiyasi kerak.
+            let p = dir.join(name);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, src).unwrap();
         }
         let main_path = dir.join(files[0].0);
         let src = std::fs::read_to_string(&main_path).unwrap();
@@ -982,6 +988,24 @@ use ./a
             ),
             ("a.fx", "use ./b\nexp fn get -> b.val + 1\n"),
             ("b.fx", "exp val = 42\n"),
+        ])
+        .unwrap();
+    }
+
+    // `../` (yuqori papka) modul yo'li (issue #47): subkatalogdagi fayl
+    // ota-katalogdagi modulni import qila oladi. parse_use `Tok::DotDot`'ni
+    // tan olishi va runtime yo'lni `..` bilan hal qila olishi shu yerda sinaladi.
+    #[test]
+    fn use_module_yuqori_papka() {
+        run_modules(&[
+            (
+                "sub/test.fx",
+                r#"
+use ../greet
+(greet.greeting == "salom") | (fail "greeting: ${greet.greeting}")
+"#,
+            ),
+            ("greet.fx", "exp greeting = \"salom\"\n"),
         ])
         .unwrap();
     }
