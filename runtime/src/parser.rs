@@ -763,7 +763,7 @@ impl Parser {
                     },
                 };
                 self.expect(&Tok::Colon, "':'")?;
-                let value = self.parse_expr()?;
+                let value = schema_type_sym(self.parse_expr()?);
                 entries.push(MapEntry::Pair { key, value });
             }
             self.eat(&Tok::Comma);
@@ -907,6 +907,26 @@ fn is_cron_on(callee: &Expr) -> bool {
 // `time.in`, `x.match`, `x.if` kabi member nomlari kalit so'z bilan to'qnashmasin —
 // member pozitsiyasida grammatik ma'no yo'q, faqat nom kerak (Flux: til AI'ga moslashadi).
 // Manba: lexer scan_ident dagi kalit so'z jadvalining teskarisi.
+// Map qiymat pozitsiyasidagi bare tip nomini (`{a:str}`) sym sifatida talqin
+// qiladi (`{a::str}` bilan teng). Bu `ai.json`/tool schema'da docs va'da qilgan
+// `{product:str qty:int}` sintaksisini ishlatadi: `wrap_schema` allaqachon
+// sym/str tip nomini JSON-schema tipiga aylantiradi (str->string ...). `str`
+// ham modul nomi bo'lganligi uchun, qiymat sifatida u "noma'lum nom: str"
+// xatosini berardi — bu yerda faqat YAKKA, qo'shimchasiz ident bo'lsa sym'ga
+// aylantiramiz; chaqiruv/maydon (`str.upper`) yoki boshqa ifoda tegmaydi.
+fn schema_type_sym(value: Expr) -> Expr {
+    match value {
+        Expr::Ident(name) if is_schema_type_name(&name) => Expr::Sym(name),
+        other => other,
+    }
+}
+
+// Schema kontekstida tip nomi sifatida tan olinadigan identifikatorlar.
+// `tbl` ustun tiplaridan (docs/flux-agent.md) JSON-schema'ga ma'no beradiganlar.
+fn is_schema_type_name(name: &str) -> bool {
+    matches!(name, "str" | "int" | "flt" | "bool" | "json" | "sym")
+}
+
 fn keyword_as_name(tok: &Tok) -> Option<String> {
     let s = match tok {
         Tok::Ident(s) => return Some(s.clone()),
@@ -932,4 +952,39 @@ fn keyword_as_name(tok: &Tok) -> Option<String> {
         _ => return None,
     };
     Some(s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_type_names() {
+        for t in ["str", "int", "flt", "bool", "json", "sym"] {
+            assert!(is_schema_type_name(t), "{} tip nomi bo'lishi kerak", t);
+        }
+        // tip BO'LMAGAN nomlar tegilmaydi (o'zgaruvchi sifatida qoladi).
+        for t in ["x", "str2", "serial", "now", "money", "upper"] {
+            assert!(!is_schema_type_name(t), "{} tip nomi BO'LMASLIGI kerak", t);
+        }
+    }
+
+    #[test]
+    fn schema_sym_only_for_bare_type_ident() {
+        // bare tip ident -> sym
+        match schema_type_sym(Expr::Ident("str".to_string())) {
+            Expr::Sym(s) => assert_eq!(s, "str"),
+            _ => panic!("str ident sym'ga aylanishi kerak"),
+        }
+        // tip bo'lmagan ident -> o'zgarmaydi
+        match schema_type_sym(Expr::Ident("foo".to_string())) {
+            Expr::Ident(s) => assert_eq!(s, "foo"),
+            _ => panic!("foo ident o'zgarmasligi kerak"),
+        }
+        // ident bo'lmagan ifoda (masalan, int literal) -> o'zgarmaydi
+        match schema_type_sym(Expr::Int(5)) {
+            Expr::Int(5) => {}
+            _ => panic!("Int literal o'zgarmasligi kerak"),
+        }
+    }
 }

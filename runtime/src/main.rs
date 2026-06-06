@@ -183,6 +183,37 @@ log "keys=${u.keys} hasName=${u.has "name"} age=${u2.age}"
 "#);
     }
 
+    // Schema map qiymat pozitsiyasidagi bare tip nomi (`{a:str b:int}`) sym'ga
+    // aylanadi — docs (`ai.json {product:str qty:int}`) va'da qilgani. `str` ham
+    // modul nomi bo'lgani uchun ilgari "noma'lum nom: str" xatosini berardi.
+    #[test]
+    fn schema_bare_type_names() {
+        run(r#"
+schema = {product:str qty:int price:flt active:bool data:json tag:sym}
+(schema.product == :str) | (fail "product :str emas: ${schema.product}")
+(schema.qty == :int) | (fail "qty :int emas: ${schema.qty}")
+(schema.price == :flt) | (fail "price :flt emas")
+(schema.active == :bool) | (fail "active :bool emas")
+(schema.data == :json) | (fail "data :json emas")
+(schema.tag == :sym) | (fail "tag :sym emas")
+
+# nested list ichidagi map ham ishlasin (`{items:[{product:str qty:int}]}`)
+nested = {items:[{product:str qty:int}]}
+row = nested.items.0
+(row.product == :str) | (fail "nested product :str emas")
+(row.qty == :int) | (fail "nested qty :int emas")
+
+# regressiya: tip nomi BO'LMAGAN ident hamon o'zgaruvchi sifatida qidiriladi
+x = 5
+m = {n:x}
+(m.n == 5) | (fail "oddiy o'zgaruvchi qiymat buzildi: ${m.n}")
+
+# regressiya: str modul-chaqiruvi qiymat sifatida buzilmadi
+up = str.up "salom"
+(up == "SALOM") | (fail "str.up buzildi: ${up}")
+"#);
+    }
+
     #[test]
     fn mutable_and_each() {
         run(r#"
