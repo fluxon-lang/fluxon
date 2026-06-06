@@ -52,6 +52,11 @@ pub struct Scope {
     // Bu scope root (global)mi? lookup root'ga yetganda, agar Interp global'ni
     // muzlatgan bo'lsa, lock-free snapshot'dan o'qiydi (parallel contention yo'q).
     is_root: bool,
+    // Bu scope fn/lambda chaqiruvi chegarasimi? `=` bind tashqi o'zgaruvchini
+    // qidirganda shu yerda to'xtaydi (funksiya izolyatsiyasi/shadowing). if/each/
+    // match bloklari `false` — ular leksik jihatdan SHAFFOF: ichida `=` bilan
+    // tashqi (bir xil fn ichidagi) o'zgaruvchini yangilash mumkin.
+    is_fn_boundary: bool,
 }
 
 impl Scope {
@@ -60,6 +65,7 @@ impl Scope {
             vars: Vec::new(),
             parent: Parent::None,
             is_root: true,
+            is_fn_boundary: false,
         }))
     }
     // Berilgan `Parent` havola ostida yangi (bo'sh) child scope. `apply`/`if`/
@@ -71,6 +77,7 @@ impl Scope {
             vars: Vec::new(),
             parent,
             is_root: false,
+            is_fn_boundary: false, // if/each/match — shaffof blok
         }))
     }
     // Params soni bilan oldindan o'lchamlangan child (fn chaqiruvi — bind paytida
@@ -80,6 +87,7 @@ impl Scope {
             vars: Vec::with_capacity(cap),
             parent,
             is_root: false,
+            is_fn_boundary: true, // fn/lambda chaqiruvi — izolyatsiya chegarasi
         }))
     }
     // `env` Arc'ni child uchun ota-havolaga aylantiradi (faqat `is_root` ni
@@ -368,7 +376,7 @@ impl Interp {
         match stmt {
             Stmt::Bind { name, value } => {
                 let v = self.eval(value, env)?;
-                env.write().define(name, v, false);
+                self.bind(name, v, env)?;
                 Ok(Value::Nil)
             }
             Stmt::Assign { name, value } => {
@@ -483,6 +491,55 @@ impl Interp {
         }
         // yangi mutable o'zgaruvchi
         env.write().define(name, v, true);
+        Ok(())
+    }
+
+    // `=` bind: o'zgaruvchini JORIY FUNKSIYA ICHIDAGI scope zanjirida qidiradi.
+    // if/each/match bloklari leksik jihatdan shaffof — ular ichidagi `=` tashqi
+    // (bir xil fn'dagi) o'zgaruvchini yangilaydi, boshqa tillar kabi. Qidiruv
+    // fn/lambda chegarasida (`is_fn_boundary`) to'xtaydi: fn ichida `=` tashqi
+    // global'ni emas, yangi LOCAL yaratadi (izolyatsiya/shadowing). Topilgan
+    // o'zgaruvchi immutable (`=`) bo'lsa — xato (immutability saqlanadi, `<-` bilan
+    // bir xil qoida). Topilmasa joriy scope'da yangi IMMUTABLE local yaratadi.
+    fn bind(&self, name: &str, v: Value, env: &Env) -> Result<(), Flow> {
+        let mut cur = env.clone();
+        loop {
+            let (parent, at_boundary) = {
+                let mut s = cur.write();
+                if let Some((slot, mutable)) = s.get_mut_entry(name) {
+                    if !mutable {
+                        return Err(Flow::err(format!(
+                            "'{}' o'zgarmas (=) e'lon qilingan; blok ichidan ham \
+                             qayta tayinlab bo'lmaydi (uni `<-` bilan e'lon qiling)",
+                            name
+                        )));
+                    }
+                    *slot = v;
+                    return Ok(());
+                }
+                // fn/lambda chegarasiga yetdik — bu fn'dan tashqariga chiqmaymiz.
+                (s.parent.clone(), s.is_fn_boundary)
+            };
+            if at_boundary {
+                break;
+            }
+            match parent {
+                Parent::Scope(p) => cur = p,
+                // Root — top-level global. Muzlatilmagan bo'lsa global'da qidirsak
+                // ham bo'ladi, lekin `=` semantikasi: joriy scope'da yangi local
+                // yaratish (top-level'da `cur` allaqachon global). Tashqi global'ni
+                // qidirish uchun zanjir davom etadi.
+                Parent::Root => {
+                    if self.globals_frozen.get().is_some() {
+                        break; // muzlatilgan global — yangi local yaratamiz
+                    }
+                    cur = self.global.clone();
+                }
+                Parent::None => break,
+            }
+        }
+        // yangi immutable o'zgaruvchi (joriy scope'da)
+        env.write().define(name, v, false);
         Ok(())
     }
 
