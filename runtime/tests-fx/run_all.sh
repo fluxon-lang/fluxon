@@ -74,6 +74,17 @@ run "06_reg"                $BIN run $DIR/06_reg.fx
 echo "############ 07 cron (rejalashtirilgan vazifalar) ############"
 run "07_cron"               $BIN run $DIR/07_cron.fx
 
+echo "############ 08 io (terminal input/output) ############"
+# io stdin'dan o'qiydi — standart run() stdin bermaydi, shuning uchun quvuraymiz.
+io_out="$(printf 'Firdavs\n42\n' | $BIN run $DIR/08_io.fx 2>&1)"
+echo "$io_out"
+if echo "$io_out" | grep -q "HAMMASI O'TDI"; then
+  echo ">>> 08_io: PASS"; pass=$((pass+1))
+else
+  echo ">>> 08_io: FAIL"; fail=$((fail+1))
+fi
+echo
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

@@ -64,7 +64,7 @@ pub fn install(env: &Env) {
 
 // --- modul nomimi? ---
 pub fn is_module(name: &str) -> bool {
-    matches!(name, "str" | "math" | "rand" | "json" | "time")
+    matches!(name, "str" | "math" | "rand" | "json" | "time" | "io")
 }
 
 // --- modul funksiyasi chaqiruvi ---
@@ -75,6 +75,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "rand" => rand_module(func, args),
         "json" => json_module(func, args),
         "time" => time_module(func, args),
+        "io" => io_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }
@@ -224,6 +225,52 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
             "time modulida '{}' funksiyasi yo'q",
             func
         ))),
+    }
+}
+
+// ---------------- io ----------------
+// Terminal input/output. `log` har doim stderr'ga `\n` qo'shadi; interaktiv CLI
+// (REPL, agent, wizard) uchun stdin'dan o'qish va `\n`siz prompt kerak. Prompt
+// va kiritma stdout/stdin orqali ketadi (log stderr — ular aralashmasin).
+fn io_module(func: &str, args: Vec<Value>) -> R {
+    use std::io::Write;
+    match func {
+        // io.read_line -> stdin'dan bitta satr (oxirgi \n olib tashlanadi).
+        // EOF (Ctrl-D, quvur tugashi) -> nil, shunda chaqiruvchi tsiklni to'xtatadi.
+        "read_line" => {
+            let mut line = String::new();
+            match std::io::stdin().read_line(&mut line) {
+                Ok(0) => Ok(Value::Nil),
+                Ok(_) => {
+                    // satr oxiridagi \n (va Windows \r) ni olib tashlaymiz
+                    let trimmed = line.trim_end_matches(['\n', '\r']);
+                    Ok(Value::Str(trimmed.to_string()))
+                }
+                Err(e) => Err(Flow::err(format!("io.read_line: {}", e))),
+            }
+        }
+        // io.print s -> stdout'ga \n SIZ chiqarish (prompt ko'rsatish uchun).
+        // Darhol flush — aks holda prompt buferda qolib, foydalanuvchi kiritmadan
+        // oldin uni ko'rmaydi.
+        "print" => {
+            let s = arg_str(&args, 0, "io.print")?;
+            let mut out = std::io::stdout();
+            out.write_all(s.as_bytes())
+                .and_then(|_| out.flush())
+                .map_err(|e| Flow::err(format!("io.print: {}", e)))?;
+            Ok(Value::Nil)
+        }
+        // io.prompt msg -> msg'ni \n siz chiqarib, keyin bitta satr o'qiydi.
+        // io.print + io.read_line uchun qulay shorthand.
+        "prompt" => {
+            let s = arg_str(&args, 0, "io.prompt")?;
+            let mut out = std::io::stdout();
+            out.write_all(s.as_bytes())
+                .and_then(|_| out.flush())
+                .map_err(|e| Flow::err(format!("io.prompt: {}", e)))?;
+            io_module("read_line", vec![])
+        }
+        _ => Err(Flow::err(format!("io modulida '{}' funksiyasi yo'q", func))),
     }
 }
 
@@ -718,5 +765,44 @@ mod time_tests {
     fn parse_rejects_garbage() {
         assert_eq!(parse_ts("salom"), None);
         assert_eq!(parse_ts("2023-11-14"), None); // juda qisqa (vaqt yo'q)
+    }
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+
+    // io.print qiymat sifatida nil qaytaradi (stdout'ga yozish — yon ta'sir).
+    // Test stdout'ga "" yozadi (bo'sh) — kuzatuvchi chiqishni ifloslamaydi.
+    // (Value/Flow Debug derive qilmaydi — unwrap o'rniga match.)
+    #[test]
+    fn print_returns_nil() {
+        match io_module("print", vec![Value::Str(String::new())]) {
+            Ok(Value::Nil) => {}
+            _ => panic!("io.print nil qaytarishi kerak"),
+        }
+    }
+
+    // io.print argument str bo'lishini talab qiladi.
+    #[test]
+    fn print_requires_str_arg() {
+        assert!(io_module("print", vec![Value::Int(5)]).is_err());
+        assert!(io_module("print", vec![]).is_err());
+    }
+
+    // Noma'lum io funksiyasi aniq xato beradi. (Flow Debug derive qilmaydi —
+    // xato matniga Flow::Error ichidan kiramiz.)
+    #[test]
+    fn unknown_func_errors() {
+        match io_module("yoq", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("io modulida")),
+            _ => panic!("Flow::Error kutilgan edi"),
+        }
+    }
+
+    // io modul sifatida tanilishi kerak (argumentsiz Field dispatch shunга tayanadi).
+    #[test]
+    fn io_is_module() {
+        assert!(is_module("io"));
     }
 }

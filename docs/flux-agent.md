@@ -224,6 +224,24 @@ db.one "select count(*) c from t where created > $1" [time.ago 24 :hr]
 json.enc v · json.dec s · env.PORT ?? "8080" · log "xabar"
 ```
 
+### io (terminal input/output)
+`log` har doim stderr'ga `\n` qo'shadi; interaktiv CLI (REPL, agent, wizard) uchun:
+```flux
+io.read_line          # stdin'dan bitta satr → str (Enter'gacha bloklaydi); EOF → nil
+io.print s            # stdout'ga \n SIZ chiqarish (prompt uchun)
+io.prompt msg         # msg'ni chiqarib, keyin io.read_line → str (shorthand)
+```
+REPL tsikli — `each`/`while` yo'q, rekursiya bilan (EOF'da `nil` → to'xtash):
+```flux
+repl = \n ->
+  satr = io.prompt "siz> "
+  if satr == nil
+    ret nil                # EOF (Ctrl-D) — chiqish
+  log "javob:" satr
+  repl n
+repl 0
+```
+
 ### cron (fon vazifa)
 Standart Unix 5-maydon (daqiqa soat kun oy hafta), TIRNOQSIZ — `*` cron belgisi:
 ```flux
