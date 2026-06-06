@@ -615,6 +615,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Nil)
             }
+            Tok::Inf => {
+                self.advance();
+                Ok(Expr::Inf)
+            }
             Tok::Sym(s) => {
                 self.advance();
                 Ok(Expr::Sym(s))
@@ -924,6 +928,7 @@ fn keyword_as_name(tok: &Tok) -> Option<String> {
         Tok::True => "true",
         Tok::False => "false",
         Tok::Nil => "nil",
+        Tok::Inf => "inf",
         _ => return None,
     };
     Some(s.to_string())

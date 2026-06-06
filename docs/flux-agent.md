@@ -7,7 +7,7 @@ File extension: `.fx`. Read once, write correct Flux code.
 - Comment `# to end of line` (no `//`). Statement on a new line (no `;`).
 - Block = indentation (2 spaces), no `{}`.
 - These are keywords — never name a var/loop/param after one (e.g. `each exp in xs`
-  fails; use `e`): `as each elif else exp fail fn if in match ret skip stop tbl use`
+  fails; use `e`): `as each elif else exp fail fn if in inf match ret skip stop tbl use`
 ```flux
 if x > 0
   log "positive"
@@ -67,10 +67,11 @@ else
 ```
 Only loop = `each` (no while/for):
 ```flux
-each item in list   ·   each i in 1..5   ·   each k, v in map
+each item in list   ·   each i in 1..5   ·   each k, v in map   ·   each i in inf
 ```
-In a loop: `skip` (continue), `stop` (break). Conditional repeat: `each i in 1..n`
-or recursion.
+In a loop: `skip` (continue), `stop` (break). `each i in inf` = infinite loop
+(i = 0,1,2,...) for REPL / event loops / "repeat until `stop`". `inf` is ONLY
+valid as the `each` iterator — not a value.
 
 `match` — value dispatch (symbol/number ONLY, NOT boolean conditions):
 ```flux
@@ -248,15 +249,15 @@ io.read_line          # one line from stdin → str (blocks until Enter); EOF �
 io.print s            # print to stdout WITHOUT `\n` (for building prompts)
 io.prompt msg         # print msg, then io.read_line → str (shorthand)
 ```
-REPL loop — no `each`/`while`, via recursion (EOF → `nil` → stop):
+REPL loop — `each i in inf` (infinite), `stop` on EOF/exit:
 ```flux
-repl = \n ->
+each i in inf
   line = io.prompt "you> "
-  if line == nil
-    ret nil                # EOF (Ctrl-D) — exit
+  if line == nil               # EOF (Ctrl-D)
+    stop
+  if line == "exit"
+    stop
   log "reply:" line
-  repl n
-repl 0
 ```
 
 ### fs (local filesystem)

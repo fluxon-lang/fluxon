@@ -113,6 +113,24 @@ each k, v in m
   msum <- msum + v
 eq msum 6 "each map k,v"
 
+# each i in inf — cheksiz loop, stop bilan to'xtaydi, i 0 dan ortadi (issue #27)
+isum <- 0
+each i in inf
+  if i == 5
+    stop
+  isum <- isum + i
+eq isum 10 "each inf stop (0+1+2+3+4)"
+
+# inf + skip: toq sonlarni sana, 10 da to'xta
+odds2 <- 0
+each i in inf
+  if i >= 10
+    stop
+  if i % 2 == 0
+    skip
+  odds2 <- odds2 + 1
+eq odds2 5 "each inf skip (toq 1,3,5,7,9)"
+
 # --- match: symbol va son ---
 fn nomi s
   match s
