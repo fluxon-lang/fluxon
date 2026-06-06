@@ -96,6 +96,9 @@ run "10_ai"                 $BIN run $DIR/10_ai.fx
 echo "############ 11 sh (tashqi shell buyruqlari) ############"
 run "11_sh"                 $BIN run $DIR/11_sh.fx
 
+echo "############ 12 modules (use ./fayl) ############"
+run "12_modules"            $BIN run $DIR/12_modules.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

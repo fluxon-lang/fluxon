@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use parking_lot::RwLock;
@@ -207,6 +209,17 @@ pub struct Interp {
     // hammasi BITTA umumiy tokio runtime'da spawn qilinadi — shunda HTTP + WS bir
     // jarayonda birga ishlaydi va `ws.room.send` HTTP handler ichidan chaqirila oladi.
     pub pending_servers: Arc<Mutex<Vec<crate::serve_mod::PendingServer>>>,
+    // `use ./fayl` foydalanuvchi modullari uchun cache: canonical yo'l -> modul
+    // namespace (`Value::Map`). Bir modul ikki marta import qilinsa qayta
+    // bajarilmaydi — bir marta run qilinib natija shu yerda saqlanadi (idempotent).
+    module_cache: Mutex<HashMap<PathBuf, Value>>,
+    // Hozir yuklanayotgan modullar steki (canonical yo'llar) — sikllik importni
+    // (A -> B -> A) aniqlash uchun. Modul run boshida push, tugaganda pop.
+    module_loading: Mutex<Vec<PathBuf>>,
+    // Joriy bajarilayotgan faylning katalogi. `use ./fayl` yo'lini shunga nisbatan
+    // hal qiladi. Nested import uchun save/restore steki kabi ishlaydi: modul run
+    // qilinganda uning katalogiga o'rnatiladi, tugagach tiklanadi.
+    current_base: Mutex<PathBuf>,
 }
 
 // tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
@@ -234,7 +247,20 @@ impl Interp {
             cron: Arc::new(crate::cron_mod::CronState::new()),
             queue: Arc::new(crate::queue_mod::QueueState::new()),
             pending_servers: Arc::new(Mutex::new(Vec::new())),
+            module_cache: Mutex::new(HashMap::new()),
+            module_loading: Mutex::new(Vec::new()),
+            // Boshlang'ich base — joriy ish katalogi. `set_base` top-level fayl
+            // katalogiga aniqlashtiradi (main.rs).
+            current_base: Mutex::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
         }
+    }
+
+    // Top-level faylning katalogini o'rnatadi — `use ./fayl` yo'llari shunga
+    // nisbatan hal qilinadi. main.rs `run`dan oldin bir marta chaqiradi.
+    pub fn set_base(&self, dir: &std::path::Path) {
+        *self.current_base.lock().unwrap() = dir.to_path_buf();
     }
 
     // `env.NOM` qiymatini topadi. Ustunlik: OS env (std::env) > .env fayl.
@@ -378,6 +404,149 @@ impl Interp {
         self.schema.write().insert(name.to_string(), cols);
     }
 
+    // `use ./fayl` — foydalanuvchi modulini yuklab namespace `Value::Map` qaytaradi.
+    // Yo'l joriy fayl katalogiga (`current_base`) nisbatan hal qilinadi. Cache va
+    // sikllik import himoyasi shu yerda. Faqat `exp` qilingan nomlar namespace'ga
+    // kiradi (qolganlari modul-private).
+    fn load_module(&self, rel_path: &str) -> EvalResult {
+        // 1. To'liq yo'lni quramiz: base + nisbiy yo'l, .fx kengaytmasi qo'shamiz.
+        let base = self.current_base.lock().unwrap().clone();
+        let mut full = base.join(rel_path);
+        if full.extension().is_none() {
+            full.set_extension("fx");
+        }
+        // canonicalize: cache/sikl kaliti barqaror bo'lishi uchun (symlink/`..`
+        // normallashtiriladi). Fayl yo'q bo'lsa shu yerda xato beradi.
+        let canon = full
+            .canonicalize()
+            // Xato xabarida foydalanuvchi yozган yo'lni ko'rsatamiz (`./greet`),
+            // normallashtirilmagan to'liq yo'lni emas — o'qishga qulayroq.
+            .map_err(|e| Flow::err(format!("modul topilmadi '{}': {}", rel_path, e)))?;
+
+        // 2. Cache hit — qayta bajarmaymiz (idempotent import).
+        if let Some(v) = self.module_cache.lock().unwrap().get(&canon) {
+            return Ok(v.clone());
+        }
+
+        // 3. Sikllik import: agar bu modul hozir yuklanish jarayonida bo'lsa
+        //    (A -> B -> A), to'xtaymiz — aks holda cheksiz rekursiya.
+        {
+            let loading = self.module_loading.lock().unwrap();
+            if loading.contains(&canon) {
+                let chain: Vec<String> = loading
+                    .iter()
+                    .chain(std::iter::once(&canon))
+                    .map(|p| p.display().to_string())
+                    .collect();
+                return Err(Flow::err(format!("sikllik import: {}", chain.join(" -> "))));
+            }
+        }
+        self.module_loading.lock().unwrap().push(canon.clone());
+
+        // 4. Faylni bajaramiz. Natijadan qat'i nazar steki'dan olib tashlaymiz.
+        let result = self.run_module_file(&canon);
+        self.module_loading.lock().unwrap().pop();
+        let ns = result?;
+
+        // 5. Cache'ga yozamiz (closure Arc'lar shared — ikkinchi import klon oladi).
+        self.module_cache.lock().unwrap().insert(canon, ns.clone());
+        Ok(ns)
+    }
+
+    // Modul faylini o'qib parse qilib, alohida modul scope'da bajaradi va
+    // `exp` qilingan nomlardan namespace `Value::Map` quradi. `current_base`'ni
+    // modul katalogiga vaqtincha o'rnatadi (nested import uchun), tugagach tiklaydi.
+    fn run_module_file(&self, canon: &std::path::Path) -> EvalResult {
+        let src = std::fs::read_to_string(canon).map_err(|e| {
+            Flow::err(format!(
+                "modulni o'qib bo'lmadi '{}': {}",
+                canon.display(),
+                e
+            ))
+        })?;
+        let toks = crate::lexer::lex(&src).map_err(Flow::err)?;
+        let prog = crate::parser::parse(toks).map_err(Flow::err)?;
+
+        // Modul scope — global'ning child'i: builtin'lar (`log`/`rep`) va top-level
+        // fn'lar lookup zanjiri orqali ko'rinadi, lekin modulning o'z `exp`/`=`
+        // nomlari avval qidiriladi (shadowing — izolyatsiya yetarli).
+        let mod_scope = Scope::child_of(&self.global);
+
+        // base'ni modul katalogiga o'rnatamiz — modul ichidagi `use ./...` shu
+        // modulga nisbatan hal qilinsin. Save/restore: nested import qaytib
+        // chiqqanda ota-modul base'i tiklanadi (xato yo'lida ham).
+        let prev_base = self.current_base.lock().unwrap().clone();
+        if let Some(dir) = canon.parent() {
+            *self.current_base.lock().unwrap() = dir.to_path_buf();
+        }
+        let exec = self.exec_module_body(&prog, &mod_scope);
+        *self.current_base.lock().unwrap() = prev_base;
+        exec?;
+
+        // Faqat eksport qilingan nomlarni yig'amiz: `exp NAME =` va `exp fn`.
+        let exported = collect_exported(&prog);
+        let mut ns = BTreeMap::new();
+        for (name, v, _) in mod_scope.read().vars.iter() {
+            if exported.contains(&**name) {
+                ns.insert(name.to_string(), v.clone());
+            }
+        }
+        Ok(Value::Map(ns))
+    }
+
+    // Modul tanasini berilgan scope'da bajaradi. `run`dan farqi:
+    //  • fn'lar `Parent::Scope(mod_scope)` HAQIQIY Arc bilan saqlanadi
+    //    (Parent::Root marker EMAS) — shunda modul fn'i apply qilinganda
+    //    import qiluvchi global'ga emas, o'z modul scope'iga (`exp greeting`)
+    //    boradi. Bu closure capture'ning to'g'ri ishlashi uchun MAJBURIY.
+    //  • `run_pending` chaqirmaydi — modul ichidagi `http.serve`/`ws.serve`
+    //    bir xil Interp'ning `pending_servers`'iga qo'shiladi (chunki
+    //    `arc_self` o'sha Interp), top-level oxirida bir marta ishga tushadi.
+    //
+    // Eslatma (ataylab qabul qilingan leak): modul scope o'z `vars`ida fn'larni,
+    // fn'lar esa `Parent::Scope(mod_scope)` orqali modul scope'ni ushlaydi —
+    // Arc sikli. Modullar process umri davomida tirik kerak (HTTP handler'lar
+    // ulardan foydalanadi), shuning uchun bu drop bo'lmasligi maqsadga muvofiq.
+    fn exec_module_body(&self, prog: &Program, scope: &Env) -> Result<(), Flow> {
+        // Hoisting — fn/tbl oldindan ro'yxatga (tartibdan qat'i nazar bir-birini
+        // chaqira oladi). `run`dagidan farqi: parent modul scope (Arc).
+        for stmt in prog {
+            match stmt {
+                Stmt::FnDecl {
+                    name, params, body, ..
+                } => {
+                    let f = Value::Fn(Arc::new(FnValue {
+                        params: params.clone(),
+                        body: body.clone(),
+                        parent: Scope::parent_link(scope),
+                        name: name.clone(),
+                    }));
+                    scope.write().define(name, f, false);
+                }
+                Stmt::Tbl { name, columns } => self.register_tbl(name, columns),
+                _ => {}
+            }
+        }
+        for stmt in prog {
+            if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
+                continue;
+            }
+            match self.exec_stmt(stmt, scope) {
+                Ok(_) => {}
+                Err(Flow::Error(e)) => return Err(Flow::Error(e)),
+                Err(Flow::Fail { status, message }) => {
+                    let pfx = status.map(|s| format!("[{}] ", s)).unwrap_or_default();
+                    return Err(Flow::err(format!("fail: {}{}", pfx, message)));
+                }
+                Err(Flow::Return(_)) => {} // modul top-level ret — e'tiborsiz
+                Err(Flow::Skip) | Err(Flow::Stop) => {
+                    return Err(Flow::err("skip/stop loop tashqarisida ishlatildi"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Blokni ketma-ket bajaradi; qiymati — oxirgi ifoda (Flux'da blok ifoda).
     fn exec_block(&self, stmts: &[Stmt], env: &Env) -> ExecResult {
         let mut last = Value::Nil;
@@ -447,8 +616,30 @@ impl Interp {
             }
             Stmt::Each { vars, iter, body } => self.exec_each(vars, iter, body, env),
             Stmt::Expr(e) => self.eval(e, env),
-            // use — modul import (dispatch nom asosida, ro'yxatga olish shart emas).
-            Stmt::Use { .. } => Ok(Value::Nil),
+            // use — modul import. Ikki xil:
+            //  • Batareya (`use http`, `use db`) — dispatch nom asosida ishlaydi,
+            //    ro'yxatga olish SHART EMAS, shuning uchun no-op.
+            //  • Foydalanuvchi fayli (`use ./tools`, `use ../lib/x as y`) — faylni
+            //    o'qib, alohida modul scope'da bajarib, `exp` qilingan nomlarni
+            //    `tools.nom` (yoki alias) ostida joriy scope'ga bog'laydi.
+            Stmt::Use { items } => {
+                for item in items {
+                    // Nisbiy yo'l (`.`/`..` bilan boshlanadi) — foydalanuvchi fayli.
+                    // Aks holda batareya nomi (no-op, eski xatti-harakat).
+                    if !is_user_module_path(&item.path) {
+                        continue;
+                    }
+                    let ns = self.load_module(&item.path)?;
+                    // Bog'lash nomi: alias bo'lsa o'sha, aks holda yo'l "bazasi"
+                    // (`./lib/greet` -> `greet`).
+                    let name = item
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| module_basename(&item.path));
+                    env.write().define(&name, ns, false);
+                }
+                Ok(Value::Nil)
+            }
             // tbl — schema registry'ga yoziladi (sym/json konversiya + migration).
             Stmt::Tbl { name, columns } => {
                 self.register_tbl(name, columns);
@@ -1206,6 +1397,43 @@ impl Interp {
             ))),
         }
     }
+}
+
+// `use` yo'li foydalanuvchi faylimi yoki batareyami? Foydalanuvchi modullari
+// nisbiy yo'l bilan beriladi (`./tools`, `../lib/x`). Batareyalar oddiy nom
+// (`http`, `db`) — ular dispatch nom asosida ishlaydi, fayl yuklanmaydi.
+fn is_user_module_path(path: &str) -> bool {
+    path.starts_with("./") || path.starts_with("../") || path == "." || path == ".."
+}
+
+// Modul yo'lidan bog'lash nomini chiqaradi: oxirgi segment, `.fx` siz.
+// `./lib/greet` -> `greet`, `./tools` -> `tools`.
+fn module_basename(path: &str) -> String {
+    let last = path.rsplit('/').next().unwrap_or(path);
+    last.strip_suffix(".fx").unwrap_or(last).to_string()
+}
+
+// Modul dasturidan eksport qilingan top-level nomlarni yig'adi: `exp NAME = ...`
+// va `exp fn NAME`. Faqat shular namespace'ga kiradi — qolgan `=`/`fn` lar
+// modul-private.
+fn collect_exported(prog: &Program) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for stmt in prog {
+        match stmt {
+            Stmt::ExpBind { name, .. } => {
+                set.insert(name.clone());
+            }
+            Stmt::FnDecl {
+                name,
+                exported: true,
+                ..
+            } => {
+                set.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+    set
 }
 
 // Joriy katalogdagi `.env` faylini o'qiydi va parse qiladi. Fayl yo'q bo'lsa

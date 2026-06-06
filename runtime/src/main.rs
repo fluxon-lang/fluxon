@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match run_source(&src) {
+    match run_source_at(&src, std::path::Path::new(&path)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Flux xato: {}", e);
@@ -62,13 +62,28 @@ fn parse_args(args: &[String]) -> Option<String> {
     }
 }
 
-fn run_source(src: &str) -> Result<(), String> {
+// Manbani bajaradi. `path` — faylning yo'li; `use ./fayl` modullari shu faylning
+// katalogiga nisbatan hal qilinadi.
+fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
     // Arc<Interp>: http.serve handler'larni server thread'larida apply qiladi,
     // shuning uchun interp thread'lar orasida ulashiladigan bo'lishi kerak.
     let interp = interp::Interp::new_arc();
+    // `use ./fayl` uchun base — top-level faylning katalogi.
+    if let Some(dir) = path.parent() {
+        // parent() bo'sh ("") bo'lsa joriy katalog (default) qoladi.
+        if !dir.as_os_str().is_empty() {
+            interp.set_base(dir);
+        }
+    }
     interp.run(&prog)
+}
+
+// Path'siz qulay wrapper — testlar uchun (modul yo'llari joriy katalogga nisbatan).
+#[cfg(test)]
+fn run_source(src: &str) -> Result<(), String> {
+    run_source_at(src, std::path::Path::new("."))
 }
 
 #[cfg(test)]
@@ -836,6 +851,177 @@ r = sh.run "printf salom"
         run(r#"
 r = sh.run "exit 7"
 (r.code == 7) | (fail "code 7 bo'lishi kerak: ${r.code}")
+"#);
+    }
+
+    // --- `use ./fayl` foydalanuvchi modullari (issue #45) ---
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Unikal vaqtinchalik katalog — parallel testlar to'qnashmasligi uchun
+    // (process id + atomik hisoblagich). Test fayllari shu yerga yoziladi.
+    fn temp_module_dir() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("flux_mod_test_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // `files` ([(nom, manba), ...]) ni `dir`ga yozadi, birinchisini run qiladi,
+    // natijani qaytaradi. Tugagach katalogni tozalaydi.
+    fn run_modules(files: &[(&str, &str)]) -> Result<(), String> {
+        let dir = temp_module_dir();
+        for (name, src) in files {
+            std::fs::write(dir.join(name), src).unwrap();
+        }
+        let main_path = dir.join(files[0].0);
+        let src = std::fs::read_to_string(&main_path).unwrap();
+        let r = run_source_at(&src, &main_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
+
+    // Asosiy holat (issue #45 reproduction): `exp` qilingan qiymat va funksiya
+    // `modul.nom` ostida ko'rinadi; modul funksiyasi modul-darajadagi `exp`ga
+    // (closure) kira oladi.
+    #[test]
+    fn use_module_exp_va_closure() {
+        run_modules(&[
+            (
+                "main.fx",
+                r#"
+use ./greet
+(greet.greeting == "salom") | (fail "greeting: ${greet.greeting}")
+(greet.hello "Aziza" == "salom, Aziza") | (fail "hello: ${greet.hello "Aziza"}")
+"#,
+            ),
+            (
+                "greet.fx",
+                "exp greeting = \"salom\"\nexp fn hello nom -> \"${greeting}, ${nom}\"\n",
+            ),
+        ])
+        .unwrap();
+    }
+
+    // `as alias` — bog'lash nomi alias bo'ladi (batareya nomi bilan to'qnashmaslik).
+    #[test]
+    fn use_module_alias() {
+        run_modules(&[
+            (
+                "main.fx",
+                r#"
+use ./tools as t
+(t.classify "x" == "turi: x") | (fail "classify: ${t.classify "x"}")
+"#,
+            ),
+            ("tools.fx", "exp fn classify v -> \"turi: ${v}\"\n"),
+        ])
+        .unwrap();
+    }
+
+    // Modul-private nomlar (oddiy `=`/`fn`) namespace'ga KIRMAYDI — faqat `exp`.
+    #[test]
+    fn use_module_private_nom_eksport_qilinmaydi() {
+        run_modules(&[
+            (
+                "main.fx",
+                r#"
+use ./m
+(m.pub_v == 1) | (fail "pub_v: ${m.pub_v}")
+(m.priv_v == nil) | (fail "priv_v eksport qilinmasligi kerak: ${m.priv_v}")
+"#,
+            ),
+            ("m.fx", "exp pub_v = 1\npriv_v = 2\n"),
+        ])
+        .unwrap();
+    }
+
+    // Nested import (main -> a -> b): modul boshqa modulni import qila oladi,
+    // yo'l import qiluvchi modulning katalogiga nisbatan hal qilinadi.
+    #[test]
+    fn use_module_nested() {
+        run_modules(&[
+            (
+                "main.fx",
+                r#"
+use ./a
+(a.get() == 43) | (fail "get: ${a.get()}")
+"#,
+            ),
+            ("a.fx", "use ./b\nexp fn get -> b.val + 1\n"),
+            ("b.fx", "exp val = 42\n"),
+        ])
+        .unwrap();
+    }
+
+    // Cache: bir modul ikki marta `use` qilinsa bir marta bajariladi (idempotent).
+    // Modul top-level `<-` hisoblagichni oshiradi; ikki import'da ham 1 bo'lib qoladi.
+    #[test]
+    fn use_module_cache_bir_marta_bajariladi() {
+        run_modules(&[
+            (
+                "main.fx",
+                r#"
+use ./c
+use ./c as c2
+(c.n == 1) | (fail "n: ${c.n}")
+(c2.n == 1) | (fail "c2.n: ${c2.n}")
+"#,
+            ),
+            // `exp n` bir martagina hisoblanadi — cache bo'lsa shunday.
+            ("c.fx", "exp n = 1\n"),
+        ])
+        .unwrap();
+    }
+
+    // Sikllik import (x -> y -> x) aniq xato beradi (cheksiz rekursiya emas).
+    #[test]
+    fn use_module_sikllik_import_xato() {
+        let err = run_modules(&[
+            ("x.fx", "use ./y\nexp a = 1\n"),
+            ("y.fx", "use ./x\nexp b = 2\n"),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("sikllik import"),
+            "sikllik import xatosi kutilgan edi, kelgan: {}",
+            err
+        );
+    }
+
+    // Mavjud bo'lmagan modul — aniq "topilmadi" xatosi.
+    #[test]
+    fn use_module_topilmadi_xato() {
+        let err = run_modules(&[("main.fx", "use ./yoq\n")]).unwrap_err();
+        assert!(
+            err.contains("modul topilmadi"),
+            "topilmadi xatosi kutilgan edi, kelgan: {}",
+            err
+        );
+    }
+
+    // `.fx` kengaytmasi avtomatik qo'shiladi: `use ./greet` -> `greet.fx`.
+    // (Yuqoridagi testlar ham shunga tayanadi; bu aniq tekshiruv.)
+    #[test]
+    fn use_module_fx_kengaytma_avto() {
+        run_modules(&[
+            (
+                "main.fx",
+                "use ./util\n(util.x == 7) | (fail \"x: ${util.x}\")\n",
+            ),
+            ("util.fx", "exp x = 7\n"),
+        ])
+        .unwrap();
+    }
+
+    // Batareya `use` (`use http`) hamon no-op — fayl yuklanmaydi, dispatch ishlaydi.
+    #[test]
+    fn use_batareya_hamon_no_op() {
+        // `use math` fayl izlamaydi (xato bermaydi), math.* dispatch ishlaydi.
+        run(r#"
+use math
+(math.floor 3.7 == 3) | (fail "floor noto'g'ri")
 "#);
     }
 
