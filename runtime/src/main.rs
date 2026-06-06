@@ -121,6 +121,67 @@ log "total=${total}"
 "#);
     }
 
+    // if/each/match bloklari leksik jihatdan SHAFFOF: ichidagi `=` tashqi (bir xil
+    // fn'dagi) o'zgaruvchini yangilaydi — boshqa tillar kabi, klon olinmaydi. Bu
+    // accumulator pattern'ni tabiiy qiladi (avval blok ichida `=` jim yangi local
+    // yaratardi → tashqi nil qolardi).
+    #[test]
+    fn bind_in_block_updates_outer() {
+        run(r#"
+best <- nil
+top <- 0
+each e in [{n:"a" v:3} {n:"b" v:7} {n:"c" v:2}]
+  if e.v > top
+    top = e.v
+    best = e
+(top == 7) | (fail "top noto'g'ri: ${top}")
+(best.n == "b") | (fail "best noto'g'ri: ${best.n}")
+"#);
+    }
+
+    // Immutability saqlanadi: tashqi `=` (immutable) o'zgaruvchini blok ichidan
+    // `=` bilan ham qayta tayinlab bo'lmaydi (aniq xato — jim shadow EMAS).
+    #[test]
+    fn bind_in_block_immutable_errors() {
+        let err = run_source(
+            r#"
+x = 10
+if true
+  x = 20
+"#,
+        )
+        .expect_err("immutable'ni blok ichida = bilan yangilash xato berishi kerak");
+        assert!(err.contains("o'zgarmas"), "kutilmagan xato: {}", err);
+    }
+
+    // fn/lambda CHEGARA: ichidagi `=` tashqi o'zgaruvchini emas, yangi LOCAL
+    // yaratadi (shadowing/izolyatsiya). Tashqi qiymat o'zgarmaydi.
+    #[test]
+    fn bind_in_fn_shadows_not_mutates() {
+        run(r#"
+x = 100
+f = \n ->
+  x = 5
+  x + n
+(f 1 == 6) | (fail "fn local x ishlamadi")
+(x == 100) | (fail "fn ichidagi = tashqi x ni o'zgartirdi: ${x}")
+"#);
+    }
+
+    // `<-` (assign) esa fn chegarasidan O'TADI — closure capture saqlanadi
+    // (`=` chegarada to'xtaydi, `<-` to'xtamaydi: ikkalasining aniq farqi).
+    #[test]
+    fn assign_crosses_fn_boundary_capture() {
+        run(r#"
+counter <- 0
+inc = \n ->
+  counter <- counter + n
+inc 5
+inc 3
+(counter == 8) | (fail "closure capture ishlamadi: ${counter}")
+"#);
+    }
+
     #[test]
     fn match_symbols() {
         run(r#"
