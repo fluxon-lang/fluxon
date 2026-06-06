@@ -229,7 +229,7 @@ List length `l.len` (member), string length `str.len s` (module).
 
 ### time
 ```flux
-time.now · time.ago 24 :hr (:sec :min :hr :day) · time.fmt t "..."
+time.now · time.ago 24 :hr · time.in 60 :min (:sec :min :hr :day) · time.fmt t "..."
 db.one "select count(*) c from t where created > $1" [time.ago 24 :hr]
 ```
 

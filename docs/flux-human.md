@@ -828,6 +828,7 @@ rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod uchun ideal)
 ```flux
 time.now               # hozirgi vaqt (timestamp)
 time.ago 24 :hr        # 24 birlik oldingi vaqt. Birlik: :sec :min :hr :day
+time.in  60 :min       # 60 birlik keyingi vaqt (TTL/expiry). Birlik bir xil
 time.fmt t "..."       # timestamp'ni matnga formatlash
 ```
 > DB so'rovida raw `now() - interval '24 hours'` yozish o'rniga `time.ago`
