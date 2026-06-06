@@ -207,6 +207,19 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
             })?;
             Ok(Value::Str(fmt_unix(now_unix() - n * secs)))
         }
+        // time.in N :birlik -> hozirdan N birlik KEYINGI UTC matn (TTL/expiry).
+        // time.ago ning ko'zgusi — yagona farq qo'shish/ayirish ishorasi.
+        "in" => {
+            let n = arg_int(&args, 0, "time.in")?;
+            let unit = arg_str(&args, 1, "time.in")?;
+            let secs = unit_secs(&unit).ok_or_else(|| {
+                Flow::err(format!(
+                    "time.in: birlik :sec/:min/:hr/:day bo'lishi kerak, :{} berildi",
+                    unit
+                ))
+            })?;
+            Ok(Value::Str(fmt_unix(now_unix() + n * secs)))
+        }
         // time.fmt timestamp "..." -> matn formatlash.
         // Kirish: matn timestamp ("YYYY-MM-DD HH:MM:SS") yoki unix int.
         // Token'lar: YYYY MM DD HH mm ss
@@ -951,6 +964,40 @@ mod time_tests {
     fn parse_rejects_garbage() {
         assert_eq!(parse_ts("salom"), None);
         assert_eq!(parse_ts("2023-11-14"), None); // juda qisqa (vaqt yo'q)
+    }
+
+    #[test]
+    fn in_adds_units() {
+        // time.in kelajakni, time.ago o'tmishni beradi — natija hozirdan keyin/oldin.
+        let now = now_unix();
+        let Ok(Value::Str(f)) = time_module("in", vec![Value::Int(1), Value::Str("hr".into())])
+        else {
+            panic!("time.in matn qaytarishi kerak");
+        };
+        let Ok(Value::Str(p)) = time_module("ago", vec![Value::Int(1), Value::Str("hr".into())])
+        else {
+            panic!("time.ago matn qaytarishi kerak");
+        };
+        let (Some(fu), Some(pu)) = (parse_ts(&f), parse_ts(&p)) else {
+            panic!("timestamp'larni o'qib bo'lmadi");
+        };
+        // 1 soat keyin > hozir > 1 soat oldin (sekundlik yumaloqlash chetga surilmaydi).
+        assert!(
+            fu >= now + 3600 - 1 && fu <= now + 3600 + 1,
+            "time.in noto'g'ri: {}",
+            f
+        );
+        assert!(
+            pu >= now - 3600 - 1 && pu <= now - 3600 + 1,
+            "time.ago noto'g'ri: {}",
+            p
+        );
+    }
+
+    #[test]
+    fn in_rejects_bad_unit() {
+        let r = time_module("in", vec![Value::Int(1), Value::Str("year".into())]);
+        assert!(r.is_err(), "noma'lum birlik xato berishi kerak");
     }
 }
 

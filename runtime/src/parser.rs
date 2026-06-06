@@ -521,13 +521,6 @@ impl Parser {
                     self.advance();
                     // .name  yoki  .0 (raqamli indeks)
                     match self.peek().clone() {
-                        Tok::Ident(name) => {
-                            self.advance();
-                            e = Expr::Field {
-                                target: Box::new(e),
-                                name,
-                            };
-                        }
                         Tok::Int(n) => {
                             self.advance();
                             e = Expr::Index {
@@ -535,13 +528,26 @@ impl Parser {
                                 key: Box::new(Expr::Int(n)),
                             };
                         }
-                        other => {
-                            return Err(format!(
-                                "{}-qatorda '.' dan keyin nom yoki indeks kutilgan, {:?} topildi",
-                                self.line(),
-                                other
-                            ));
-                        }
+                        // Field nomi: oddiy ident yoki KALIT SO'Z (`time.in`, `x.match`).
+                        // Kalit so'zlar member pozitsiyasida nom sifatida ishlaydi —
+                        // bu Flux falsafasi (til AI'ga moslashadi): AI tabiiy `time.in`
+                        // yozadi, `in` global kalit so'z bo'lsa ham field bo'la oladi.
+                        tok => match keyword_as_name(&tok) {
+                            Some(name) => {
+                                self.advance();
+                                e = Expr::Field {
+                                    target: Box::new(e),
+                                    name,
+                                };
+                            }
+                            None => {
+                                return Err(format!(
+                                    "{}-qatorda '.' dan keyin nom yoki indeks kutilgan, {:?} topildi",
+                                    self.line(),
+                                    tok
+                                ));
+                            }
+                        },
                     }
                 }
                 // `[` postfix indeks BO'LADI faqat tutash bo'lsa (`arr[i]`).
@@ -701,12 +707,10 @@ impl Parser {
                 let v = self.parse_expr()?;
                 entries.push(MapEntry::Dynamic { key: k, value: v });
             } else {
-                // kalit: ident yoki string-literal
+                // kalit: ident, kalit so'z (`{in: 1}`) yoki string-literal.
+                // Kalit so'z map kalitida ham nom sifatida ishlaydi — field access
+                // (`m.in`) bilan simmetrik, Flux falsafasiga mos.
                 let key = match self.peek().clone() {
-                    Tok::Ident(s) => {
-                        self.advance();
-                        s
-                    }
                     Tok::Str(parts) => {
                         self.advance();
                         // faqat oddiy literal string kalit sifatida
@@ -719,13 +723,19 @@ impl Parser {
                             ));
                         }
                     }
-                    other => {
-                        return Err(format!(
-                            "{}-qatorda map kaliti kutilgan, {:?} topildi",
-                            self.line(),
-                            other
-                        ));
-                    }
+                    other => match keyword_as_name(&other) {
+                        Some(name) => {
+                            self.advance();
+                            name
+                        }
+                        None => {
+                            return Err(format!(
+                                "{}-qatorda map kaliti kutilgan, {:?} topildi",
+                                self.line(),
+                                other
+                            ));
+                        }
+                    },
                 };
                 self.expect(&Tok::Colon, "':'")?;
                 let value = self.parse_expr()?;
@@ -866,4 +876,34 @@ fn is_cron_on(callee: &Expr) -> bool {
         Expr::Field { target, name }
             if name == "on" && matches!(target.as_ref(), Expr::Ident(m) if m == "cron")
     )
+}
+
+// `.` dan keyingi field nomi: kalit so'z bo'lsa ham uning matnli nomini qaytaradi.
+// `time.in`, `x.match`, `x.if` kabi member nomlari kalit so'z bilan to'qnashmasin —
+// member pozitsiyasida grammatik ma'no yo'q, faqat nom kerak (Flux: til AI'ga moslashadi).
+// Manba: lexer scan_ident dagi kalit so'z jadvalining teskarisi.
+fn keyword_as_name(tok: &Tok) -> Option<String> {
+    let s = match tok {
+        Tok::Ident(s) => return Some(s.clone()),
+        Tok::Fn => "fn",
+        Tok::Ret => "ret",
+        Tok::If => "if",
+        Tok::Elif => "elif",
+        Tok::Else => "else",
+        Tok::Each => "each",
+        Tok::In => "in",
+        Tok::Match => "match",
+        Tok::Skip => "skip",
+        Tok::Stop => "stop",
+        Tok::Use => "use",
+        Tok::Exp => "exp",
+        Tok::As => "as",
+        Tok::Tbl => "tbl",
+        Tok::Fail => "fail",
+        Tok::True => "true",
+        Tok::False => "false",
+        Tok::Nil => "nil",
+        _ => return None,
+    };
+    Some(s.to_string())
 }

@@ -240,6 +240,33 @@ py = str.int (time.fmt past "YYYYMMDDHHmmss")
     }
 
     #[test]
+    fn time_in_is_later() {
+        // time.in hozirdan keyin (TTL/expiry uchun). time.ago ning ko'zgusi:
+        // ISO matn leksikografik = xronologik, shuning uchun `expires > $now`
+        // SQL filtri to'g'ri ishlaydi. Yil/oy/...sek bo'laklarini taqqoslaymiz.
+        run(r#"
+now = time.now
+soon = time.in 1 :hr
+ny = str.int (time.fmt now "YYYYMMDDHHmmss")
+sy = str.int (time.fmt soon "YYYYMMDDHHmmss")
+(sy > ny) | (fail "time.in o'tmishda: soon=${soon} now=${now}")
+"#);
+    }
+
+    #[test]
+    fn keyword_as_field_name() {
+        // `.` dan keyin kalit so'z field nomi bo'la oladi (time.in shu tufayli ishlaydi).
+        // Map kaliti kalit so'z bo'lsa ham `.in`/`.match` bilan o'qiladi — bu Flux
+        // falsafasi: member pozitsiyasida kalit so'zning grammatik ma'nosi yo'q.
+        run(r#"
+m = {in: 1 match: 2 each: 3}
+(m.in == 1) | (fail "m.in: ${m.in}")
+(m.match == 2) | (fail "m.match: ${m.match}")
+(m.each == 3) | (fail "m.each: ${m.each}")
+"#);
+    }
+
+    #[test]
     fn env_member_access() {
         // env.NOM -> std::env. Yo'q bo'lsa nil -> `??` default. Bor bo'lsa qiymat.
         // FLUX_TEST_VAR'ni o'rnatib o'qiymiz (DB_TEST_LOCK kerak emas — boshqa env).
