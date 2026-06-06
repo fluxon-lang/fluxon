@@ -495,6 +495,21 @@ res = http.get url {follow:true max:5}   # hop limiti (default 10)
 ```
 `max`'dan oshsa xato. Opsiya oxirgi argument: `http.post url body {follow:true}`.
 
+**Custom so'rov header'lari.** Autentifikatsiya talab qiladigan API'lar uchun
+(`x-api-key`, `Authorization`, `anthropic-version`...) opsiya map'iga `headers`
+qo'shing — bu javobdagi `res.headers` bilan simmetrik:
+```flux
+res = http.post "https://api.anthropic.com/v1/messages" body {
+  headers: {
+    "x-api-key": env.ANTHROPIC_API_KEY
+    "anthropic-version": "2023-06-01"
+  }
+}
+```
+Header qiymati str bo'lmasa matnga aylantiriladi; `nil` qiymatli header
+tashlanadi. Foydalanuvchi `content-type` bersa, avtomatik `application/json`
+o'rniga o'sha ishlatiladi.
+
 ### 9.2 `db` — ma'lumotlar bazasi (Postgres)
 
 Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi. Hech
