@@ -1,52 +1,55 @@
-# Flux — til spetsifikatsiyasi (AI uchun)
+# Flux — language spec (for AI)
 
-Flux: AI-native backend tili. Bir ish = bir yo'l. Kam token. Batteries-included.
-Fayl kengaytmasi: `.fx`. Bir marta o'qib, to'g'ri Flux kodi yoz.
+Flux: AI-native backend language. One task = one way. Few tokens. Batteries-included.
+File extension: `.fx`. Read once, write correct Flux code.
 
-## Asoslar
-- Izoh `# qator oxirigacha` (`//` yo'q). Statement yangi qatorda (`;` yo'q).
-- Blok = chekinish (2 bo'shliq), `{}` yo'q.
+## Basics
+- Comment `# to end of line` (no `//`). Statement on a new line (no `;`).
+- Block = indentation (2 spaces), no `{}`.
+- These are keywords — never name a var/loop/param after one (e.g. `each exp in xs`
+  fails; use `e`): `as each elif else exp fail fn if in match ret skip stop tbl use`
 ```flux
 if x > 0
-  log "musbat"
-log "tashqari"
+  log "positive"
+log "outside"
 ```
 
-## Tiplar
+## Types
 ```
-42 int · 3.14 flt · "hi" str · true bool · nil · :ok sym (enum/teg)
-[1 2 3] list · {a:1 b:2} map        # VERGUL YO'Q, bo'shliq bilan
+42 int · 3.14 flt · "hi" str · true bool · nil · :ok sym (enum/tag)
+[1 2 3] list · {a:1 b:2} map        # NO COMMAS, space-separated
 ```
-Str interpolatsiya: `"$x"` yoki `"${expr}"`. Truthy: faqat `nil`/`false` yolg'on.
+Str interpolation: `"$x"` (bare var only) or `"${expr}"` (any expr — `.field`, calls).
+Truthy: only `nil`/`false` are false.
 
 ## Bindings
 ```
-x = 10              # o'zgarmas (STANDART)
-total <- 0          # o'zgaruvchan; qayta tayinlash: total <- total + 5
+x = 10              # immutable (DEFAULT)
+total <- 0          # mutable; reassign: total <- total + 5
 ```
 
-## Operatorlar
+## Operators
 ```
-+ - * / %      arifmetik. + STRING'ni ham qo'shadi: "a"+"b"→"ab"
-== != < <= > >=   ·   & | !  (va/yoki/emas)
-??   null-coalesce: a ?? b → a, agar a nil bo'lsa b
-.    a'zo/indeks: m.key, l.0, l.len, m[k]
-..   diapazon: 1..5 → [1 2 3 4 5]   ·   |>  pipe: x |> f |> g
++ - * / %      arithmetic. + also concatenates STRINGS: "a"+"b"→"ab"
+== != < <= > >=   ·   & | !  (and/or/not)
+??   null-coalesce: a ?? b → a, or b if a is nil
+.    member/index: m.key, l.0, l.len, m[k]
+..   range: 1..5 → [1 2 3 4 5]   ·   |>  pipe: x |> f |> g
 ```
 
-## Funksiyalar
+## Functions
 ```flux
 fn add a b
-  ret a + b               # ret (erta) yoki oxirgi ifoda (avtomat)
-fn double x -> x * 2      # bir qatorli
-add 2 3                   # qavssiz chaqirish; qavs faqat guruhlash: f (g x)
+  ret a + b               # ret (early) or last expression (implicit)
+fn double x -> x * 2      # one-liner
+add 2 3                   # paren-free call; parens only group: f (g x)
 \x -> x * 2               # lambda
 ```
-Lambda ICHIDA ham `ret` ishlaydi — guard-clause (chuqur nesting o'rniga):
+`ret` works INSIDE a lambda too — guard-clause (instead of deep nesting):
 ```flux
 http.on :post "/x" \req ->
   if !req.body.email
-    ret rep 400 {error:"email kerak"}
+    ret rep 400 {error:"email required"}
   rep 201 (db.ins "t" {...})
 ```
 
@@ -59,40 +62,40 @@ elif x == 0
 else
   log "c"
 ```
-Yagona loop = `each` (while/for YO'Q):
+Only loop = `each` (no while/for):
 ```flux
 each item in list   ·   each i in 1..5   ·   each k, v in map
 ```
-Loop ichida `skip` (continue), `stop` (break). Shartli takror: `each i in 1..n`
-yoki rekursiya.
+In a loop: `skip` (continue), `stop` (break). Conditional repeat: `each i in 1..n`
+or recursion.
 
-`match` — qiymat dispatch (FAQAT symbol/son, mantiqiy shart EMAS):
+`match` — value dispatch (symbol/number ONLY, NOT boolean conditions):
 ```flux
 match status
-  :new -> log "yangi"
+  :new -> log "new"
   _ -> log "default"
 ```
-Mantiqiy shart (`x > 0.85`) uchun HAR DOIM `if/elif/else`. `match true` = xato.
+For boolean conditions (`x > 0.85`) ALWAYS use `if/elif/else`. `match true` = error.
 
-## Errorlar
+## Errors
 ```flux
-user = db.one "..." [id]!     # ! = xato bo'lsa avtomat yuqoriga uzat
-name = user.name ?? "mehmon"  # ?? = nil bo'lsa muqobil
-fail 422 "balans yetmadi"     # status bilan → mijozga 422 {error:...}
-fail "ichki xato"             # status'siz → 500
+user = db.one "..." [id]!     # ! = on error, auto-propagate up
+name = user.name ?? "guest"   # ?? = alternative if nil
+fail 422 "insufficient funds" # with status → 422 {error:...} to client
+fail "internal error"         # no status → 500
 ```
-`!` uzat, `??` nil almashtir, `fail [status] "..."` chiqar. try/catch YO'Q —
-`fail 4xx` kutilgan xatoni avto HTTP javobga aylantiradi (kod tekis qoladi).
+`!` propagate, `??` replace nil, `fail [status] "..."` raise. No try/catch —
+`fail 4xx` auto-converts an expected error into an HTTP response (code stays flat).
 
-## Modullar
+## Modules
 ```flux
-use http db ai json     # batteries, install yo'q
-use ./tools             # o'z fayling → tools.fn
-use ./ai as helper      # ALIAS: batareya nomi bilan to'qnashsa → helper.fn
-exp fn create_order ... # exp = tashqariga ochish
+use http db ai json     # batteries, no install
+use ./tools             # your file → tools.fn
+use ./ai as helper      # ALIAS: on clash with a battery name → helper.fn
+exp fn create_order ... # exp = expose externally
 ```
 
-## Batteries (stdlib — install yo'q)
+## Batteries (stdlib — no install)
 
 ### http
 ```flux
@@ -100,30 +103,30 @@ http.on :post "/notes" \req -> rep 201 {ok:true}
 http.on :get "/notes/:id" \req -> rep 200 {id:req.params.id}
 http.serve 8080
 ```
-- Metod: `:get :post :put :patch :del`. `req.body` (JSON→map), `req.params.id`,
-  `req.query`, `req.headers`. Yo'q kalit → `nil`.
-- `rep status body` (map→avtomat JSON). Redirect: `rep 302 {location:url}`.
-- Route ustunligi: literal yo'l avtomat ustun (`/stats/:c` > `/:c`).
-- Klient: `http.get url`, `http.post url body` → `res.status res.body res.headers`.
-  `res.headers` (map, kalit kichik harf): `res.headers.location`, `m[k]` ham.
-  Redirect default kuzatilmaydi; opt-in: `http.get url {follow:true max:10}`
-  → kuzatadi, `res.hops` (necha hop). `max` default 10.
-  So'rovga custom header: `{headers:{"x-api-key":KEY "anthropic-version":"2023-06-01"}}`
-  (req/res.headers bilan simmetrik; foydalanuvchi `content-type` avtomatikni o'chiradi).
+- Method: `:get :post :put :patch :del`. `req.body` (JSON→map), `req.params.id`,
+  `req.query`, `req.headers`. Missing key → `nil`.
+- `rep status body` (map→auto JSON). Redirect: `rep 302 {location:url}`.
+- Route priority: a literal path auto-wins (`/stats/:c` > `/:c`).
+- Client: `http.get url`, `http.post url body` → `res.status res.body res.headers`.
+  `res.headers` (map, lowercase keys): `res.headers.location`, also `m[k]`.
+  Redirects not followed by default; opt-in: `http.get url {follow:true max:10}`
+  → follows, `res.hops` (hop count). `max` default 10.
+  Custom request header: `{headers:{"x-api-key":KEY "anthropic-version":"2023-06-01"}}`
+  (symmetric with req/res.headers; a user value overrides the auto `content-type`).
 
-### db (Postgres, $DATABASE_URL avtomat)
+### db (Postgres, $DATABASE_URL auto)
 ```flux
-rows = db.q "select * from t where owner=$1" [oid]   # → map ro'yxati
-one  = db.one "select * from users where id=$1" [id] # → map yoki nil
-row  = db.ins "orders" {cust:5 status::new}          # → to'liq qator (id bilan)
+rows = db.q "select * from t where owner=$1" [oid]   # → list of maps
+one  = db.one "select * from users where id=$1" [id] # → map or nil
+row  = db.ins "orders" {cust:5 status::new}          # → full row (with id)
 db.up "orders" {total:1500} {id:oid}                 # {set} {where}
 db.del "cart_items" {id:iid}                          # {where}
-db.put "memory" {val:v} {agent:a key:k}               # UPSERT (atomik)
+db.put "memory" {val:v} {agent:a key:k}               # UPSERT (atomic)
 ```
-Param `$1 $2`, qiymat `[...]`. Param'siz: `db.q "select * from links"`.
-Aggregat nil bo'lsa `?? 0`: `db.one "select count(*) c, sum(x) s from t"`.
+Params `$1 $2`, values `[...]`. No params: `db.q "select * from links"`.
+Aggregate may be nil → `?? 0`: `db.one "select count(*) c, sum(x) s from t"`.
 
-Tranzaksiya — atomik, `fail`/`!` da rollback, qiymat qaytaradi:
+Transaction — atomic, rollback on `fail`/`!`, returns a value:
 ```flux
 res = db.tx \->
   ord = db.ins "orders" {cust:c total:t}
@@ -131,12 +134,12 @@ res = db.tx \->
     db.up "products" {stock:it.stock - it.qty} {id:it.id}
   ret ord
 ```
-`db.tx` avto-serializable + retry → "o'qi-tekshir-yangila" race-safe (lock
-kerak emas). Idempotency: `uniq` ustun + tx ichida ins (dublikat → rollback):
+`db.tx` auto-serializable + retry → "read-check-update" is race-safe (no lock
+needed). Idempotency: `uniq` column + ins inside tx (duplicate → rollback):
 ```flux
 old = db.one "select * from txns where ikey=$1" [key]
 old ?? (ret old)
-db.tx \-> db.ins "txns" {ikey:key ...}   # dublikat → uniq xato → rollback
+db.tx \-> db.ins "txns" {ikey:key ...}   # duplicate → uniq error → rollback
 ```
 
 Schema = `tbl`:
@@ -144,25 +147,25 @@ Schema = `tbl`:
 tbl products
   id    serial pk
   owner int ref:users.id
-  price money               # pul = butun minor birlik (tiyin), float EMAS
+  price money               # money = integer minor unit (cents), NOT float
   ts    now
 ```
-Tiplar: serial int flt str bool json now sym money (`int` 64-bit). Modifikator:
-`pk uniq null ref:tbl.col`. Ko'p ustunli: `uniq(agent, key)`.
-`json` ustun: o'qiganda avto map/list, yozganda avto enkod.
-`sym` ustun: DB'da matn, Flux'da symbol (avto aylanadi):
+Types: serial int flt str bool json now sym money (`int` 64-bit). Modifiers:
+`pk uniq null ref:tbl.col`. Multi-column: `uniq(agent, key)`.
+`json` column: auto map/list on read, auto-encode on write.
+`sym` column: text in DB, symbol in Flux (auto-converts):
 ```flux
 db.ins "tickets" {status::new}
 t = db.one "select * from tickets where id=$1" [id]
 match t.status
   :new -> ...
-db.q "select * from t where status=$1" [:new]    # filter: symbol → matn
+db.q "select * from t where status=$1" [:new]    # filter: symbol → text
 ```
 
-### ai (LLM — first-class, $AI_KEY avtomat)
+### ai (LLM — first-class, $AI_KEY auto)
 ```flux
-txt = ai.ask "savol ${x}"                    # → matn
-r = ai.json "ajrat: ${text}" {intent::a items:[{product:str qty:int}]}  # → map
+txt = ai.ask "question ${x}"                 # → text
+r = ai.json "extract: ${text}" {intent::a items:[{product:str qty:int}]}  # → map
 ```
 Metadata: `r._.conf` (0..1), `r._.tokens`, `r._.cost`, `r._.ms`.
 ```flux
@@ -173,47 +176,47 @@ elif r._.conf >= 0.6
 else
   escalate r
 ```
-`ai.run` — BIR qadam tool-loop (o'zi bajarmaydi, nima qilmoqchini qaytaradi;
-loop sizniki → logging/cost/tasdiq nazorati):
+`ai.run` — ONE step of a tool-loop (doesn't execute; returns what it wants to do;
+the loop is yours → logging/cost/approval control):
 ```flux
 msgs <- [{role::user content:text}]
 each i in 1..10
   r = ai.run msgs tools                # tools: [{name desc params}]
   if r.kind == :final
     ret r.text
-  out = reg.call r.tool r.args         # tool'ni nomi bilan bajar
+  out = reg.call r.tool r.args         # run the tool by name
   msgs <- msgs.push {role::tool name:r.tool content:(json.enc out)}
 ```
 
-### reg (funksiya registri — dinamik dispatch)
-Funksiyani STRING nomi bilan saqla/chaqir (agent tool'lari uchun — `match`-switch
-EMAS, runtime'da qo'shiladi):
+### reg (function registry — dynamic dispatch)
+Store/call a function by STRING name (for agent tools — NOT a `match`-switch,
+added at runtime):
 ```flux
 reg.add "calc" \args -> args.a + args.b
 out = reg.call "calc" {a:2 b:3}      # → 5
 reg.has "calc"   ·   reg.names
 ```
 
-### list metodlari (.metod)
+### list methods (.method)
 ```flux
 l.len · l.push x · l.filter \x->x>0 · l.map \x->x*2 · l.has x · l.0
 l.slice a b · l.join ", " · l.reduce 0 \acc x -> acc + x
 ```
-List qurish: `l.push x` (`+[x]` EMAS). Matn qurish: `l.join sep`.
+Build a list: `l.push x` (NOT `+[x]`). Build a string: `l.join sep`.
 
-### map metodlari (.metod)
+### map methods (.method)
 ```flux
 m.set k v · m.del k · m.has k · m.keys · m.vals · m.k · m[k]
 ```
-Map'ga yozish: `m.set k v` (`m[k]` faqat O'QISH). Shared state shu bilan.
+Write to a map: `m.set k v` (`m[k]` is READ only). Shared state via this.
 
-### str / math / rand (yadro, use kerak emas)
+### str / math / rand (core, no use needed)
 ```flux
 str.len s · str.slice s a b · str.up s · str.low s · str.split s sep → list
 str.has s sub → bool · str.int s · str.str x
 math.floor x · math.ceil x · math.abs x · rand.int a b · rand.str n
 ```
-list uzunligi `l.len` (a'zo), str uzunligi `str.len s` (modul).
+List length `l.len` (member), string length `str.len s` (module).
 
 ### time
 ```flux
@@ -223,38 +226,38 @@ db.one "select count(*) c from t where created > $1" [time.ago 24 :hr]
 
 ### json / env / log
 ```flux
-json.enc v · json.dec s · env.PORT ?? "8080" · log "xabar"
+json.enc v · json.dec s · env.PORT ?? "8080" · log "message"
 ```
 
 ### io (terminal input/output)
-`log` har doim stderr'ga `\n` qo'shadi; interaktiv CLI (REPL, agent, wizard) uchun:
+`log` always adds `\n` to stderr; for an interactive CLI (REPL, agent, wizard):
 ```flux
-io.read_line          # stdin'dan bitta satr → str (Enter'gacha bloklaydi); EOF → nil
-io.print s            # stdout'ga \n SIZ chiqarish (prompt uchun)
-io.prompt msg         # msg'ni chiqarib, keyin io.read_line → str (shorthand)
+io.read_line          # one line from stdin → str (blocks until Enter); EOF → nil
+io.print s            # print to stdout WITHOUT `\n` (for building prompts)
+io.prompt msg         # print msg, then io.read_line → str (shorthand)
 ```
-REPL tsikli — `each`/`while` yo'q, rekursiya bilan (EOF'da `nil` → to'xtash):
+REPL loop — no `each`/`while`, via recursion (EOF → `nil` → stop):
 ```flux
 repl = \n ->
-  satr = io.prompt "siz> "
-  if satr == nil
-    ret nil                # EOF (Ctrl-D) — chiqish
-  log "javob:" satr
+  line = io.prompt "you> "
+  if line == nil
+    ret nil                # EOF (Ctrl-D) — exit
+  log "reply:" line
   repl n
 repl 0
 ```
 
-### fs (lokal fayl tizimi)
-Nomlash `db.*` uslubida (`fs.read`/`fs.del`). Xato bo'lsa `Flow::err` (try bilan ushla);
-`fs.read` yagona istisno — fayl yo'q bo'lsa `nil`:
+### fs (local filesystem)
+Naming in `db.*` style (`fs.read`/`fs.del`). On error `Flow::err` (catch with try);
+`fs.read` is the only exception — `nil` if the file is missing:
 ```flux
-fs.read path           # → str, yoki fayl yo'q bo'lsa nil
-fs.write path content  # ustiga yozadi (oldingi mazmun o'chadi) → :ok
-fs.append path content # oxiriga qo'shadi (fayl yo'q bo'lsa yaratadi) → :ok
-fs.exists path         # fayl YOKI papka mavjudmi → bool
-fs.ls path             # papka ichidagi nomlar (saralangan, faqat nom) → [str]
-fs.del path            # fayl yoki BO'SH papka → :ok (rekursiv o'chirish yo'q)
-fs.mkdirp path         # oraliq papkalar bilan yaratadi, idempotent → :ok
+fs.read path           # → str, or nil if file missing
+fs.write path content  # overwrites (prior content lost) → :ok
+fs.append path content # appends to end (creates file if missing) → :ok
+fs.exists path         # file OR directory exists → bool
+fs.ls path             # names inside a directory (sorted, name only) → [str]
+fs.del path            # file or EMPTY directory → :ok (no recursive delete)
+fs.mkdirp path         # creates with intermediate dirs, idempotent → :ok
 ```
 ```flux
 if !(fs.exists "data")
@@ -263,39 +266,39 @@ fs.write "data/conf.json" (json.enc {port:8080})
 cfg = json.dec (fs.read "data/conf.json")
 ```
 
-### cron (fon vazifa)
-Standart Unix 5-maydon (daqiqa soat kun oy hafta), TIRNOQSIZ — `*` cron belgisi:
+### cron (background task)
+Standard Unix 5-field (minute hour day month weekday), UNQUOTED — `*` is the cron char:
 ```flux
-cron.on 0 * * * * check_prices    # har soat boshida · fn yoki \-> lambda
-cron.on 30 9 * * 1-5 \-> report    # ish kunlari 09:30
+cron.on 0 * * * * check_prices    # at the top of every hour · fn or \-> lambda
+cron.on 30 9 * * 1-5 \-> report    # weekdays 09:30
 ```
-`cron.on` bloklamaydi (`http.on` kabi ro'yxatga oladi). Server (`http.serve`/
-`ws.serve`) bo'lsa cron fonda ishlaydi; server yo'q skriptda `cron.run` processni ushlaydi.
+`cron.on` doesn't block (registers, like `http.on`). With a server (`http.serve`/
+`ws.serve`) cron runs in the background; in a server-less script `cron.run` holds the process.
 
-### queue (fon)
-Og'ir ishni fonga uzat — `push`/`on` bloklamaydi, worker FIFO bajaradi:
+### queue (background)
+Offload heavy work — `push`/`on` don't block, a worker runs FIFO:
 ```flux
 queue.on "send" \job -> tools.send job.ph job.body   # job = push payload
-queue.push "send" {ph:p body:t}                       # payload ixtiyoriy
+queue.push "send" {ph:p body:t}                       # payload optional
 ```
-push handler'dan oldin yozilsa ish navbatda kutadi. queue'ning o'z `run`'i YO'Q —
-processni `http.serve`/`ws.serve`/`cron.run` ushlab tursa worker fonda ishlaydi.
+If push is written before the handler, the job waits in the queue. queue has no `run`
+of its own — a worker runs in the background while `http.serve`/`ws.serve`/`cron.run` holds the process.
 
 ### ws (websocket — realtime)
 ```flux
-ws.on :connect \conn -> ws.data.set conn :user nil   # conn.id barqaror; ws.data = sessiya
-ws.on :message \conn msg ->                    # msg — kelgan MATN (str)
+ws.on :connect \conn -> ws.data.set conn :user nil   # conn.id stable; ws.data = session
+ws.on :message \conn msg ->                    # msg — incoming TEXT (str)
   m = json.dec msg
-  ws.send conn (json.enc {ok:true})            # shu ulanishga (matn yuboriladi)
+  ws.send conn (json.enc {ok:true})            # to this connection (text sent)
 ws.on :disconnect \conn -> ws.room.leave conn "ch:5"
 ws.serve 9000
 ```
-Sessiya: `ws.data.set conn :kalit qiymat` · `ws.data.get conn :kalit` (shu ulanish, uzilgach tozalanadi).
-Xona (broadcast): `ws.room.join conn "ch:5"` · `ws.room.leave conn "ch:5"` ·
-`ws.room.send "ch:5" msg` (hammaga) · `ws.room.members "ch:5"` (presence).
-`http.serve` va `ws.serve` birga ishlaydi.
+Session: `ws.data.set conn :key value` · `ws.data.get conn :key` (this connection, cleared on disconnect).
+Room (broadcast): `ws.room.join conn "ch:5"` · `ws.room.leave conn "ch:5"` ·
+`ws.room.send "ch:5" msg` (to all) · `ws.room.members "ch:5"` (presence).
+`http.serve` and `ws.serve` run together.
 
-## To'liq misol
+## Full example
 ```flux
 use http db
 
