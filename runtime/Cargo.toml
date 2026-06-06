@@ -19,6 +19,12 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 tokio-tungstenite = "0.24"
 # WS stream'ni read/write yo'nalishlarga split qilish (SplitSink/SplitStream).
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# http klient TLS: https:// so'rovlar uchun rustls connector. webpki-roots —
+# Mozilla CA ildizlari kompilyatsiyaga bog'lanadi (tizim sertifikatiga tayanmaydi,
+# CI/portable barqaror, rusqlite "bundled" falsafasiga mos). ring crypto provayder
+# (sof, C kompilyator/OpenSSL talab qilmaydi). default features o'chirilgan —
+# aws-lc-rs (C toolchain) va native-certs olib kelmaslik uchun.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
 # cron battery: standart Unix 5-maydonli ifodani (`0 * * * *`) parse qiladi va
 # keyingi ishga tushish vaqtini hisoblaydi (Schedule::upcoming).
 cron = "0.12"

@@ -18,6 +18,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -387,7 +388,9 @@ async fn handle_request(
 
 // Request body hozir sodda bytes buffer: alias client tipini o'qilishi oson qiladi.
 type ClientBody = Full<Bytes>;
-type PooledHttpClient = Client<HttpConnector, ClientBody>;
+// HttpsConnector<HttpConnector> ham http:// ham https:// ni boshqaradi — TLS
+// faqat https sxemada faollashadi, plaintext so'rovlar avvalgidek ishlaydi.
+type PooledHttpClient = Client<HttpsConnector<HttpConnector>, ClientBody>;
 
 // Klient so'rovlari uchun bir martalik global runtime (Flux skripti sinxron).
 fn client_runtime() -> &'static tokio::runtime::Runtime {
@@ -405,7 +408,17 @@ fn client_runtime() -> &'static tokio::runtime::Runtime {
 fn pooled_http_client() -> PooledHttpClient {
     static CLIENT: OnceLock<PooledHttpClient> = OnceLock::new();
     CLIENT
-        .get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+        .get_or_init(|| {
+            // webpki-roots ildizlari bilan https connector quramiz. enable_http1
+            // hyper 1.x http1 klientiga mos. enable_http() http URL'larni ham
+            // o'tkazadi (https-only emas) — shu sabab plaintext so'rovlar saqlanadi.
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_webpki_roots()
+                .https_or_http()
+                .enable_http1()
+                .build();
+            Client::builder(TokioExecutor::new()).build(https)
+        })
         .clone()
 }
 
@@ -625,6 +638,17 @@ mod tests {
         // host'dan keyin yo'l yo'q bo'lsa, nisbiy yo'l to'g'ridan-to'g'ri ulanadi.
         let got = resolve_location("http://a.com", "page");
         assert_eq!(got, "http://a.compage");
+    }
+
+    #[test]
+    fn https_connector_quriladi() {
+        // pooled_http_client https connectorni panic'siz quradi (rustls ring
+        // crypto provayder mavjud, webpki-roots yuklanadi). Bu tarmoqsiz ham
+        // ishlaydigan deterministik tekshiruv — HTTPS yo'lining qurilishini
+        // himoyalaydi (issue #14: faqat http:// emas, https:// ham).
+        let _client = pooled_http_client();
+        // clone() bir poolni qayta ishlatadi — yana panic bo'lmasin.
+        let _client2 = pooled_http_client();
     }
 
     #[test]
