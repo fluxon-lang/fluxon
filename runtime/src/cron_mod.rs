@@ -151,14 +151,19 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // cron.run — server YO'Q bo'lsa processni ushlab turadi (bloklaydi). Scheduler
-    // allaqachon fon thread'da ishlaydi; bu yerda asosiy thread'ni shunchaki
-    // uxlatib turamiz, aks holda dastur tugab cron hech qachon ishlamaydi.
+    // cron.run — processni ushlab turish kerakligini bildiradi (DARHOL bloklamaydi).
+    // Scheduler allaqachon fon thread'da ishlaydi; cron.run faqat "top-level tugagach
+    // dastur tugamasin" belgisini qo'yadi. Bu http.serve/ws.serve kabi DEFERRED:
+    // `pending_servers`ga Cron qo'shiladi, top-level tugagach `run_pending` ushlab
+    // turadi. Shunda `cron.run` + `http.serve` ixtiyoriy tartibda birga ishlaydi —
+    // ilgari cron.run `loop { sleep }` bilan o'zidan keyingi serve'ni bloklardi.
     fn cron_run(self: &Arc<Self>, _args: Vec<Value>) -> Result<Value, Flow> {
         self.start_scheduler(); // hech qanday cron.on bo'lmagan bo'lsa ham (no-op jobs)
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        self.pending_servers
+            .lock()
+            .unwrap()
+            .push(crate::serve_mod::PendingServer::Cron);
+        Ok(Value::Nil)
     }
 
     // Scheduler fon thread'ini bir marta yoqadi.

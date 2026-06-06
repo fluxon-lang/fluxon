@@ -5,7 +5,8 @@
 # ushlaydi; cron fonda o'z vaqtida ishlaydi.
 #
 # Server YO'Q bo'lsa, http.serve o'rniga cron.run yoziladi (processni ushlab
-# turish uchun). Misol pastda izohda.
+# turish uchun). cron.run va http.serve/ws.serve ixtiyoriy tartibda BIRGA ham
+# ishlaydi — hech biri ikkinchisini bloklamaydi.
 
 use http
 

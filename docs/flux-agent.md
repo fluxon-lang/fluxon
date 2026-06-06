@@ -300,7 +300,9 @@ cron.on 0 * * * * check_prices    # at the top of every hour · fn or \-> lambda
 cron.on 30 9 * * 1-5 \-> report    # weekdays 09:30
 ```
 `cron.on` doesn't block (registers, like `http.on`). With a server (`http.serve`/
-`ws.serve`) cron runs in the background; in a server-less script `cron.run` holds the process.
+`ws.serve`) cron runs in the background; in a server-less script `cron.run` holds the
+process. `cron.run` and `http.serve`/`ws.serve` combine in ANY order — none blocks the
+others (all share one event-loop at top-level's end).
 
 ### queue (background)
 Offload heavy work — `push`/`on` don't block, a worker runs FIFO:

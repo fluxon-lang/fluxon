@@ -133,12 +133,16 @@ bo'lsa argument'siz `call_module(id, name, vec![])` chaqiriladi.
 - `http.on :method "/path/:id" \req -> ...` — Route/Seg, `match_route`.
 - `rep status body` — `{__resp:true status body}` map (builtins).
 - Klient: `http.get/post/put/del` — pooled hyper Client.
-- `http.serve port` / `ws.serve port` **darhol bloklamaydi** — serverni
-  `Interp.pending_servers` ro'yxatiga qo'shadi (deferred). Top-level kod tugagach
-  `serve_mod::run_pending` global'ni bir marta `freeze_globals` bilan muzlatadi,
-  BITTA umumiy tokio runtime yaratib har serverni `spawn` qiladi va bloklaydi.
-  Shuning uchun HTTP + WS bir jarayonda birga ishlaydi va HTTP handler ichidan
-  `ws.room.send` chaqirilsa WS ulanishlariga yetadi (shared `Interp`).
+- `http.serve port` / `ws.serve port` / `cron.run` **darhol bloklamaydi** —
+  `Interp.pending_servers` ro'yxatiga deferred tavsif qo'shadi. Top-level kod
+  tugagach `serve_mod::run_pending` boshqaradi: tarmoq serveri (http/ws) bo'lsa
+  global'ni bir marta `freeze_globals` bilan muzlatadi, BITTA umumiy tokio runtime
+  har serverni `spawn` qiladi va bloklaydi (cron scheduler o'z fon thread'ida).
+  Faqat `cron.run` bo'lsa (server yo'q): runtime/freeze KERAK EMAS — asosiy
+  thread uxlatib turiladi. Shuning uchun HTTP + WS + cron.run **ixtiyoriy tartibda**
+  birga ishlaydi; HTTP handler ichidan `ws.room.send` WS ulanishlariga yetadi
+  (shared `Interp`). Bu yagona joy bo'lgani uchun har bloklovchi "run"
+  (#18 va #42 da hal qilingan) bir-birini o'ldirmaydi.
 
 ### 4.2 `db` (db_mod.rs)
 

@@ -247,6 +247,44 @@ async fn http_and_ws_serve_together_cross_protocol() {
     let _ = std::fs::remove_file(&path);
 }
 
+// cron.run http.serve'dan OLDIN kelsa ham serverni bloklamasligi kerak (issue #42).
+// Ilgari cron.run `loop { sleep }` bilan o'zidan keyingi http.serve'ni o'ldirardi —
+// port hech qachon ochilmasdi. Endi cron.run deferred: scheduler fonda, http.serve
+// ko'tariladi. Cron daqiqalik bo'lgani uchun bu yerda handler OTILISHINI emas,
+// DEFERRED semantikani tekshiramiz: server javob bersa, cron.run bloklamagani isbot.
+const CRON_HTTP_SCRIPT: &str = r#"
+cron.on "* * * * *" \->
+  log "tick"
+
+http.on :post "/ping" \req ->
+  rep 200 {ok:true}
+
+cron.run
+http.serve HTTP_PORT
+"#;
+
+#[tokio::test]
+async fn cron_run_does_not_block_http_serve() {
+    let http_port = 8316;
+    let script = CRON_HTTP_SCRIPT.replace("HTTP_PORT", &http_port.to_string());
+    // spawn_server skript yo'lini portga bog'lab nomlaydi — bu yerda http portni
+    // identifikator sifatida beramiz (WS yo'q).
+    let (child, path) = spawn_server(http_port, &script);
+    let _killer = Killer(child);
+    // cron.run bloklasa, http.serve hech qachon ishga tushmaydi -> wait_port panic.
+    wait_port(http_port).await;
+
+    // Server haqiqatan so'rovga javob beradi (cron.run undan keyin kelsa ham).
+    let resp = http_post_json(http_port, "/ping", "").await;
+    assert!(
+        resp.contains("200") || resp.contains("ok"),
+        "server javobi: {}",
+        resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn disconnect_cleans_room_membership() {
     let port = 9313;
