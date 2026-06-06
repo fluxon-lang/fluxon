@@ -108,6 +108,8 @@ http.serve 8080
   `res.headers` (map, kalit kichik harf): `res.headers.location`, `m[k]` ham.
   Redirect default kuzatilmaydi; opt-in: `http.get url {follow:true max:10}`
   → kuzatadi, `res.hops` (necha hop). `max` default 10.
+  So'rovga custom header: `{headers:{"x-api-key":KEY "anthropic-version":"2023-06-01"}}`
+  (req/res.headers bilan simmetrik; foydalanuvchi `content-type` avtomatikni o'chiradi).
 
 ### db (Postgres, $DATABASE_URL avtomat)
 ```flux

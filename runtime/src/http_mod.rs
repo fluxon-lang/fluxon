@@ -425,9 +425,12 @@ fn pooled_http_client() -> PooledHttpClient {
 // Klient so'rovi opsiyalari (oxirgi map argumentdan o'qiladi).
 // follow=true → 3xx redirectni Location bo'yicha avtomat kuzatadi (default off).
 // max → redirect hop limiti (default 10), undan oshsa xato.
+// headers → so'rovga qo'shiladigan custom request header'lar (x-api-key,
+// Authorization, anthropic-version...). req.headers/res.headers bilan simmetrik.
 struct ClientOpts {
     follow: bool,
     max: i64,
+    headers: BTreeMap<String, String>,
 }
 
 impl Default for ClientOpts {
@@ -435,6 +438,7 @@ impl Default for ClientOpts {
         ClientOpts {
             follow: false,
             max: 10,
+            headers: BTreeMap::new(),
         }
     }
 }
@@ -448,6 +452,20 @@ fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
         }
         if let Some(Value::Int(n)) = m.get("max") {
             o.max = *n;
+        }
+        // headers: {kalit: qiymat} — har bir juftlikni str'ga aylantirib olamiz.
+        // Kalit asl holida saqlanadi (HTTP header nomi katta-kichik harfga
+        // sezgir emas, lekin foydalanuvchi yozganini buzmaymiz). Qiymat str
+        // bo'lmasa ham (masalan int) matn ko'rinishiga aylantiriladi.
+        if let Some(Value::Map(hm)) = m.get("headers") {
+            for (k, v) in hm {
+                let val = match v {
+                    Value::Str(s) => s.clone(),
+                    Value::Nil => continue, // nil header — tashlab ketamiz
+                    other => format!("{}", other),
+                };
+                o.headers.insert(k.clone(), val);
+            }
         }
     }
     o
@@ -494,7 +512,16 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
             // GET'ga aylangach tana yuborilmaydi.
             let send_body = cur_method != "GET" && cur_method != "DELETE";
             let mut builder = Request::builder().method(cur_method.as_str()).uri(uri);
-            if is_json && send_body {
+            // Foydalanuvchi custom header'larini avval qo'shamiz. content-type'ni
+            // foydalanuvchi o'zi bergan bo'lsa, avtomatik qiymat ustiga yozmaymiz.
+            let mut has_user_ct = false;
+            for (k, v) in &opts.headers {
+                if k.eq_ignore_ascii_case("content-type") {
+                    has_user_ct = true;
+                }
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            if is_json && send_body && !has_user_ct {
                 builder = builder.header("content-type", "application/json");
             }
             let payload = if send_body {
@@ -675,6 +702,47 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("follow".to_string(), Value::Bool(false));
         assert!(!parse_client_opts(Some(&Value::Map(m))).follow);
+    }
+
+    #[test]
+    fn opts_headers_parse_qiladi() {
+        // headers map'i str qiymatlar bilan o'qiladi (issue #34).
+        let mut hm = BTreeMap::new();
+        hm.insert("x-api-key".to_string(), Value::Str("sirli".to_string()));
+        hm.insert(
+            "anthropic-version".to_string(),
+            Value::Str("2023-06-01".to_string()),
+        );
+        let mut m = BTreeMap::new();
+        m.insert("headers".to_string(), Value::Map(hm));
+        let o = parse_client_opts(Some(&Value::Map(m)));
+        assert_eq!(
+            o.headers.get("x-api-key").map(|s| s.as_str()),
+            Some("sirli")
+        );
+        assert_eq!(
+            o.headers.get("anthropic-version").map(|s| s.as_str()),
+            Some("2023-06-01")
+        );
+    }
+
+    #[test]
+    fn opts_headers_str_bolmagan_qiymat_matnga_aylanadi() {
+        // str bo'lmagan qiymat (int) matn ko'rinishiga aylantiriladi; nil tashlanadi.
+        let mut hm = BTreeMap::new();
+        hm.insert("x-count".to_string(), Value::Int(42));
+        hm.insert("x-skip".to_string(), Value::Nil);
+        let mut m = BTreeMap::new();
+        m.insert("headers".to_string(), Value::Map(hm));
+        let o = parse_client_opts(Some(&Value::Map(m)));
+        assert_eq!(o.headers.get("x-count").map(|s| s.as_str()), Some("42"));
+        assert!(!o.headers.contains_key("x-skip"));
+    }
+
+    #[test]
+    fn opts_default_headers_bosh() {
+        // Opsiya berilmasa header'lar bo'sh.
+        assert!(parse_client_opts(None).headers.is_empty());
     }
 
     // build_req'dan body Value'ni ajratib oluvchi yordamchi.

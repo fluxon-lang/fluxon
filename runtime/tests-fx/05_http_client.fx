@@ -67,6 +67,21 @@ eq r11.status 200 "follow:true → yakuniy 200"
 eq r11.body.arrived true "follow:true → /dest tanasi"
 eq r11.hops 2 "follow:true → 2 hop sanaldi"
 
+# custom so'rov header'lari — server echo qiladi (issue #34)
+r12 = http.get "${base}/echo-headers" {
+  headers: {
+    "x-api-key": "sirli-kalit"
+    "anthropic-version": "2023-06-01"
+  }
+}
+eq r12.status 200 "custom headers → 200"
+eq r12.body.key "sirli-kalit" "x-api-key server'ga yetdi"
+eq r12.body.ver "2023-06-01" "anthropic-version server'ga yetdi"
+
+# header bermasa — server default qaytaradi (regressiya yo'q)
+r13 = http.get "${base}/echo-headers"
+eq r13.body.key "yo'q" "headersiz so'rov → server default"
+
 if fails == 0
   log "=== 05_http: HAMMASI O'TDI ==="
 else
