@@ -770,6 +770,8 @@ l.push x               # element qo'shadi → yangi ro'yxat
 l.filter \x -> x > 0   # shartga mosini qoldiradi → yangi ro'yxat
 l.map \x -> x * 2      # har birini o'zgartiradi → yangi ro'yxat
 l.has x                # ichida bormi → bool
+l.index x              # birinchi mos elementning indeksi, topilmasa -1
+l.find \x -> x > 4     # predikatga mos birinchi element, topilmasa nil
 l.0  l.1               # indeks bo'yicha element
 l.slice a b            # a..b oralig'i (b kirmaydi) → yangi ro'yxat
 l.join ", "            # → matn: [1 2 3].join "," → "1,2,3"

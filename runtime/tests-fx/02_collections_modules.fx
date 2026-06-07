@@ -16,6 +16,14 @@ eq l[2] 4 "list index [2]"
 eq (l.has 9) true "list.has true"
 eq (l.has 7) false "list.has false"
 
+# index — pozitsiya (topilmasa -1), has bool bilan juftlik
+eq (l.index 4) 2 "list.index topildi"
+eq ((l.index 7) == -1) true "list.index topilmadi -> -1"
+
+# find — predikatga mos birinchi element (topilmasa nil)
+eq (l.find \x -> x > 4) 5 "list.find topildi"
+eq (l.find \x -> x > 99) nil "list.find topilmadi -> nil"
+
 evens = l.filter \x -> x % 2 == 0
 eq evens [4 2 6] "list.filter"
 
