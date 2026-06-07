@@ -1515,6 +1515,100 @@ page "/" -> shop
         );
     }
 
+    // PR-6: on:click handler-effekt. `count <- count+1` server'da bajariladi,
+    // island re-render count=1 + data-fx-state count=1 (STATELESS).
+    #[test]
+    fn fx_click_count_oshadi() {
+        let src = r#"
+view counter
+  count <- 0
+  div {kind::panel}
+    p "Soni: ${count}"
+    btn "+1" {on:\-> count <- count+1}
+
+page "/" -> counter
+"#;
+        let toks = lexer::lex(src).expect("lex");
+        let prog = parser::parse(toks).expect("parse");
+        let interp = interp::Interp::new_arc();
+        interp.run(&prog).expect("run");
+        // Client count=0 yuboradi, "+1" bosilgan -> handler #0 bajariladi.
+        let body =
+            br##"{"page":"/","island":1,"event":"click","handler":"#0","state":{"count":0}}"##;
+        let html = match ui_mod::fx_event_render(&interp, body) {
+            Ok(h) => h,
+            Err(_) => panic!("fx_event_render xato qaytardi"),
+        };
+        assert!(html.contains("Soni: 1"), "count oshmadi: {}", html);
+        assert!(
+            html.contains("data-fx-state=\"{&quot;count&quot;:1}\""),
+            "data-fx-state count=1 yo'q: {}",
+            html
+        );
+    }
+
+    // PR-6: STATELESS tasdiq — birinchi javobdagi state'ni qayta yuborish count=2.
+    #[test]
+    fn fx_click_ikki_marta() {
+        let src = r#"
+view counter
+  count <- 0
+  btn "+1" {on:\-> count <- count+1}
+
+page "/" -> counter
+"#;
+        let toks = lexer::lex(src).expect("lex");
+        let prog = parser::parse(toks).expect("parse");
+        let interp = interp::Interp::new_arc();
+        interp.run(&prog).expect("run");
+        // Ikkinchi click: client count=1 yuboradi (birinchi javobdan) -> count=2.
+        let body =
+            br##"{"page":"/","island":1,"event":"click","handler":"#0","state":{"count":1}}"##;
+        let html = match ui_mod::fx_event_render(&interp, body) {
+            Ok(h) => h,
+            Err(_) => panic!("fx_event_render xato"),
+        };
+        assert!(
+            html.contains("data-fx-state=\"{&quot;count&quot;:2}\""),
+            "ikkinchi click count=2 bo'lishi kerak: {}",
+            html
+        );
+    }
+
+    // PR-6: bind (input) va react (count) birga. Click count oshiradi, q saqlanadi.
+    #[test]
+    fn fx_click_bind_va_react_birga() {
+        let src = r#"
+view app
+  q <- ""
+  count <- 0
+  div {kind::panel}
+    input {bind:q}
+    p "n=${count}"
+    btn "+1" {on:\-> count <- count+1}
+
+page "/" -> app
+"#;
+        let toks = lexer::lex(src).expect("lex");
+        let prog = parser::parse(toks).expect("parse");
+        let interp = interp::Interp::new_arc();
+        interp.run(&prog).expect("run");
+        // Client q="lola" + count=0 yuboradi, "+1" bosilgan.
+        let body =
+            br##"{"page":"/","island":1,"event":"click","handler":"#0","state":{"q":"lola","count":0}}"##;
+        let html = match ui_mod::fx_event_render(&interp, body) {
+            Ok(h) => h,
+            Err(_) => panic!("fx_event_render xato"),
+        };
+        assert!(html.contains("n=1"), "count oshmadi: {}", html);
+        // q="lola" data-fx-state'da saqlanishi kerak (input qiymati yo'qolmaydi).
+        assert!(
+            html.contains("&quot;q&quot;:&quot;lola&quot;"),
+            "q saqlanmadi: {}",
+            html
+        );
+    }
+
     // PR-4b: sof statik sahifa 0 JS (CDN-cacheable invariant).
     #[test]
     fn sof_statik_nol_js() {

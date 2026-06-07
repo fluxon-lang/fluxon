@@ -12,10 +12,25 @@
   "use strict";
   if (!window.__fx) return;
 
-  // Island element'ining joriy state'ini yig'adi: ichidagi data-fx-bind
-  // input'lar qiymati (stateless — server shu state bilan re-render qiladi).
+  // Island element'ining joriy state'ini yig'adi (stateless — server shu state
+  // bilan re-render qiladi). Ikki manba:
+  //  1) data-fx-state (island ildizidagi JSON) — DOM input bo'lmagan reaktiv
+  //     state (masalan `count`). Server oxirgi event javobida yozadi (PR-6).
+  //  2) data-fx-bind input qiymatlari — two-way input'lar (jonli, DOM'dan).
+  // Input qiymatlari data-fx-state ustiga yoziladi (input = eng yangi haqiqat).
   function islandState(islandEl) {
     var state = {};
+    var raw = islandEl.getAttribute("data-fx-state");
+    if (raw) {
+      try {
+        var parsed = JSON.parse(raw);
+        for (var k in parsed) {
+          if (Object.prototype.hasOwnProperty.call(parsed, k)) state[k] = parsed[k];
+        }
+      } catch (e) {
+        console.error("flux: data-fx-state parse xato", e);
+      }
+    }
     var bound = islandEl.querySelectorAll("[data-fx-bind]");
     for (var i = 0; i < bound.length; i++) {
       var el = bound[i];

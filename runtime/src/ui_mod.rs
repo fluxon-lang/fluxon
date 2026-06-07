@@ -142,14 +142,26 @@ pub fn fragment(children: Vec<Value>) -> Value {
 // Natija: island ildiz {__node}ga `__island:N`, on:/bind: elementga `__on`/`__bind`.
 
 // Butun node daraxtni walk qilib island markerlar qo'shadi. `next_id` — keyingi
-// island raqami (har sahifada 1, 2, ...). Qaytaradi: topilgan island soni.
-pub fn mark_islands(node: &mut Value, next_id: &mut u32) -> u32 {
-    mark_walk(node, next_id, false)
+// island raqami (har sahifada 1, 2, ...). `react_state` — island ildiziga
+// yoziladigan reaktiv (`<-`) state (PR-6, STATELESS: client keyingi event'da
+// `data-fx-state`ni qaytaradi). Oddiy GET render'da bo'sh map (data-fx-state yo'q,
+// initial qiymat literal seed'dan). Qaytaradi: topilgan island soni.
+pub fn mark_islands(
+    node: &mut Value,
+    next_id: &mut u32,
+    react_state: &BTreeMap<String, Value>,
+) -> u32 {
+    mark_walk(node, next_id, false, react_state)
 }
 
 // Rekursiv walk. `inside_island` — biz allaqachon island ichidamizmi (shunda
 // ichki elementga YANGI island bermaymiz — bitta island, ko'p emas).
-fn mark_walk(node: &mut Value, next_id: &mut u32, inside_island: bool) -> u32 {
+fn mark_walk(
+    node: &mut Value,
+    next_id: &mut u32,
+    inside_island: bool,
+    react_state: &BTreeMap<String, Value>,
+) -> u32 {
     let Value::Map(m) = node else {
         return 0;
     };
@@ -179,6 +191,12 @@ fn mark_walk(node: &mut Value, next_id: &mut u32, inside_island: bool) -> u32 {
         let id = *next_id;
         *next_id += 1;
         m.insert("__island".to_string(), Value::Int(id as i64));
+        // PR-6: reaktiv state'ni island ildiziga JSON sifatida yozamiz (STATELESS —
+        // client keyingi event'da qaytaradi). Bo'sh bo'lsa yozmaymiz (GET render).
+        if !react_state.is_empty() {
+            let json = crate::builtins::json_encode(&Value::Map(react_state.clone()));
+            m.insert("__state".to_string(), Value::Str(json));
+        }
         count += 1;
         now_inside = true;
     }
@@ -194,7 +212,7 @@ fn mark_walk(node: &mut Value, next_id: &mut u32, inside_island: bool) -> u32 {
     // Bolalarga rekursiv (island ichidamizmi holatini uzatib).
     if let Some(Value::List(children)) = m.get_mut("children") {
         for c in children.iter_mut() {
-            count += mark_walk(c, next_id, now_inside);
+            count += mark_walk(c, next_id, now_inside, react_state);
         }
     }
     count
@@ -275,7 +293,8 @@ impl Interp {
             "html" => {
                 let mut node = args.first().cloned().unwrap_or(Value::Nil);
                 let mut id = 1;
-                mark_islands(&mut node, &mut id);
+                // GET render — reaktiv state bo'sh (data-fx-state yo'q, initial seed).
+                mark_islands(&mut node, &mut id, &BTreeMap::new());
                 Ok(Value::Str(node_to_html(&node)))
             }
             // ui.css -> str: theme tokenlaridan CSS custom properties + base CSS.
@@ -505,6 +524,9 @@ async fn ui_handle_request(
         } else {
             vec![request_value]
         };
+        // page (UI) render'ida FX kontekst: on:click lambda'lar barqaror `#N` marker
+        // oladi (client birinchi click'da to'g'ri indeksni biladi). REST'da kerak emas.
+        let _hguard = is_page.then(crate::interp::FxHandlerGuard::set);
         let v = interp2.apply(handler, args)?;
         // page bo'lsa shu thread'da HTML render qilamiz (theme o'qish ham bu yerda),
         // REST bo'lsa xom Value qaytaramiz (tashqarida value_to_response).
@@ -607,6 +629,16 @@ pub(crate) fn fx_event_render(interp: &Arc<Interp>, body: &[u8]) -> Result<Strin
         Some(Value::Map(st)) => st.clone(),
         _ => BTreeMap::new(),
     };
+    // event turi ("click" -> handler-effekt, PR-6; "input" -> bind-driven re-render,
+    // PR-5a). handler — click uchun `#N` (registr indeksi) yoki nom.
+    let event = match m.get("event") {
+        Some(Value::Str(e)) => e.clone(),
+        _ => "input".to_string(),
+    };
+    let handler = match m.get("handler") {
+        Some(Value::Str(h)) => h.clone(),
+        _ => String::new(),
+    };
 
     // page bo'yicha handler topish (pages route'lari, GET).
     let matched = {
@@ -616,19 +648,83 @@ pub(crate) fn fx_event_render(interp: &Arc<Interp>, body: &[u8]) -> Result<Strin
     let (route, _params) =
         matched.ok_or_else(|| Flow::err(format!("/_fx/event: page topilmadi: {}", page)))?;
 
-    // Client state'ni seed qilib view'ni re-render qilamiz (guard panic-safe tozalaydi).
-    let _guard = crate::interp::FxRenderGuard::set(client_state);
-    let args = if interp.fn_arity(&route.handler) == Some(0) {
-        vec![]
-    } else {
-        // page handler req kutsa — minimal bo'sh req (PR-5a: state seed orqali).
-        vec![Value::Map(BTreeMap::new())]
+    let page_args = |arity: Option<usize>| -> Vec<Value> {
+        if arity == Some(0) {
+            vec![]
+        } else {
+            // page handler req kutsa — minimal bo'sh req (state seed orqali ishlaydi).
+            vec![Value::Map(BTreeMap::new())]
+        }
     };
-    let mut tree = interp.apply(route.handler, args)?;
 
-    // Island markerlar (SSR bilan bir xil tartibda) -> island N node'ini topamiz.
+    // PR-6: on:click handler-effekt. Handler `#N` bo'lsa registr indeksi -> view'ni
+    // FX kontekstda render (registr to'ladi) -> handler'ni view scope'da apply
+    // (`count <- count+1` scope'dagi count'ni yangilaydi) -> yangi reaktiv state'ni
+    // scope'dan o'qib SEED qilib toza re-render. STATELESS: yangi state HTML'ga
+    // data-fx-state bo'lib yoziladi, client keyingi event'da qaytaradi.
+    if event == "click" && handler.starts_with('#') {
+        let idx: usize = handler[1..]
+            .parse()
+            .map_err(|_| Flow::err(format!("/_fx/event: yaroqsiz handler indeksi: {}", handler)))?;
+
+        // exec1: FX kontekst (handler registri 0'dan to'planadi) + client state seed.
+        // MUHIM: handler indeksi BARQAROR bo'lishi uchun har render guard'ni QAYTA
+        // o'rnatadi (registr 0'dan) — GET render, exec1, exec2 bir xil tartib beradi.
+        let _hguard = crate::interp::FxHandlerGuard::set();
+        let scope1 = {
+            let _sguard = crate::interp::FxRenderGuard::set(client_state.clone());
+            let args = page_args(interp.fn_arity(&route.handler));
+            let (_tree1, scope1) = interp.render_view_with_scope(route.handler.clone(), args)?;
+            scope1
+            // _sguard shu yerda drop — SEED faqat dastlabki render uchun. Handler
+            // apply paytida seed AKTIV bo'lsa, `count <- count+1` ichidagi `count`
+            // Assign'ni seed client qiymatiga override qilib qo'yardi (bug).
+        };
+
+        // Handler'ni view scope'da apply — registr (_hguard) hali aktiv, seed YO'Q.
+        // `count <- count+1` scope1'dagi count'ni haqiqatan oshiradi.
+        let lambda = crate::interp::fx_handler_get(idx)
+            .ok_or_else(|| Flow::err(format!("/_fx/event: handler #{} topilmadi", idx)))?;
+        interp.apply(lambda, vec![])?;
+
+        // Yangi reaktiv state: handler body'dagi `<-` nomlarini scope1'dan o'qiymiz,
+        // ustiga client bind input'larini saqlaymiz (ular DOM'da, scope'da emas).
+        let mut new_state = client_state.clone();
+        for name in react_bind_names(&route.handler) {
+            if let Some(v) = interp.read_var(&scope1, &name) {
+                new_state.insert(name, v);
+            }
+        }
+
+        // exec2: toza re-render, yangi state SEED + FX kontekst (handler markerlari
+        // YANA #0'dan — client javobdagi markerni keyingi click'da to'g'ri yuboradi).
+        let tree2 = {
+            let _hguard = crate::interp::FxHandlerGuard::set();
+            let _sguard = crate::interp::FxRenderGuard::set(new_state.clone());
+            let args = page_args(interp.fn_arity(&route.handler));
+            interp.apply(route.handler.clone(), args)?
+        };
+        return render_island_html(tree2, island_id, &new_state);
+    }
+
+    // PR-5a: bind-driven (input) — client state seed qilib view re-render (effekt yo'q).
+    let _guard = crate::interp::FxRenderGuard::set(client_state.clone());
+    let args = page_args(interp.fn_arity(&route.handler));
+    let tree = interp.apply(route.handler, args)?;
+    // bind-driven javobda ham reaktiv state'ni saqlaymiz (client state'ni qaytaramiz,
+    // shunda non-input state, masalan count, yo'qolmaydi).
+    render_island_html(tree, island_id, &client_state)
+}
+
+// Render qilingan daraxtdan island N node'ini topib HTML qaytaradi. `react_state`
+// island ildiziga data-fx-state bo'lib yoziladi (STATELESS).
+fn render_island_html(
+    mut tree: Value,
+    island_id: i64,
+    react_state: &BTreeMap<String, Value>,
+) -> Result<String, Flow> {
     let mut next_id = 1u32;
-    mark_islands(&mut tree, &mut next_id);
+    mark_islands(&mut tree, &mut next_id, react_state);
     match find_island(&tree, island_id) {
         Some(node) => Ok(node_to_html(node)),
         None => Err(Flow::err(format!(
@@ -636,6 +732,68 @@ pub(crate) fn fx_event_render(interp: &Arc<Interp>, body: &[u8]) -> Result<Strin
             island_id
         ))),
     }
+}
+
+// page handler (view fn yoki lambda) tanasidagi reaktiv (`<-`) bind nomlarini
+// yig'adi (PR-6: handler bajarilgandan keyin scope'dan shu nomlarni o'qiymiz).
+// View body'dagi top-level `Stmt::Assign` nomlari = React state.
+fn react_bind_names(handler: &Value) -> Vec<String> {
+    let Value::Fn(fv) = handler else {
+        return vec![];
+    };
+    collect_assign_names(&fv.body)
+}
+
+// Stmt ro'yxatidagi `<-` (Assign) nomlarini yig'adi (nested each/if/match ham).
+fn collect_assign_names(stmts: &[crate::ast::Stmt]) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk_stmt(s: &crate::ast::Stmt, out: &mut Vec<String>) {
+        use crate::ast::Stmt;
+        match s {
+            Stmt::Assign { name, .. } => out.push(name.clone()),
+            Stmt::Each { body, .. } => {
+                for s in body {
+                    walk_stmt(s, out);
+                }
+            }
+            Stmt::Expr(e) => walk_expr(e, out),
+            _ => {}
+        }
+    }
+    fn walk_expr(e: &crate::ast::Expr, out: &mut Vec<String>) {
+        use crate::ast::Expr;
+        match e {
+            Expr::If(ifx) => {
+                for (_, block) in &ifx.arms {
+                    for s in block {
+                        walk_stmt(s, out);
+                    }
+                }
+                if let Some(eb) = &ifx.else_block {
+                    for s in eb {
+                        walk_stmt(s, out);
+                    }
+                }
+            }
+            Expr::Match(mx) => {
+                for arm in &mx.arms {
+                    for s in &arm.body {
+                        walk_stmt(s, out);
+                    }
+                }
+            }
+            Expr::Children(stmts) => {
+                for s in stmts {
+                    walk_stmt(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in stmts {
+        walk_stmt(s, &mut out);
+    }
+    out
 }
 
 impl Interp {
@@ -655,7 +813,9 @@ impl Interp {
         // Island markerlar (PR-4b) — node clone'iga qo'shamiz (kiruvchi o'zgarmaydi).
         let mut node = node.clone();
         let mut next_id = 1u32;
-        let island_count = mark_islands(&mut node, &mut next_id);
+        // GET render — reaktiv state bo'sh (initial qiymat literal seed'dan keladi,
+        // birinchi click to'g'ri; keyingilar data-fx-state orqali).
+        let island_count = mark_islands(&mut node, &mut next_id, &BTreeMap::new());
         let css = {
             let theme = self.theme.read();
             theme_to_css(&theme)
@@ -807,6 +967,10 @@ fn fx_markers_html(node: &BTreeMap<String, Value>) -> String {
     if let Some(Value::Str(b)) = node.get("__bind") {
         out.push_str(&format!(" data-fx-bind=\"{}\"", escape_attr(b)));
     }
+    // PR-6: reaktiv state JSON (STATELESS — client keyingi event'da qaytaradi).
+    if let Some(Value::Str(state)) = node.get("__state") {
+        out.push_str(&format!(" data-fx-state=\"{}\"", escape_attr(state)));
+    }
     out
 }
 
@@ -955,7 +1119,7 @@ mod tests {
     fn statik_element_island_emas() {
         let mut n = node("h1", vec![Value::Str("Salom".into())]);
         let mut id = 1;
-        let cnt = mark_islands(&mut n, &mut id);
+        let cnt = mark_islands(&mut n, &mut id, &BTreeMap::new());
         assert_eq!(cnt, 0, "statik element island bermasligi kerak");
         assert!(!node_to_html(&n).contains("data-fx"));
     }
@@ -964,7 +1128,7 @@ mod tests {
     fn on_element_island_boladi() {
         let mut n = props_node("btn", vec![("on", Value::Str("add".into()))], Some("Qo'sh"));
         let mut id = 1;
-        let cnt = mark_islands(&mut n, &mut id);
+        let cnt = mark_islands(&mut n, &mut id, &BTreeMap::new());
         assert_eq!(cnt, 1, "on: bo'lgan element island ildizi");
         let html = node_to_html(&n);
         assert!(html.contains("data-fx-island=\"1\""), "html: {}", html);
@@ -979,7 +1143,7 @@ mod tests {
         let div = node("div", vec![Value::List(vec![btn])]);
         let mut n = div;
         let mut id = 1;
-        let cnt = mark_islands(&mut n, &mut id);
+        let cnt = mark_islands(&mut n, &mut id, &BTreeMap::new());
         assert_eq!(cnt, 1, "faqat bitta island (div), btn alohida emas");
         let html = node_to_html(&n);
         // div island, btn faqat data-fx-on (island emas).
@@ -992,7 +1156,7 @@ mod tests {
     fn bind_marker() {
         let mut n = props_node("input", vec![("bind", Value::Str("q".into()))], None);
         let mut id = 1;
-        mark_islands(&mut n, &mut id);
+        mark_islands(&mut n, &mut id, &BTreeMap::new());
         let html = node_to_html(&n);
         assert!(html.contains("data-fx-bind=\"q\""), "html: {}", html);
     }
@@ -1003,7 +1167,7 @@ mod tests {
         let btn = props_node("btn", vec![("on", Value::Str("x".into()))], Some("B"));
         let mut frag = fragment(vec![node("h1", vec![Value::Str("S".into())]), btn]);
         let mut id = 1;
-        let cnt = mark_islands(&mut frag, &mut id);
+        let cnt = mark_islands(&mut frag, &mut id, &BTreeMap::new());
         assert_eq!(cnt, 1, "fragment emas, btn island bo'ladi");
     }
 
@@ -1013,7 +1177,7 @@ mod tests {
         let btn = props_node("btn", vec![("on", Value::Str("go".into()))], Some("B"));
         let mut div = node("div", vec![Value::List(vec![btn])]);
         let mut id = 1;
-        mark_islands(&mut div, &mut id);
+        mark_islands(&mut div, &mut id, &BTreeMap::new());
         let found = find_island(&div, 1).expect("island 1 topilishi kerak");
         let html = node_to_html(found);
         assert!(html.contains("data-fx-island=\"1\""), "html: {}", html);
@@ -1029,5 +1193,65 @@ mod tests {
         assert!(s.contains("\"1\":{\"mode\":\"server\"}"), "s: {}", s);
         assert!(s.contains("\"2\":{\"mode\":\"server\"}"), "s: {}", s);
         assert!(s.contains("/_fx/client.js"), "client.js yo'q: {}", s);
+    }
+
+    // --- PR-6: handler-effekt (data-fx-state + react_bind_names) ---
+
+    #[test]
+    fn data_fx_state_island_ildizida() {
+        // mark_islands react_state bilan -> island ildiziga data-fx-state (JSON,
+        // escape qilingan). on: marker bo'lgan element ildiz bo'ladi.
+        let mut n = props_node("btn", vec![("on", Value::Str("#0".into()))], Some("+1"));
+        let mut id = 1;
+        let mut state = BTreeMap::new();
+        state.insert("count".to_string(), Value::Int(3));
+        let cnt = mark_islands(&mut n, &mut id, &state);
+        assert_eq!(cnt, 1);
+        let html = node_to_html(&n);
+        // JSON `{count:3}` -> atribut escape (qo'shtirnoq -> &quot;).
+        assert!(
+            html.contains("data-fx-state=\"{&quot;count&quot;:3}\""),
+            "html: {}",
+            html
+        );
+        // handler marker `#0` -> data-fx-on="click:#0".
+        assert!(html.contains("data-fx-on=\"click:#0\""), "html: {}", html);
+    }
+
+    #[test]
+    fn bosh_react_state_data_fx_state_yozmaydi() {
+        // GET render (bo'sh react_state) -> data-fx-state YO'Q (initial seed'dan).
+        let mut n = props_node("btn", vec![("on", Value::Str("#0".into()))], Some("+1"));
+        let mut id = 1;
+        mark_islands(&mut n, &mut id, &BTreeMap::new());
+        let html = node_to_html(&n);
+        assert!(
+            !html.contains("data-fx-state"),
+            "bo'sh state yozmasligi: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn react_bind_names_yigadi() {
+        // page handler (view) body'dagi `<-` nomlari = React state.
+        use crate::lexer::lex;
+        use crate::parser::parse;
+        let src = "view c\n  count <- 0\n  flag <- false\n  btn \"x\" {on:add}\n";
+        let prog = parse(lex(src).unwrap()).unwrap();
+        // ViewDecl -> Value::Fn yasab react_bind_names'ni sinash.
+        let crate::ast::Stmt::ViewDecl { params, body, name } = &prog[0] else {
+            panic!("view kutilgan");
+        };
+        let f = Value::Fn(std::sync::Arc::new(crate::value::FnValue {
+            params: params.clone(),
+            body: body.clone(),
+            parent: crate::interp::Parent::None,
+            name: name.clone(),
+            is_view: true,
+        }));
+        let mut names = react_bind_names(&f);
+        names.sort();
+        assert_eq!(names, vec!["count".to_string(), "flag".to_string()]);
     }
 }

@@ -127,6 +127,12 @@ impl Parser {
         if self.check(&Tok::Newline) {
             self.advance();
             self.parse_block()
+        } else if let Tok::Ident(_) = self.peek()
+            && matches!(self.peek2(), Tok::Assign)
+        {
+            // bir qatorli `<-` (assign): event handler effekti — `\-> count <- count+1`.
+            // Ifoda emas, statement (state mutatsiyasi). Faqat shu holatda ident_stmt.
+            Ok(vec![self.parse_ident_stmt()?])
         } else {
             // bir qatorli: bitta ifoda
             let e = self.parse_expr()?;

@@ -47,6 +47,56 @@ fn fx_seed_value(name: &str) -> Option<Value> {
     FX_RENDER_STATE.with(|c| c.borrow().as_ref().and_then(|m| m.get(name).cloned()))
 }
 
+// PR-6: `on:click` handler tanasi registri (inline lambda -> Value::Fn). HTML
+// atributga funksiya yozib bo'lmaydi, shuning uchun render paytida lambda'ni shu
+// registrga push qilamiz va marker `#N` (indeks) bo'ladi; event kelganda client
+// `#N` yuboradi, biz registr[N]'ni apply qilamiz. thread_local — har request
+// alohida thread'da, izolyatsiya tabiiy; Send+Sync invariant buzilmaydi.
+//
+// `Some(vec)` faqat FX kontekstda (event/registr to'plash render'i) — oddiy page
+// GET render'da `None`, shunda lambda registrga KIRMAYDI (marker `_` bo'lib qoladi,
+// statik invariant saqlanadi). Guard panic-safe yoqib-o'chiradi.
+thread_local! {
+    static FX_HANDLERS: std::cell::RefCell<Option<Vec<Value>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// FX handler-to'plash kontekstini yoqadi va scope tugaganda (drop/panic) o'chiradi.
+pub struct FxHandlerGuard;
+
+impl FxHandlerGuard {
+    pub fn set() -> Self {
+        FX_HANDLERS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+        FxHandlerGuard
+    }
+}
+
+impl Drop for FxHandlerGuard {
+    fn drop(&mut self) {
+        FX_HANDLERS.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+// FX kontekst aktivmi (registr to'planmoqdami).
+fn fx_handlers_active() -> bool {
+    FX_HANDLERS.with(|c| c.borrow().is_some())
+}
+
+// Lambda'ni registrga qo'shadi va indeksini qaytaradi (faqat FX kontekstda).
+fn fx_handler_push(f: Value) -> usize {
+    FX_HANDLERS.with(|c| {
+        let mut b = c.borrow_mut();
+        let v = b.as_mut().expect("fx_handler_push FX kontekstsiz");
+        v.push(f);
+        v.len() - 1
+    })
+}
+
+// Registrdagi `idx`-handler'ni qaytaradi (event apply uchun).
+pub(crate) fn fx_handler_get(idx: usize) -> Option<Value> {
+    FX_HANDLERS.with(|c| c.borrow().as_ref().and_then(|v| v.get(idx).cloned()))
+}
+
 // Lexical scope: ota-muhitga havola bilan zanjir. Arc<RwLock<>> — closure'lar,
 // mutatsiya VA thread'lar orasida ulashish uchun (haqiqiy parallel HTTP).
 // RwLock (Mutex emas): qidirish/o'qish ko'p o'quvchiga parallel ruxsat beradi,
@@ -1650,12 +1700,20 @@ impl Interp {
         for en in entries {
             match en {
                 MapEntry::Pair { key, value } if key == "on" || key == "bind" => {
-                    // Ident bo'lsa nomni string sifatida (eval emas); lambda/boshqa
-                    // bo'lsa — sym sifatida belgisini saqlaymiz (handler nomi yo'q).
+                    // Ident bo'lsa nomni string sifatida (eval emas); inline lambda
+                    // bo'lsa (faqat `on:`) tanasini registrga push qilib `#N` marker
+                    // beramiz (PR-6: event kelganda registr[N] apply bo'ladi); boshqa
+                    // ifoda — sym sifatida mavjudlik belgisi (handler nomi yo'q).
                     let marker = match value {
                         Expr::Ident(name) => Value::Str(name.clone()),
                         Expr::Sym(s) => Value::Sym(s.clone()),
-                        // lambda yoki murakkab ifoda — nom yo'q; mavjudlik belgisi.
+                        // `on:\-> ...` inline lambda — faqat FX kontekstda (event
+                        // render'i) registrga tushadi; oddiy GET render'da `_` (statik).
+                        Expr::Lambda { .. } if key == "on" && fx_handlers_active() => {
+                            let f = self.eval(value, env)?;
+                            Value::Str(format!("#{}", fx_handler_push(f)))
+                        }
+                        // lambda (FX kontekstsiz) yoki murakkab ifoda — mavjudlik belgisi.
                         _ => Value::Sym("_".to_string()),
                     };
                     m.insert(key.clone(), marker);
@@ -1722,6 +1780,66 @@ impl Interp {
                 "{} chaqirib bo'lmaydi (funksiya emas)",
                 other.type_name()
             ))),
+        }
+    }
+
+    // View'ni render qiladi VA uning call scope'ini ham qaytaradi (PR-6). `apply`
+    // call_env'ni tashlaydi, lekin event handler'ni o'sha scope'da apply qilib
+    // `<-` state'ni o'qishimiz kerak (handler `count <- count+1` view scope'dagi
+    // count'ni yangilaydi). `apply` ning view shoxiga o'xshaydi, lekin Env'ni
+    // saqlab qaytaradi. Faqat view (`is_view`) uchun; aks holda xato.
+    pub(crate) fn render_view_with_scope(
+        &self,
+        f: Value,
+        args: Vec<Value>,
+    ) -> Result<(Value, Env), Flow> {
+        let Value::Fn(fv) = f else {
+            return Err(Flow::err("render_view_with_scope: funksiya emas"));
+        };
+        if !fv.is_view {
+            return Err(Flow::err("render_view_with_scope: view emas"));
+        }
+        if args.len() != fv.params.len() {
+            return Err(Flow::err(format!(
+                "{}: {} ta argument kutilgan, {} berildi",
+                fv.name,
+                fv.params.len(),
+                args.len()
+            )));
+        }
+        let call_env = Scope::child_with_capacity(fv.parent.clone(), fv.params.len());
+        {
+            let mut s = call_env.write();
+            for (p, a) in fv.params.iter().zip(args) {
+                s.define(p, a, true);
+            }
+        }
+        let tree = self.exec_view_body(&fv.body, &call_env)?;
+        Ok((tree, call_env))
+    }
+
+    // Scope zanjiridan `name` qiymatini o'qiydi (PR-6: handler bajarilgandan keyin
+    // React state'ni view scope'dan olish uchun). Topilmasa None.
+    pub(crate) fn read_var(&self, env: &Env, name: &str) -> Option<Value> {
+        let mut cur = env.clone();
+        loop {
+            let parent = {
+                let s = cur.read();
+                if let Some(v) = s.get(name) {
+                    return Some(v.clone());
+                }
+                s.parent.clone()
+            };
+            match parent {
+                Parent::Scope(p) => cur = p,
+                Parent::Root => {
+                    if let Some(frozen) = self.globals_frozen.get() {
+                        return frozen.get(name).cloned();
+                    }
+                    cur = self.global.clone();
+                }
+                Parent::None => return None,
+            }
         }
     }
 
@@ -1934,5 +2052,60 @@ mod dotenv_tests {
         let m = parse_dotenv("noequalsign\n=novalue\nGOOD=ok\n");
         assert_eq!(m.len(), 1);
         assert_eq!(m.get("GOOD").map(String::as_str), Some("ok"));
+    }
+}
+
+#[cfg(test)]
+mod fx_handler_tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    // Value PartialEq/Debug implement qilmaydi — Int qiymatini xavfsiz olamiz.
+    fn as_int(v: Option<Value>) -> Option<i64> {
+        match v {
+            Some(Value::Int(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn fx_handlers_push_get_clear() {
+        // Guard yo'q -> registr aktiv emas, get None.
+        assert!(!fx_handlers_active(), "guardsiz aktiv bo'lmasligi kerak");
+        assert!(fx_handler_get(0).is_none());
+        {
+            let _g = FxHandlerGuard::set();
+            assert!(fx_handlers_active(), "guard ichida aktiv");
+            let i0 = fx_handler_push(Value::Int(10));
+            let i1 = fx_handler_push(Value::Int(20));
+            assert_eq!((i0, i1), (0, 1));
+            assert_eq!(as_int(fx_handler_get(1)), Some(20));
+            assert!(fx_handler_get(5).is_none(), "oraliqdan tashqari None");
+        }
+        // Guard drop -> registr tozalanadi (panic-safe).
+        assert!(
+            !fx_handlers_active(),
+            "guard drop'dan keyin tozalanishi kerak"
+        );
+        assert!(fx_handler_get(0).is_none());
+    }
+
+    #[test]
+    fn render_view_with_scope_state_oqiladi() {
+        // View'ni render qilib scope'dan reaktiv state'ni o'qish (PR-6 asosi).
+        let src = "view c\n  count <- 7\n  p \"x\"\n";
+        let interp = Interp::new_arc();
+        interp.run(&parse(lex(src).unwrap()).unwrap()).unwrap();
+        let view = interp.read_var(&interp.global, "c").expect("view c");
+        let (_tree, scope) = match interp.render_view_with_scope(view, vec![]) {
+            Ok(p) => p,
+            Err(_) => panic!("render_view_with_scope xato"),
+        };
+        assert_eq!(
+            as_int(interp.read_var(&scope, "count")),
+            Some(7),
+            "scope'da count o'qilishi kerak"
+        );
     }
 }
