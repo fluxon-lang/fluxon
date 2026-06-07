@@ -95,6 +95,48 @@ fn fx_handlers_active() -> bool {
     FX_HANDLERS.with(|c| c.borrow().is_some())
 }
 
+// PR-7b: `source live` tag'lari registri (page render davomida yig'iladi). Source
+// node HTML element EMAS (each ichida ishlatiladi) — island markeri bilan
+// bog'lanmaydi, shuning uchun live tag'larni render vaqtida thread_local'da
+// to'playmiz va bootstrap script'ga `window.__fx.live=[...]` qilib yozamiz.
+// FX_HANDLERS naqshi: `Some(vec)` faqat render kontekstda; guard panic-safe.
+thread_local! {
+    static FX_LIVE_TAGS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Live tag yig'ish kontekstini yoqadi; scope tugaganda (drop/panic) yig'ilgan
+// tag'larni qaytaradi (FxLiveGuard::take()).
+pub struct FxLiveGuard;
+
+impl FxLiveGuard {
+    pub fn set() -> Self {
+        FX_LIVE_TAGS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+        FxLiveGuard
+    }
+    // Yig'ilgan live tag'larni qaytaradi va kontekstni o'chiradi.
+    pub fn take() -> Vec<String> {
+        FX_LIVE_TAGS.with(|c| c.borrow_mut().take().unwrap_or_default())
+    }
+}
+
+impl Drop for FxLiveGuard {
+    fn drop(&mut self) {
+        FX_LIVE_TAGS.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+// Live source tag'ini registrga qo'shadi (eval_source FX kontekstda chaqiradi).
+fn fx_live_push(tag: &str) {
+    FX_LIVE_TAGS.with(|c| {
+        if let Some(v) = c.borrow_mut().as_mut()
+            && !v.iter().any(|t| t == tag)
+        {
+            v.push(tag.to_string());
+        }
+    });
+}
+
 // Lambda'ni registrga qo'shadi va indeksini qaytaradi (faqat FX kontekstda).
 fn fx_handler_push(f: Value) -> usize {
     FX_HANDLERS.with(|c| {
@@ -1811,7 +1853,13 @@ impl Interp {
     // `tag` = bind nomi (ui.invalidate :tag uchun). SSR-first: inner SERVERDA
     // bajariladi, .data to'la keladi (loading=false). Xato bo'lsa panic emas —
     // {err:Str} (spec: items.err). `live` PR-7a'da bayroq (WS PR-7b).
-    fn eval_source(&self, inner: &Expr, tag: &str, _live: bool, env: &Env) -> EvalResult {
+    fn eval_source(&self, inner: &Expr, tag: &str, live: bool, env: &Env) -> EvalResult {
+        // PR-7b: live source bo'lsa tag'ni render registriga qo'shamiz (page render
+        // FxLiveGuard ostida bo'lsa) -> bootstrap `window.__fx.live` -> client WS
+        // subscribe. Anonim tag (Assign'siz) live bo'la olmaydi.
+        if live && !tag.is_empty() {
+            fx_live_push(tag);
+        }
         // inner (db.q/db.one/http.get) ni bajaramiz; biznes xatosini .err ga aylantirib
         // ushlaymiz, runtime oqim xatosini (skip/stop/return) yuqoriga uzatamiz.
         let (data, err) = match self.eval(inner, env) {

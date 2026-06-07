@@ -247,6 +247,67 @@ async fn http_and_ws_serve_together_cross_protocol() {
     let _ = std::fs::remove_file(&path);
 }
 
+// PR-7b: BIR PORTDA HTTP + WS. `ui.serve` bitta portda SSR sahifa + /_fx/ws WS
+// upgrade + REST. live source + ui.push: WS klient /_fx/ws ga ulanib :orders ga
+// subscribe; HTTP POST /add -> ui.push :orders -> WS klient {"fx":"reload"} oladi.
+// Bu bir portda HTTP+WS+upgrade'ni to'liq qamraydi (eng katta texnik xavf).
+const UI_LIVE_SCRIPT: &str = r#"
+use db ui
+
+tbl ord
+  id   serial pk
+  name str
+
+view shop
+  orders <- source live db.q "select * from ord order by id"
+  each o in orders.data
+    p o.name
+
+http.on :post "/add" \req ->
+  db.ins "ord" {name: req.body.name ?? "yangi"}
+  ui.push :orders
+  rep 200 {ok: true}
+
+page "/" -> shop
+ui.serve PORT
+"#;
+
+#[tokio::test]
+async fn ui_serve_bir_portda_http_ws_live_push() {
+    let port = 9315;
+    let script = UI_LIVE_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server(port, &script);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    // BIR PORTGA WS upgrade (/_fx/ws) — bu hyper upgrade'ni tasdiqlaydi.
+    let url = format!("ws://127.0.0.1:{}/_fx/ws", port);
+    let (mut ws, _) = connect_async(&url)
+        .await
+        .expect("bir portda /_fx/ws ulanish");
+    // :orders live source'iga subscribe (client.js shuni qiladi).
+    ws.send(Message::text(r#"{"sub":["orders"]}"#))
+        .await
+        .unwrap();
+    // subscribe server room'iga yetishi uchun kichik pauza.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // HTTP POST /add (SHU portda) -> ui.push :orders -> WS reload broadcast.
+    let resp = http_post_json(port, "/add", r#"{"name":"Atirgul"}"#).await;
+    assert!(resp.contains("200"), "HTTP 200 kutilgan: {}", resp);
+
+    // WS klient ui.push qo'zg'agan reload xabarini oladi — bir portda real-time isboti.
+    let got = next_text(&mut ws).await;
+    assert!(
+        got.contains("\"reload\""),
+        "reload broadcast kutilgan: {}",
+        got
+    );
+    assert!(got.contains("orders"), "tag 'orders' kutilgan: {}", got);
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // cron.run http.serve'dan OLDIN kelsa ham serverni bloklamasligi kerak (issue #42).
 // Ilgari cron.run `loop { sleep }` bilan o'zidan keyingi http.serve'ni o'ldirardi —
 // port hech qachon ochilmasdi. Endi cron.run deferred: scheduler fonda, http.serve

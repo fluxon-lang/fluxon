@@ -328,13 +328,27 @@ impl Interp {
                     .push(crate::serve_mod::PendingServer::Ui { port });
                 Ok(Value::Nil)
             }
-            // ui.invalidate :tag — source'ni qayta yuklash signali. PR-7a (stateless,
-            // WS yo'q): NO-OP — server client'ga push qila olmaydi. Source qayta
-            // bajarilishi client event re-render orqali bo'ladi (/_fx/event'da view
-            // QAYTA eval -> source qayta bajariladi). Tag-targeted WS broadcast +
-            // ui.push (barcha klientlar) = PR-7b. Bu yerda Nil qaytaradi (xato emas)
-            // — kod `ui.invalidate :items` yozsa parse/eval buzilmasin.
+            // ui.invalidate :tag — LOKAL source qayta yuklash signali. Stateless,
+            // joriy klient o'zini event re-render orqali yangilaydi (/_fx/event'da
+            // view QAYTA eval -> source qayta bajariladi). No-op (Nil) — `ui.invalidate
+            // :items` yozsa parse/eval buzilmasin. Broadcast egizagi = ui.push.
             "invalidate" => Ok(Value::Nil),
+            // ui.push :tag — BROADCAST source reload (PR-7b). Tag room'iga (":tag")
+            // ulangan BARCHA live klientlarga "reload" yuboradi (WS). Klient o'sha
+            // tag source'ini qayta yuklaydi. Server mutation'idan keyin chaqiriladi
+            // (`fn save_order d ... ui.push :orders`). Istalgan thread'dan xavfsiz.
+            "push" => {
+                let tag = match args.first() {
+                    Some(Value::Sym(s)) | Some(Value::Str(s)) => s.clone(),
+                    _ => return Err(Flow::err("ui.push: tag (:sym yoki str) kerak")),
+                };
+                let room = format!(":{}", tag);
+                // json_encode tag'ni to'g'ri quote/escape qiladi (Value::Str -> "...").
+                let tag_json = crate::builtins::json_encode(&Value::Str(tag));
+                let msg = format!("{{\"fx\":\"reload\",\"tag\":{}}}", tag_json);
+                self.ws.push_tag(&room, &msg);
+                Ok(Value::Nil)
+            }
             _ => Err(Flow::err(format!("ui.{} funksiyasi yo'q", func))),
         }
     }
@@ -371,8 +385,14 @@ const BASE_CSS: &str = "\
 // island_count > 0 bo'lsa body oxiriga `window.__fx` bootstrap script qo'shiladi
 // (PR-4b minimal: island ro'yxati + mode; PR-5 to'ldiradi). 0 island = 0 JS
 // (sof statik sahifa CDN-cacheable).
-fn full_document(css: &str, body_html: &str, island_count: u32, path: &str) -> String {
-    let script = fx_bootstrap_script(island_count, path);
+fn full_document(
+    css: &str,
+    body_html: &str,
+    island_count: u32,
+    path: &str,
+    live: &[String],
+) -> String {
+    let script = fx_bootstrap_script(island_count, path, live);
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -384,8 +404,10 @@ fn full_document(css: &str, body_html: &str, island_count: u32, path: &str) -> S
 // PR-5a bootstrap: window.__fx (page + island ro'yxati + mode) + client.js yuklash.
 // `page` — client /_fx/event POST'da qaytaradi (server qaysi view ekanini biladi,
 // stateless). 0 island = script YO'Q (sof statik, 0 JS — CDN-cacheable invariant).
-fn fx_bootstrap_script(island_count: u32, path: &str) -> String {
-    if island_count == 0 {
+fn fx_bootstrap_script(island_count: u32, path: &str, live: &[String]) -> String {
+    // 0 island VA 0 live source = script YO'Q (sof statik, 0 JS — CDN-cacheable).
+    // PR-7b: live source bo'lsa (island bo'lmasa ham) client.js WS uchun kerak.
+    if island_count == 0 && live.is_empty() {
         return String::new();
     }
     let mut islands = String::new();
@@ -395,11 +417,16 @@ fn fx_bootstrap_script(island_count: u32, path: &str) -> String {
         }
         islands.push_str(&format!("\"{}\":{{\"mode\":\"server\"}}", i));
     }
+    // PR-7b: live source tag'lari -> window.__fx.live (client WS subscribe qiladi).
+    let live_json = crate::builtins::json_encode(&Value::List(
+        live.iter().map(|t| Value::Str(t.clone())).collect(),
+    ));
     format!(
-        "<script>window.__fx={{\"page\":\"{}\",\"islands\":{{{}}}}}</script>\
+        "<script>window.__fx={{\"page\":\"{}\",\"islands\":{{{}}},\"live\":{}}}</script>\
 <script src=\"/_fx/client.js\"></script>",
         escape_attr(path),
-        islands
+        islands,
+        live_json
     )
 }
 
@@ -433,8 +460,11 @@ pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
                 let interp = interp.clone();
                 async move { ui_handle_request(interp, req).await }
             });
+            // .with_upgrades() — bir portda WS upgrade (/_fx/ws) uchun SHART
+            // (PR-7b). Aks holda hyper::upgrade::on hech qachon hal bo'lmaydi.
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, service)
+                .with_upgrades()
                 .await
             {
                 eprintln!("ui ulanish xatosi: {}", e);
@@ -450,7 +480,7 @@ pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
 // REST oldin: API endpoint'lar UI sahifalardan ustun (aniqroq, /api prefiksli).
 async fn ui_handle_request(
     interp: Arc<Interp>,
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().as_str().to_lowercase();
     let uri = req.uri().clone();
@@ -461,6 +491,11 @@ async fn ui_handle_request(
     // /_fx/client.js — universal client JS (statik, keshlanadigan).
     if method == "get" && path == "/_fx/client.js" {
         return Ok(js_response(crate::ui_mod::CLIENT_JS));
+    }
+    // /_fx/ws — WebSocket upgrade (PR-7b, live source realtime, BIR PORTDA).
+    // Body o'qishdan OLDIN bo'lishi shart (upgrade body consume qilmaydi).
+    if method == "get" && path == "/_fx/ws" {
+        return Ok(fx_ws_upgrade(interp, &mut req));
     }
     // /_fx/event — island re-render (PR-5a, server-driven, stateless POST).
     if method == "post" && path == "/_fx/event" {
@@ -534,6 +569,9 @@ async fn ui_handle_request(
         // page (UI) render'ida FX kontekst: on:click lambda'lar barqaror `#N` marker
         // oladi (client birinchi click'da to'g'ri indeksni biladi). REST'da kerak emas.
         let _hguard = is_page.then(crate::interp::FxHandlerGuard::set);
+        // PR-7b: `source live` tag'lari handler eval davomida yig'iladi (render_page_at
+        // FxLiveGuard::take() bilan oladi -> window.__fx.live -> client WS subscribe).
+        let _lguard = is_page.then(crate::interp::FxLiveGuard::set);
         let v = interp2.apply(handler, args)?;
         // page bo'lsa shu thread'da HTML render qilamiz (theme o'qish ham bu yerda),
         // REST bo'lsa xom Value qaytaramiz (tashqarida value_to_response).
@@ -563,6 +601,55 @@ async fn ui_handle_request(
 enum PageOrRest {
     Page(String),
     Rest(Value),
+}
+
+// /_fx/ws — WebSocket upgrade (PR-7b, BIR PORTDA HTTP+WS). hyper 1.x upgrade:
+// 101 Switching Protocols qaytaramiz, fon task upgraded socketni egallab WS qiladi.
+// `serve_loop` `.with_upgrades()` bo'lishi SHART (aks holda on_upgrade osiladi).
+fn fx_ws_upgrade(interp: Arc<Interp>, req: &mut Request<Incoming>) -> Response<Full<Bytes>> {
+    // WebSocket handshake header'lari: upgrade:websocket + sec-websocket-key.
+    let key = req
+        .headers()
+        .get("sec-websocket-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let Some(key) = key else {
+        return crate::http_mod::json_response(
+            400,
+            "{\"error\":\"WS handshake: kalit yo'q\"}".to_string(),
+        );
+    };
+    // Sec-WebSocket-Accept (tungstenite helper — SHA1+base64 magic GUID).
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+
+    // Upgrade'ni so'raymiz (req'dan, body consume QILINMAYDI). Fon task'da hal bo'ladi.
+    let on_upgrade = hyper::upgrade::on(req);
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                // Upgraded hyper rt traitlarini beradi -> TokioIo wrapper SHART
+                // (from_raw_socket tokio traitlarini kutadi).
+                let io = TokioIo::new(upgraded);
+                let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                    io,
+                    tokio_tungstenite::tungstenite::protocol::Role::Server,
+                    None,
+                )
+                .await;
+                crate::ws_mod::handle_ui_conn(interp, ws).await;
+            }
+            Err(e) => eprintln!("ui ws upgrade xatosi: {}", e),
+        }
+    });
+
+    // 101 Switching Protocols — hyper buni yuboradi, keyin spawn'langan task socketni oladi.
+    Response::builder()
+        .status(101)
+        .header("upgrade", "websocket")
+        .header("connection", "Upgrade")
+        .header("sec-websocket-accept", accept)
+        .body(Full::new(Bytes::new()))
+        .unwrap()
 }
 
 // Flow xato xabarini oladi (json xato uchun).
@@ -827,7 +914,10 @@ impl Interp {
             let theme = self.theme.read();
             theme_to_css(&theme)
         };
-        full_document(&css, &node_to_html(&node), island_count, path)
+        // PR-7b: render davomida yig'ilgan `source live` tag'larini olamiz (page
+        // handler FxLiveGuard ostida eval qilingan — render_page_with_live qarang).
+        let live = crate::interp::FxLiveGuard::take();
+        full_document(&css, &node_to_html(&node), island_count, path, &live)
     }
 
     // ui.page (qo'lda render) — path noma'lum, "/" default.
@@ -1193,13 +1283,33 @@ mod tests {
 
     #[test]
     fn bootstrap_script_island_bilan() {
-        assert_eq!(fx_bootstrap_script(0, "/"), "", "0 island -> script yo'q");
-        let s = fx_bootstrap_script(2, "/shop");
+        assert_eq!(
+            fx_bootstrap_script(0, "/", &[]),
+            "",
+            "0 island + 0 live -> script yo'q"
+        );
+        let s = fx_bootstrap_script(2, "/shop", &[]);
         assert!(s.contains("window.__fx"), "s: {}", s);
         assert!(s.contains("\"page\":\"/shop\""), "page yo'q: {}", s);
         assert!(s.contains("\"1\":{\"mode\":\"server\"}"), "s: {}", s);
         assert!(s.contains("\"2\":{\"mode\":\"server\"}"), "s: {}", s);
         assert!(s.contains("/_fx/client.js"), "client.js yo'q: {}", s);
+    }
+
+    // PR-7b: live source (island bo'lmasa ham) -> script + window.__fx.live.
+    #[test]
+    fn bootstrap_script_live_bilan() {
+        // 0 island lekin live tag bor -> script CHIQADI (WS uchun kerak).
+        let s = fx_bootstrap_script(0, "/", &["orders".to_string()]);
+        assert!(
+            s.contains("window.__fx"),
+            "live'da script bo'lishi kerak: {}",
+            s
+        );
+        assert!(s.contains("\"live\":[\"orders\"]"), "live tag yo'q: {}", s);
+        assert!(s.contains("/_fx/client.js"), "client.js yo'q: {}", s);
+        // 0 island + 0 live -> script YO'Q (sof statik invariant).
+        assert_eq!(fx_bootstrap_script(0, "/", &[]), "");
     }
 
     // --- PR-6: handler-effekt (data-fx-state + react_bind_names) ---

@@ -109,6 +109,20 @@ impl WsState {
             let _ = tx.send(Message::text(text));
         }
     }
+
+    // PR-7b: tag room'iga (":tag") matn broadcast — `ui.push :tag` ishlatadi.
+    // ws.room.send bilan bir mantiq (snapshot + send_to), lekin UI tag room'i
+    // uchun (a'zolar handle_ui_message subscribe orqali qo'shilgan). Istalgan
+    // thread'dan xavfsiz (HTTP handler ichidan `ui.push` chaqirilsa ham).
+    pub(crate) fn push_tag(&self, room: &str, text: &str) {
+        let members: Vec<String> = match self.rooms.lock().get(room) {
+            Some(set) => set.iter().cloned().collect(),
+            None => return,
+        };
+        for id in members {
+            self.send_to(&id, text.to_string());
+        }
+    }
 }
 
 // --- conn helper ---
@@ -344,9 +358,7 @@ pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
 
 // --- bitta ulanishni boshqarish ---
 
-// Handshake -> :connect -> xabar loop (:message har xabar) -> :disconnect.
-// Yozish alohida task'da: mpsc kanal orqali kelgan matnlar ketma-ket socketga
-// yoziladi (ws.send/room.send istalgan thread'dan shu kanalga itaradi).
+// `ws.serve` (alohida port) ulanishi: TcpStream handshake -> run_conn (Flux rejimi).
 async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
     let ws_stream = match tokio_tungstenite::accept_async(stream).await {
         Ok(s) => s,
@@ -355,15 +367,41 @@ async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
             return;
         }
     };
+    run_conn(interp, ws_stream, false).await;
+}
 
+// `ui.serve` bir portda WS upgrade ulanishi (PR-7b): handshake ALLAQACHON hyper
+// upgrade'da bajarilgan, tayyor WebSocketStream keladi -> run_conn (UI rejimi:
+// live source subscription, Flux ws.on handlerlari OTILMAYDI).
+pub async fn handle_ui_conn<S>(
+    interp: Arc<Interp>,
+    ws_stream: tokio_tungstenite::WebSocketStream<S>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    run_conn(interp, ws_stream, true).await;
+}
+
+// Ulanish yadrosi (ws.serve VA ui.serve birga ishlatadi). `ui_mode`:
+//   false -> Flux handlerlari (:connect/:message/:disconnect) — ws.serve kanali.
+//   true  -> UI live subscription: kelgan {"sub":[tag...]} -> room ":tag" ga qo'shish;
+//            Flux handler OTILMAYDI (bu UI realtime kanali, ws.serve emas).
+// Yozish alohida task'da: mpsc kanal -> writer-task socketga ketma-ket yozadi
+// (ws.send/room.send/ui.push istalgan thread'dan shu kanalga itaradi).
+async fn run_conn<S>(
+    interp: Arc<Interp>,
+    ws_stream: tokio_tungstenite::WebSocketStream<S>,
+    ui_mode: bool,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let id = interp.ws.alloc_id();
     let (mut writer, mut reader) = ws_stream.split();
 
-    // Yozma kanal: ws.send/room.send shu yerga itaradi, writer-task socketga yozadi.
+    // Yozma kanal: ws.send/room.send/ui.push shu yerga itaradi.
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     interp.ws.conns.lock().insert(id.clone(), tx);
 
-    // Writer-task: kanaldan kelgan har xabarni socketga ketma-ket yozadi.
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if writer.send(msg).await.is_err() {
@@ -373,31 +411,54 @@ async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
         let _ = writer.close().await;
     });
 
-    // :connect handler.
-    fire_handler(&interp, Event::Connect, &id, None).await;
+    // Flux rejimida :connect handler (UI rejimida yo'q).
+    if !ui_mode {
+        fire_handler(&interp, Event::Connect, &id, None).await;
+    }
 
-    // Xabar loop: har matn xabari uchun :message handler.
     while let Some(item) = reader.next().await {
-        match item {
-            Ok(Message::Text(t)) => {
-                fire_handler(&interp, Event::Message, &id, Some(t.to_string())).await;
-            }
-            Ok(Message::Binary(b)) => {
-                // Binary'ni lossy matn sifatida uzatamiz (Flux str-markazli).
-                let t = String::from_utf8_lossy(&b).to_string();
-                fire_handler(&interp, Event::Message, &id, Some(t)).await;
-            }
+        let text = match item {
+            Ok(Message::Text(t)) => Some(t.to_string()),
+            // Binary'ni lossy matn sifatida (Flux str-markazli).
+            Ok(Message::Binary(b)) => Some(String::from_utf8_lossy(&b).to_string()),
             Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => None,
             Err(_) => break, // ulanish uzildi
+        };
+        let Some(t) = text else { continue };
+        if ui_mode {
+            // UI subscribe: {"sub":["orders",...]} -> har tag uchun room ":tag" ga.
+            handle_ui_message(&interp, &id, &t);
+        } else {
+            fire_handler(&interp, Event::Message, &id, Some(t)).await;
         }
     }
 
-    // :disconnect handler — keyin ro'yxatdan o'chiramiz.
-    fire_handler(&interp, Event::Disconnect, &id, None).await;
+    if !ui_mode {
+        fire_handler(&interp, Event::Disconnect, &id, None).await;
+    }
     interp.ws.remove_conn(&id);
-    // Kanal drop bo'lgach writer-task tugaydi; kutib olamiz.
     let _ = writer_task.await;
+}
+
+// UI live subscription xabari: {"sub":["orders","metrics"]} -> conn'ni har tag'ning
+// room'iga (":tag") qo'shadi. ui.push :tag o'sha room'ga reload yuboradi.
+fn handle_ui_message(interp: &Arc<Interp>, id: &str, text: &str) {
+    let Ok(Value::Map(m)) = crate::builtins::json_decode(text) else {
+        return; // noto'g'ri JSON — jim e'tiborsiz
+    };
+    let Some(Value::List(tags)) = m.get("sub") else {
+        return;
+    };
+    let mut rooms = interp.ws.rooms.lock();
+    for tag in tags {
+        if let Value::Str(t) = tag {
+            rooms
+                .entry(format!(":{}", t))
+                .or_default()
+                .insert(id.to_string());
+        }
+    }
 }
 
 // Hodisa handler'ini chaqiradi (ro'yxatga olingan bo'lsa). Sinxron interp
@@ -428,5 +489,64 @@ fn flow_msg(flow: &Flow) -> String {
         Flow::Fail { message, .. } => message.clone(),
         Flow::Error(e) => e.clone(),
         _ => "skip/stop/return".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // PR-7b: push_tag tag room'iga ulangan conn'larga reload xabarini yuboradi.
+    #[test]
+    fn push_tag_room_azolariga_yuboradi() {
+        let ws = WsState::new();
+        // Ikki conn: mock yozma kanal (rx ushlab turamiz, send_to itarganini ko'ramiz).
+        let (tx1, mut rx1) = mpsc::unbounded_channel::<Message>();
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<Message>();
+        ws.conns.lock().insert("c1".to_string(), tx1);
+        ws.conns.lock().insert("c2".to_string(), tx2);
+        // c1 :orders ga subscribe, c2 boshqa room'da (push olmasligi kerak).
+        ws.rooms
+            .lock()
+            .entry(":orders".to_string())
+            .or_default()
+            .insert("c1".to_string());
+        ws.rooms
+            .lock()
+            .entry(":boshqa".to_string())
+            .or_default()
+            .insert("c2".to_string());
+
+        ws.push_tag(":orders", "{\"fx\":\"reload\"}");
+
+        // c1 xabar oladi, c2 olmaydi.
+        let got = rx1.try_recv().expect("c1 reload olishi kerak");
+        assert!(matches!(got, Message::Text(t) if t.as_str().contains("reload")));
+        assert!(rx2.try_recv().is_err(), "c2 (boshqa room) olmasligi kerak");
+    }
+
+    // Yo'q room'ga push — jim (panic yo'q).
+    #[test]
+    fn push_tag_yoq_room() {
+        let ws = WsState::new();
+        ws.push_tag(":yoq", "x"); // panic bermasligi kerak
+    }
+
+    // handle_ui_message {"sub":[...]} -> conn room'larga qo'shiladi.
+    #[test]
+    fn ui_subscribe_room_qoshadi() {
+        let interp = Interp::new_arc();
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        interp.ws.conns.lock().insert("c1".to_string(), tx);
+        handle_ui_message(&interp, "c1", "{\"sub\":[\"orders\",\"metrics\"]}");
+        let rooms = interp.ws.rooms.lock();
+        assert!(
+            rooms.get(":orders").is_some_and(|s| s.contains("c1")),
+            ":orders room'ga qo'shilishi kerak"
+        );
+        assert!(
+            rooms.get(":metrics").is_some_and(|s| s.contains("c1")),
+            ":metrics room'ga qo'shilishi kerak"
+        );
     }
 }

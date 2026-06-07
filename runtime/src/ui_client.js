@@ -112,4 +112,38 @@
       if (island) dispatch(island, "input", el.getAttribute("data-fx-bind"));
     }
   });
+
+  // --- PR-7b: live source WS subscription (real-time) ---
+  // window.__fx.live bo'sh bo'lmasa, bir portda /_fx/ws ga ulanamiz va o'sha
+  // live source tag'lariga subscribe qilamiz. Server `ui.push :tag` chaqirsa
+  // {"fx":"reload"} keladi -> sahifani qayta yuklaymiz (SSR live source qayta
+  // bajariladi). Client WS kod foydalanuvchi yozmaydi — runtime o'zi qiladi.
+  if (window.__fx.live && window.__fx.live.length) {
+    var connectWs = function () {
+      var proto = location.protocol === "https:" ? "wss:" : "ws:";
+      var ws = new WebSocket(proto + "//" + location.host + "/_fx/ws");
+      ws.onopen = function () {
+        // Qaysi live source'larga subscribe qilishni serverga aytamiz.
+        ws.send(JSON.stringify({ sub: window.__fx.live }));
+      };
+      ws.onmessage = function (ev) {
+        try {
+          var m = JSON.parse(ev.data);
+          // MVP: har "reload" sahifani qayta yuklaydi (SSR source qayta bajariladi).
+          // Island-only reload optimizatsiyasi keyingi PR.
+          if (m.fx === "reload") location.reload();
+        } catch (e) {
+          console.error("flux: ws xabar xato", e);
+        }
+      };
+      // Uzilsa qayta ulanamiz (2s — server qayta ishga tushishi/tarmoq uzilishi).
+      ws.onclose = function () {
+        setTimeout(connectWs, 2000);
+      };
+      ws.onerror = function () {
+        ws.close();
+      };
+    };
+    connectWs();
+  }
 })();
