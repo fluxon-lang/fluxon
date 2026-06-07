@@ -13,6 +13,15 @@ cargo run -- run examples/demo.fx
 ./target/release/flux run examples/demo.fx
 ```
 
+### Buyruqlar
+
+- `flux run <fayl.fx>` — faylni bajaradi (lex → parse → interp). Parse yoki
+  runtime xato → `exit 1`.
+- `flux check <fayl.fx>` — faqat sintaksisni tekshiradi (lex + parse, kodni
+  **bajarmaydi** → side-effect yo'q). To'g'ri → `exit 0`; parse/lex xato →
+  `exit 2`. Bu `run`ning `exit 1`idan farqli, shuning uchun chaqiruvchi qaysi
+  bosqichda yiqilganini bila oladi (AI self-repair gate uchun qulay).
+
 ## Hozir nima ishlaydi
 
 Til yadrosining to'liq qismi:

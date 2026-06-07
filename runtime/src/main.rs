@@ -3,6 +3,7 @@
 // Foydalanish:
 //   flux run <fayl.fx>     — Flux faylini bajaradi
 //   flux <fayl.fx>         — xuddi shu (qisqartma)
+//   flux check <fayl.fx>   — faqat lex+parse (bajarmaydi); parse xato -> exit 2
 
 // mimalloc — parallel'da system malloc'dan ancha kam contention beradi.
 // Interpreter qisqa umrli scope allokatsiyalarini ko'p qiladi (tree-walking).
@@ -27,14 +28,26 @@ mod ws_mod;
 
 use std::process::ExitCode;
 
+// Buyruq turi: `run` kodni bajaradi, `check` faqat sintaksisni tekshiradi.
+// Exit kodlari ataylab farqli: faylni o'qib bo'lmasa/runtime xato -> 1,
+// foydalanish/parse xato -> 2 (chaqiruvchi qaysi bosqichda yiqilganini biladi).
+enum Command {
+    Run(String),
+    Check(String),
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let path = match parse_args(&args) {
-        Some(p) => p,
+    let cmd = match parse_args(&args) {
+        Some(c) => c,
         None => {
-            eprintln!("Foydalanish: flux run <fayl.fx>");
+            eprintln!("Foydalanish: flux run <fayl.fx>  |  flux check <fayl.fx>");
             return ExitCode::from(2);
         }
+    };
+
+    let path = match &cmd {
+        Command::Run(p) | Command::Check(p) => p.clone(),
     };
 
     let src = match std::fs::read_to_string(&path) {
@@ -45,21 +58,43 @@ fn main() -> ExitCode {
         }
     };
 
-    match run_source_at(&src, std::path::Path::new(&path)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("Flux xato: {}", e);
-            ExitCode::from(1)
-        }
+    match cmd {
+        // run: LEX -> PARSE -> BAJAR. Xato (parse yoki runtime) -> exit 1.
+        Command::Run(_) => match run_source_at(&src, std::path::Path::new(&path)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Flux xato: {}", e);
+                ExitCode::from(1)
+            }
+        },
+        // check: faqat LEX + PARSE (interp YO'Q -> side-effect yo'q). Forge
+        // eval-gate QATLAM 1: AI yozgan blok sintaktik to'g'rimi, bajarmasdan.
+        // Parse/lex xato -> exit 2 (runtime exit 1 dan farqli).
+        Command::Check(_) => match check_source(&src) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Flux xato: {}", e);
+                ExitCode::from(2)
+            }
+        },
     }
 }
 
-fn parse_args(args: &[String]) -> Option<String> {
+fn parse_args(args: &[String]) -> Option<Command> {
     match args.get(1).map(|s| s.as_str()) {
-        Some("run") => args.get(2).cloned(),
-        Some(p) if !p.starts_with('-') => Some(p.to_string()),
+        Some("run") => args.get(2).cloned().map(Command::Run),
+        Some("check") => args.get(2).cloned().map(Command::Check),
+        Some(p) if !p.starts_with('-') => Some(Command::Run(p.to_string())),
         _ => None,
     }
+}
+
+// Sintaksisni tekshiradi: lex + parse, lekin interp'ni o't kazib yuboradi —
+// kod BAJARILMAYDI (side-effect yo'q). Muvaffaqiyatda Ok(()), aks holda xato matni.
+fn check_source(src: &str) -> Result<(), String> {
+    let toks = lexer::lex(src)?;
+    parser::parse(toks)?;
+    Ok(())
 }
 
 // Manbani bajaradi. `path` — faylning yo'li; `use ./fayl` modullari shu faylning
@@ -1152,5 +1187,58 @@ each i in inf
             "kutilmagan xato: {}",
             err
         );
+    }
+
+    // --- `flux check` (faqat parse, issue #55) ---
+
+    // To'g'ri kod -> check muvaffaqiyatli (Ok).
+    #[test]
+    fn check_togri_kod_ok() {
+        check_source(
+            r#"
+fn fib n
+  if n < 2
+    ret n
+  (fib (n - 1)) + (fib (n - 2))
+log "${fib 10}"
+"#,
+        )
+        .expect("to'g'ri kod check'dan o'tishi kerak");
+    }
+
+    // Parse/lex xato -> check Err qaytaradi (main bu Err'ni exit 2 ga aylantiradi).
+    #[test]
+    fn check_parse_xato_err() {
+        let err = check_source("fn g x\n  ret (\n").expect_err("parse xato Err berishi kerak");
+        assert!(!err.is_empty(), "xato matni bo'sh bo'lmasligi kerak");
+    }
+
+    // ENG MUHIM: check kodni BAJARMAYDI — runtime side-effect/xato bo'lmaydi.
+    // Quyidagi kod runtime'da fail qiladi (noma'lum nom), lekin sintaksis to'g'ri,
+    // shuning uchun check Ok beradi. Bu check'ning interp'ni o't kazib yuborishini
+    // isbotlaydi (Forge eval-gate QATLAM 1: bajarish XAVFLI).
+    #[test]
+    fn check_kodni_bajarmaydi() {
+        // `nomalum_funksiya` runtime'da "noma'lum nom" beradi, lekin sintaksis joyida.
+        check_source("x = nomalum_funksiya 5\n")
+            .expect("sintaktik to'g'ri kod check'dan o'tishi kerak (bajarilmaydi)");
+        // Tasdiq: xuddi shu kod run'da xato beradi (bajariladi).
+        assert!(
+            run_source("x = nomalum_funksiya 5\n").is_err(),
+            "run bu kodni bajarib xato berishi kerak (check bilan farq)"
+        );
+    }
+
+    // parse_args: `check` buyrug'ini tanib, faylni Command::Check ga joylaydi.
+    #[test]
+    fn parse_args_check_buyrugi() {
+        let args: Vec<String> = ["flux", "check", "test.fx"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        match parse_args(&args) {
+            Some(Command::Check(p)) => assert_eq!(p, "test.fx"),
+            _ => panic!("Command::Check kutilgan edi, topildi boshqa variant"),
+        }
     }
 }
