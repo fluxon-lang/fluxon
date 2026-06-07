@@ -132,7 +132,20 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    // Matnli ko'rinish: qiymat STRING'ga aylantirilganda ishlatiladi
+    // (interpolatsiya, str.str, `+` birlashtirish, log). Symbol bu yerda `:`
+    // prefiksisiz nomini beradi — `:` sintaksis belgisi, qiymatning matn
+    // ko'rinishi emas (issue #57). Qolgan turlar Display bilan bir xil.
+    pub fn to_text(&self) -> String {
+        match self {
+            Value::Sym(s) => s.clone(),
+            other => format!("{}", other),
+        }
+    }
+
     // List/map ichida ko'rinish: stringlar tirnoq bilan, qolgani Display.
+    // Bu yerda symbol `:` prefiksini SAQLAYDI — list/map ichida symbol
+    // string'dan (yoki boshqa turdan) ajralib turishi kerak.
     pub fn repr(&self) -> String {
         match self {
             Value::Str(s) => format!("\"{}\"", s),

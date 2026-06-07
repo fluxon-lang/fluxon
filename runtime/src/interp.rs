@@ -845,7 +845,7 @@ impl Interp {
                         StrPiece::Lit(s) => out.push_str(s),
                         StrPiece::Expr(e) => {
                             let v = self.eval(e, env)?;
-                            out.push_str(&format!("{}", v));
+                            out.push_str(&v.to_text());
                         }
                     }
                 }
@@ -1138,8 +1138,8 @@ impl Interp {
         match (op, l, r) {
             // + string birlashtirish
             (BinOp::Add, Str(a), Str(b)) => Ok(Str(a + &b)),
-            (BinOp::Add, Str(a), b) => Ok(Str(a + &format!("{}", b))),
-            (BinOp::Add, a, Str(b)) => Ok(Str(format!("{}", a) + &b)),
+            (BinOp::Add, Str(a), b) => Ok(Str(a + &b.to_text())),
+            (BinOp::Add, a, Str(b)) => Ok(Str(a.to_text() + &b)),
 
             // int-int arifmetika
             (op, Int(a), Int(b)) => int_arith(op, a, b),

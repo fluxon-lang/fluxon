@@ -1241,4 +1241,33 @@ log "${fib 10}"
             _ => panic!("Command::Check kutilgan edi, topildi boshqa variant"),
         }
     }
+
+    // issue #57: symbol MATNGA aylanganda `:` prefiks tashlanadi
+    // (interpolatsiya, str.str, `+` birlashtirish). Symbol literal sintaksisi
+    // (`:florist`) o'zgarmaydi — faqat matn ko'rinishi `:` siz.
+    #[test]
+    fn sym_to_text_colon_tashlanadi() {
+        run(r#"
+s = :florist
+# interpolatsiya
+(("v/${s}") == "v/florist") | (fail "interpolatsiya: ${"v/${s}"}")
+# str.str
+((str.str s) == "florist") | (fail "str.str: ${str.str s}")
+# `+` birlashtirish (ikkala tomon)
+(("p/" + s) == "p/florist") | (fail "chap + : ${"p/" + s}")
+((s + "/q") == "florist/q") | (fail "o'ng + : ${s + "/q"}")
+# symbol literal va taqqoslash O'ZGARMAYDI
+(s == :florist) | (fail "symbol taqqoslash buzildi")
+"#);
+    }
+
+    // Symbol list/map ICHIDA `:` prefiksini SAQLAYDI — u yerda symbol
+    // string'dan ajralib turishi kerak (repr matn ko'rinishidan farq qiladi).
+    #[test]
+    fn sym_repr_listda_colon_saqlaydi() {
+        run(r#"
+xs = [:a "b"]
+((str.str xs) == "[:a \"b\"]") | (fail "list repr: ${str.str xs}")
+"#);
+    }
 }

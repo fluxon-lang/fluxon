@@ -116,6 +116,10 @@ arzonroq va aniqroq:
 status = :confirmed
 dir = :in
 ```
+Belgi matnga aylanganda (interpolatsiya, `str.str`, `+`, `log`) `:` prefiksi
+tushib qoladi — qiymat `florist`, `:` esa sintaksis belgisi: `str.str :florist`
+→ `"florist"`, `"yo'l/${:florist}"` → `"yo'l/florist"`. Ro'yxat/map ichida esa
+`:` saqlanadi (`[:a]` → `[:a]`), chunki u yerda belgi matndan ajralib turishi kerak.
 
 **Truthiness (rost/yolg'on qiymati).** `nil` va `false` — yolg'on. Qolgan
 hamma narsa (shu jumladan `0`, `""`, bo'sh ro'yxat) — **rost**. Bu sodda
