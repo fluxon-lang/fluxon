@@ -1,5 +1,7 @@
 # Flux — Dasturlash Tili (Inson uchun to'liq qo'llanma)
 
+> 🌐 **Til:** O'zbek (joriy) · [English](flux-human.en.md)
+
 > **Flux nima?** Flux — AI agentlar yaxshi yozadigan, backend tizimlari uchun
 > mo'ljallangan dasturlash tili. Falsafasi: *"Til AI'ga moslashadi, AI tilga
 > emas."* Har bir ishni qilishning **bitta** aniq yo'li bor, sintaksis kam
