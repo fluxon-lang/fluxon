@@ -681,20 +681,7 @@ fn wrap_schema(schema: Value) -> Value {
     let mut props = BTreeMap::new();
     let mut required = Vec::new();
     for (k, v) in &fields {
-        let ty = match v {
-            // {a:str} — qiymat tip nomi (sym yoki str).
-            Value::Sym(s) | Value::Str(s) => s.clone(),
-            // {a:{type:"..."}} — allaqachon schema; o'z holicha.
-            Value::Map(_) => {
-                props.insert(k.clone(), v.clone());
-                required.push(Value::Str(k.clone()));
-                continue;
-            }
-            _ => "string".to_string(),
-        };
-        let mut field = BTreeMap::new();
-        field.insert("type".to_string(), Value::Str(json_type(&ty)));
-        props.insert(k.clone(), Value::Map(field));
+        props.insert(k.clone(), field_schema(v));
         required.push(Value::Str(k.clone()));
     }
     let mut obj = BTreeMap::new();
@@ -702,6 +689,45 @@ fn wrap_schema(schema: Value) -> Value {
     obj.insert("properties".to_string(), Value::Map(props));
     obj.insert("required".to_string(), Value::List(required));
     Value::Map(obj)
+}
+
+// Bitta maydon qiymatini JSON-schema bo'lagiga aylantiradi. Tip nomi (sym/str)
+// -> {type:"..."}; ro'yxat (`[T]`) -> {type:"array", items:<T schema>}; map ->
+// rekursiv object schema (allaqachon to'liq schema bo'lsa o'z holicha).
+fn field_schema(v: &Value) -> Value {
+    match v {
+        // {a:str} — qiymat tip nomi (sym yoki str).
+        Value::Sym(s) | Value::Str(s) => {
+            let mut field = BTreeMap::new();
+            field.insert("type".to_string(), Value::Str(json_type(s)));
+            Value::Map(field)
+        }
+        // [T] — array; element tipi rekursiv. `[]` (bo'sh) -> items'siz array.
+        Value::List(items) => {
+            let mut field = BTreeMap::new();
+            field.insert("type".to_string(), Value::Str("array".to_string()));
+            if let Some(first) = items.first() {
+                field.insert("items".to_string(), field_schema(first));
+            }
+            Value::Map(field)
+        }
+        // {a:{...}} — ichki object; agar allaqachon to'liq schema bo'lmasa,
+        // rekursiv wrap_schema bilan object'ga aylantiramiz.
+        Value::Map(m) => {
+            if m.get("type").and_then(as_str).is_some() {
+                // foydalanuvchi allaqachon {type:"..."} bergan — tegmaymiz.
+                v.clone()
+            } else {
+                wrap_schema(v.clone())
+            }
+        }
+        // boshqa qiymatlar uchun zaxira sifatida string.
+        _ => {
+            let mut field = BTreeMap::new();
+            field.insert("type".to_string(), Value::Str("string".to_string()));
+            Value::Map(field)
+        }
+    }
 }
 
 fn empty_object_schema() -> Value {
@@ -964,6 +990,57 @@ mod tests {
             _ => None,
         };
         assert_eq!(name_ty.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn wrap_array_schema() {
+        // {tags:[str] items:[{name:str}]} -> array tiplari to'g'ri quriladi.
+        let mut s = BTreeMap::new();
+        s.insert(
+            "tags".to_string(),
+            Value::List(vec![Value::Sym("str".to_string())]),
+        );
+        let mut item_obj = BTreeMap::new();
+        item_obj.insert("name".to_string(), Value::Sym("str".to_string()));
+        s.insert("items".to_string(), Value::List(vec![Value::Map(item_obj)]));
+        let wrapped = wrap_schema(Value::Map(s));
+        let props = match &wrapped {
+            Value::Map(m) => match m.get("properties").unwrap() {
+                Value::Map(p) => p.clone(),
+                _ => panic!(),
+            },
+            _ => panic!("map kutilgan"),
+        };
+        // tags -> {type:array, items:{type:string}}
+        let tags = match props.get("tags").unwrap() {
+            Value::Map(f) => f.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(as_str(tags.get("type").unwrap()).as_deref(), Some("array"));
+        let tags_items = match tags.get("items").unwrap() {
+            Value::Map(i) => i.clone(),
+            _ => panic!("tags items map bo'lishi kerak"),
+        };
+        assert_eq!(
+            as_str(tags_items.get("type").unwrap()).as_deref(),
+            Some("string")
+        );
+        // items -> {type:array, items:{type:object, properties:{name:...}}}
+        let items = match props.get("items").unwrap() {
+            Value::Map(f) => f.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(as_str(items.get("type").unwrap()).as_deref(), Some("array"));
+        let elem = match items.get("items").unwrap() {
+            Value::Map(e) => e.clone(),
+            _ => panic!("items items map bo'lishi kerak"),
+        };
+        assert_eq!(as_str(elem.get("type").unwrap()).as_deref(), Some("object"));
+        let elem_props = match elem.get("properties").unwrap() {
+            Value::Map(p) => p.clone(),
+            _ => panic!(),
+        };
+        assert!(elem_props.contains_key("name"));
     }
 
     #[test]
