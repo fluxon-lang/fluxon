@@ -174,6 +174,31 @@ log "evens=${evens} doubled=${doubled} total=${total}"
 "#);
     }
 
+    // list.index pozitsiya beradi (topilmasa -1), list.find predikatga mos
+    // birinchi elementni (topilmasa nil). has bool, index pozitsiya — juftlik.
+    #[test]
+    fn list_index_and_find() {
+        run(r#"
+names = ["catalog_manager" "order_extractor" "billing"]
+(names.index "order_extractor" == 1) | (fail "index topmadi: ${names.index "order_extractor"}")
+(names.index "yoq" == -1) | (fail "yo'q element -1 bermadi")
+
+nums = [3 1 4 1 5 9]
+(nums.index 4 == 2) | (fail "int index: ${nums.index 4}")
+
+# find: predikatga mos birinchi element
+big = nums.find \x -> x > 4
+(big == 5) | (fail "find mos elementni bermadi: ${big}")
+none = nums.find \x -> x > 99
+(none == nil) | (fail "find topmaganda nil bermadi: ${none}")
+
+# index'ni solishtirish uchun ishlatish (issue manbasi: blok tartibi)
+a = names.index "catalog_manager"
+b = names.index "billing"
+(a < b) | (fail "indeks solishtirish ishlamadi: ${a} ${b}")
+"#);
+    }
+
     #[test]
     fn map_operations() {
         run(r#"

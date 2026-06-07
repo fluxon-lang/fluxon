@@ -214,6 +214,7 @@ reg.has "calc"   ·   reg.names
 ```flux
 l.len · l.push x · l.filter \x->x>0 · l.map \x->x*2 · l.has x · l.0
 l.slice a b · l.join ", " · l.reduce 0 \acc x -> acc + x
+l.index x → birinchi indeks yoki -1 · l.find \x->x>4 → birinchi mos element yoki nil
 ```
 Build a list: `l.push x` (NOT `+[x]`). Build a string: `l.join sep`.
 

@@ -828,6 +828,17 @@ fn list_method(xs: &[Value], method: &str, args: Vec<Value>) -> R {
             let needle = arg(&args, 0, "list.has")?;
             Ok(Value::Bool(xs.iter().any(|v| v.equals(needle))))
         }
+        "index" => {
+            // Birinchi mos elementning indeksi; topilmasa -1 (bool'dan farqli,
+            // index pozitsiya beradi — list.has bilan juftlik).
+            let needle = arg(&args, 0, "list.index")?;
+            let i = xs
+                .iter()
+                .position(|v| v.equals(needle))
+                .map(|i| i as i64)
+                .unwrap_or(-1);
+            Ok(Value::Int(i))
+        }
         "join" => {
             let sep = arg_str(&args, 0, "list.join")?;
             let parts: Vec<String> = xs.iter().map(|v| format!("{}", v)).collect();

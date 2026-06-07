@@ -1248,7 +1248,7 @@ impl Interp {
             // chunki builtins Interp'ga kira olmaydi.
             if let Value::List(xs) = &recv {
                 match name.as_str() {
-                    "filter" | "map" | "reduce" => {
+                    "filter" | "map" | "reduce" | "find" => {
                         return self.list_hof(xs, name, argv);
                     }
                     _ => {}
@@ -1300,6 +1300,20 @@ impl Interp {
                     acc = self.apply(f.clone(), vec![acc, x.clone()])?;
                 }
                 Ok(acc)
+            }
+            "find" => {
+                // Predikatga mos birinchi elementni qaytaradi; topilmasa nil.
+                // (list.index -1 berib pozitsiya beradi; find esa qiymatni.)
+                let f = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Flow::err("list.find: funksiya argumenti kerak"))?;
+                for x in xs {
+                    if self.apply(f.clone(), vec![x.clone()])?.truthy() {
+                        return Ok(x.clone());
+                    }
+                }
+                Ok(Value::Nil)
             }
             _ => unreachable!(),
         }
