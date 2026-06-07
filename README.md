@@ -87,8 +87,8 @@ This whole process is preserved in full in the `research/` folder.
 ```
 flux-lang/
 ├── docs/
-│   ├── flux-human.md      # detailed guide (for humans, Uzbek)
-│   ├── flux-human.en.md   # detailed guide (for humans, English)
+│   ├── flux-human.md      # detailed guide (for humans, English)
+│   ├── flux-human.uz.md   # detailed guide (for humans, Uzbek)
 │   └── flux-agent.md      # compact spec (for AI agents — ~2700 tokens)
 ├── examples/              # working example projects
 │   ├── support-tickets/   # AI classification + confidence routing

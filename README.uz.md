@@ -85,8 +85,8 @@ Bu jarayon `research/` papkasida to'liq saqlangan.
 ```
 flux-lang/
 ├── docs/
-│   ├── flux-human.md      # batafsil qo'llanma (odamlar uchun, o'zbekcha)
-│   ├── flux-human.en.md   # batafsil qo'llanma (odamlar uchun, inglizcha)
+│   ├── flux-human.md      # batafsil qo'llanma (odamlar uchun, inglizcha)
+│   ├── flux-human.uz.md   # batafsil qo'llanma (odamlar uchun, o'zbekcha)
 │   └── flux-agent.md      # ixcham spec (AI agent uchun — ~2700 token)
 ├── examples/              # ishlaydigan misol loyihalar
 │   ├── support-tickets/   # AI klassifikatsiya + confidence routing

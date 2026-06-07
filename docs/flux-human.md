@@ -1,470 +1,467 @@
-# Flux — Dasturlash Tili (Inson uchun to'liq qo'llanma)
+# Flux — The Programming Language (Complete guide for humans)
 
-> 🌐 **Til:** O'zbek (joriy) · [English](flux-human.en.md)
+> 🌐 **Language:** English (current) · [O'zbek](flux-human.uz.md)
 
-> **Flux nima?** Flux — AI agentlar yaxshi yozadigan, backend tizimlari uchun
-> mo'ljallangan dasturlash tili. Falsafasi: *"Til AI'ga moslashadi, AI tilga
-> emas."* Har bir ishni qilishning **bitta** aniq yo'li bor, sintaksis kam
-> token ishlatadi, va eng kerakli narsalar (HTTP server, ma'lumotlar bazasi,
-> AI/LLM chaqiruvi, cron, navbat) — tilning **ichida**, hech qanday paket
-> o'rnatmasdan.
+> **What is Flux?** Flux is a programming language designed for backend systems
+> that AI agents write well. Its philosophy: *"The language adapts to the AI, not
+> the AI to the language."* There is **one** clear way to do each thing, the
+> syntax uses few tokens, and the things you need most (HTTP server, database,
+> AI/LLM calls, cron, queues) are built **into** the language — with no package
+> installs.
 
-Flux fayllari `.fx` kengaytmasi bilan saqlanadi.
+Flux files are saved with the `.fx` extension.
 
-Bu hujjat — to'liq, batafsil **inson** qo'llanmasi. Agar siz AI agentga Flux'ni
-o'rgatmoqchi bo'lsangiz, qisqaroq `flux-agent.md` faylidan foydalaning.
-
----
-
-## 0. Asosiy g'oyalar (avval shularni o'qing)
-
-Flux'ni boshqa tillardan ajratib turadigan 5 ta tamoyil:
-
-1. **Bir ish = bir yo'l (canonical form).** Boshqa tillarda bir narsani 5 xil
-   yozish mumkin (`while`, `for`, `do-while`...). Flux'da takrorlash uchun
-   **faqat `each`** bor. Ekranga chiqarish uchun **faqat bitta** usul. Bu
-   qoidaning sababi: AI har safar "qaysi usulni tanlay?" deb o'ylamaydi —
-   tanlov yo'q, demak xato ham kam.
-
-2. **Kam token, lekin tushunarli.** Sintaksis imkon qadar qisqa, lekin
-   *shifrli emas*. Kalit so'zlar to'liq yoziladi (`each`, `match`, `else`) —
-   chunki Flux'ni birinchi marta ko'rgan odam yoki AI ularni darhol tushunishi
-   kerak.
-
-3. **Batteries included (hammasi ichida).** `http`, `db`, `ai`, `json`, `cron`,
-   `queue` — bularning hammasi tilning standart kutubxonasida. Hech qanday
-   `npm install`, `composer require` yo'q. Faqat `use http` deysiz va
-   ishlatasiz.
-
-4. **AI — birinchi darajali primitiv.** Boshqa tillarda LLM chaqirish uchun
-   SDK o'rnatib, kalit sozlab, JSON parse qilasiz. Flux'da `ai.json` bitta
-   qatorda matnni strukturali ma'lumotga aylantiradi va ishonch ballini
-   qaytaradi.
-
-5. **Ahamiyatli bo'shliq (indentation).** Bloklar `{}` qavslar bilan emas,
-   **chekinish (2 bo'shliq)** bilan ajratiladi — xuddi Python kabi. Bu ortiqcha
-   belgilarni olib tashlaydi.
+This document is the complete, detailed **human** guide. If you want to teach
+Flux to an AI agent, use the shorter `flux-agent.md` file.
 
 ---
 
-## 1. Leksik asoslar
+## 0. Core ideas (read these first)
 
-### Izohlar (comments)
-Faqat bitta turdagi izoh bor — `#` belgisidan qator oxirigacha:
+The 5 principles that set Flux apart from other languages:
+
+1. **One task = one way (canonical form).** In other languages you can write the
+   same thing 5 ways (`while`, `for`, `do-while`...). In Flux there is **only
+   `each`** for iteration. There is **only one** way to print to the screen. The
+   reason for this rule: the AI does not think "which method should I choose?"
+   each time — there is no choice, so there are fewer mistakes.
+
+2. **Few tokens, but readable.** The syntax is as short as possible, but *not
+   cryptic*. Keywords are spelled out in full (`each`, `match`, `else`) — because
+   a human or AI seeing Flux for the first time must understand them immediately.
+
+3. **Batteries included (everything built in).** `http`, `db`, `ai`, `json`,
+   `cron`, `queue` — all of these are in the standard library. No `npm install`,
+   no `composer require`. You just say `use http` and use it.
+
+4. **AI is a first-class primitive.** In other languages, calling an LLM means
+   installing an SDK, configuring a key, and parsing JSON. In Flux, `ai.json`
+   turns text into structured data in a single line and returns a confidence
+   score.
+
+5. **Significant whitespace (indentation).** Blocks are separated not by `{}`
+   braces but by **indentation (2 spaces)** — just like Python. This removes
+   redundant characters.
+
+---
+
+## 1. Lexical basics
+
+### Comments
+There is only one kind of comment — from a `#` character to the end of the line:
 ```flux
-# Bu izoh
-x = 5   # Bu ham izoh
+# This is a comment
+x = 5   # This is also a comment
 ```
-Flux'da `//` yoki `/* */` **yo'q**. Bitta usul — `#`.
+Flux has **no** `//` or `/* */`. One way — `#`.
 
-### Statementlar
-Har bir statement **yangi qatorda** tugaydi. Nuqtali vergul (`;`) **kerak emas**
-va ishlatilmaydi:
+### Statements
+Each statement ends at a **new line**. A semicolon (`;`) is **not needed** and is
+not used:
 ```flux
 x = 5
 y = 10
 ```
 
-### Bloklar
-Blok `{}` bilan emas, **chekinish** bilan ochiladi. Har daraja — **2 bo'shliq**.
-Chekinish kamayganda blok tugaydi:
+### Blocks
+A block is opened not with `{}` but with **indentation**. Each level is **2
+spaces**. The block ends when the indentation decreases:
 ```flux
 if x > 0
-  log "musbat"
-  log "ikkinchi qator ham blok ichida"
-log "blokdan tashqari"
+  log "positive"
+  log "this line is also inside the block"
+log "outside the block"
 ```
 
 ---
 
-## 2. Qiymatlar va tiplar
+## 2. Values and types
 
-Flux'da quyidagi asosiy tiplar bor:
+Flux has the following basic types:
 
-| Yozuv | Tip | Izoh |
+| Notation | Type | Description |
 |-------|-----|------|
-| `42` | `int` | Butun son |
-| `3.14` | `flt` | Kasrli son (float) |
-| `"salom"` | `str` | Matn (string) |
-| `true` / `false` | `bool` | Mantiqiy qiymat |
-| `nil` | `nil` | "Hech narsa" / bo'shliq |
-| `[1 2 3]` | `list` | Ro'yxat — elementlar **bo'shliq** bilan ajraladi |
-| `{a:1 b:2}` | `map` | Kalit-qiymat juftliklari — **bo'shliq** bilan ajraladi |
-| `:ok` | `sym` | Belgi (symbol) — enum/teg uchun |
+| `42` | `int` | Integer |
+| `3.14` | `flt` | Fractional number (float) |
+| `"hello"` | `str` | Text (string) |
+| `true` / `false` | `bool` | Boolean value |
+| `nil` | `nil` | "Nothing" / emptiness |
+| `[1 2 3]` | `list` | List — elements separated by **spaces** |
+| `{a:1 b:2}` | `map` | Key-value pairs — separated by **spaces** |
+| `:ok` | `sym` | Symbol — for enums/tags |
 
-### Muhim nozikliklar
+### Important subtleties
 
-**Ro'yxat va map'da vergul YO'Q.** Elementlar bo'shliq bilan ajraladi. Bu
-ataylab — vergullar token isrof qiladi:
+**No commas in lists and maps.** Elements are separated by spaces. This is
+intentional — commas waste tokens:
 ```flux
 nums = [1 2 3 4]
 user = {name:"Aziza" age:30 active:true}
 ```
 
-**Matn ichida o'zgaruvchi qo'yish (interpolation).** `"${...}"` orqali ifodani
-matn ichiga joylashtirasiz:
+**Putting a variable inside text (interpolation).** With `"${...}"` you embed an
+expression inside text:
 ```flux
 name = "Aziza"
-log "Salom ${name}!"              # → Salom Aziza!
-log "Jami: ${price * qty} so'm"   # ifoda ham bo'ladi
+log "Hello ${name}!"               # → Hello Aziza!
+log "Total: ${price * qty} so'm"   # an expression also works
 ```
-Oddiy o'zgaruvchi uchun qisqartirib `"$name"` ham yozsa bo'ladi, lekin ifoda
-uchun `${...}` shart.
+For a simple variable you can shorten it to `"$name"`, but for an expression
+`${...}` is required.
 
-**Belgilar (symbols) — enum o'rniga.** Holatlarni ifodalash uchun matn
-o'rniga belgi ishlating. `:new`, `:confirmed` — bu `"new"` matnidan token
-arzonroq va aniqroq:
+**Symbols — instead of enums.** To represent states, use a symbol instead of
+text. `:new`, `:confirmed` — these are cheaper in tokens and clearer than the
+text `"new"`:
 ```flux
 status = :confirmed
 dir = :in
 ```
-Belgi matnga aylanganda (interpolatsiya, `str.str`, `+`, `log`) `:` prefiksi
-tushib qoladi — qiymat `florist`, `:` esa sintaksis belgisi: `str.str :florist`
-→ `"florist"`, `"yo'l/${:florist}"` → `"yo'l/florist"`. Ro'yxat/map ichida esa
-`:` saqlanadi (`[:a]` → `[:a]`), chunki u yerda belgi matndan ajralib turishi kerak.
+When a symbol is converted to text (interpolation, `str.str`, `+`, `log`) the
+`:` prefix is dropped — the value is `florist`, the `:` is a syntax marker:
+`str.str :florist` → `"florist"`, `"path/${:florist}"` → `"path/florist"`.
+Inside a list/map, the `:` is kept (`[:a]` → `[:a]`), because there a symbol
+needs to stand out from text.
 
-**Truthiness (rost/yolg'on qiymati).** `nil` va `false` — yolg'on. Qolgan
-hamma narsa (shu jumladan `0`, `""`, bo'sh ro'yxat) — **rost**. Bu sodda
-qoida ataylab: faqat ikki narsa yolg'on.
+**Truthiness.** `nil` and `false` are falsy. Everything else (including `0`,
+`""`, and the empty list) is **truthy**. This simple rule is intentional: only
+two things are falsy.
 
 ---
 
-## 3. O'zgaruvchilar (bindings)
+## 3. Variables (bindings)
 
-Flux'da **ikki** xil bog'lash bor, va ular **boshqa ish** qiladi (shuning
-uchun ikkitasi bo'lishi canonical qoidaga zid emas):
+Flux has **two** kinds of binding, and they do **different things** (which is why
+having two does not violate the canonical rule):
 
-### `=` — o'zgarmas (immutable)
-Bir marta qiymat beriladi, keyin o'zgartirib bo'lmaydi:
+### `=` — immutable
+A value is assigned once, then cannot be changed:
 ```flux
 x = 10
 name = "Aziza"
 ```
-Bu **standart** holat. Ko'pchilik qiymatlar o'zgarmaydi.
+This is the **default** case. Most values do not change.
 
-### `<-` — o'zgaruvchan (mutable)
-Qiymatini keyin o'zgartirish mumkin bo'lgan o'zgaruvchi. Qayta tayinlash ham
-`<-` bilan:
+### `<-` — mutable
+A variable whose value can be changed later. Reassignment is also done with `<-`:
 ```flux
 total <- 0.0
-total <- total + 5.0     # qayta tayinlash
+total <- total + 5.0     # reassignment
 ```
 
-> **Qoida:** agar qiymat o'zgarmasa — `=` ishlating. Faqat haqiqatan
-> o'zgaradigan narsalar uchun `<-`. Bu kod o'qishini osonlashtiradi: `<-`
-> ko'rsangiz, "bu o'zgaradi" deb bilasiz.
+> **Rule:** if a value does not change — use `=`. Use `<-` only for things that
+> truly change. This makes the code easier to read: when you see `<-`, you know
+> "this changes".
 
 ---
 
-## 4. Operatorlar
+## 4. Operators
 
-### Arifmetik
+### Arithmetic
 ```flux
-+   -   *   /   %        # qo'shish, ayirish, ko'paytirish, bo'lish, qoldiq
++   -   *   /   %        # add, subtract, multiply, divide, remainder
 ```
-**`+` string'larni ham birlashtiradi.** Operandlar son bo'lsa — qo'shadi,
-matn bo'lsa — ulaydi:
+**`+` also concatenates strings.** If the operands are numbers it adds; if they
+are text it joins:
 ```flux
 1 + 2          # → 3
-"sal" + "om"   # → "salom"
+"hel" + "lo"   # → "hello"
 ```
-Tip o'zi farqni belgilaydi — bitta operator, ikki tabiiy ish.
+The type itself decides the difference — one operator, two natural behaviors.
 
-### Solishtirish
+### Comparison
 ```flux
 ==  !=  <  <=  >  >=
 ```
 
-### Mantiqiy
+### Logical
 ```flux
-&    # va (and)
-|    # yoki (or)
-!    # emas (not) — qiymat oldida: !x
+&    # and
+|    # or
+!    # not — before a value: !x
 ```
 
-### Maxsus operatorlar
+### Special operators
 
-**`??` — null-coalesce.** Chap tomon `nil` bo'lsa, o'ng tomonni beradi:
+**`??` — null-coalesce.** If the left side is `nil`, it gives the right side:
 ```flux
-port = env.PORT ?? "8080"     # PORT yo'q bo'lsa, "8080"
-name = user.name ?? "mehmon"
+port = env.PORT ?? "8080"     # if PORT is missing, "8080"
+name = user.name ?? "guest"
 ```
 
-**`.` — a'zoga murojaat / indeks.** Map kaliti, ro'yxat indeksi, uzunlik:
+**`.` — member access / index.** Map key, list index, length:
 ```flux
-user.name        # map kaliti
-list.0           # ro'yxatning birinchi elementi
-list.len         # uzunlik
-m[key]           # dinamik kalit (o'zgaruvchi orqali)
+user.name        # map key
+list.0           # first element of the list
+list.len         # length
+m[key]           # dynamic key (via a variable)
 ```
 
-**`..` — diapazon (range).** Ikkala chet ham kiradi:
+**`..` — range.** Both ends are inclusive:
 ```flux
 1..5             # [1 2 3 4 5]
 ```
 
-**`|>` — quvur (pipe).** Qiymatni funksiyaga uzatadi, ichма-ich yozuvni
-yo'qotadi:
+**`|>` — pipe.** Passes a value into a function, removing nested notation:
 ```flux
 result = data |> clean |> format
-# bu g'a teng: format(clean(data))
+# this is equivalent to: format(clean(data))
 ```
 
 ---
 
 ---
 
-## 5. Funksiyalar
+## 5. Functions
 
-Funksiya `fn` bilan e'lon qilinadi. Argumentlar **bo'shliq** bilan ajraladi
-(vergul yo'q):
+A function is declared with `fn`. Arguments are separated by **spaces** (no
+commas):
 
 ```flux
 fn add a b
   ret a + b
 ```
 
-### Bir qatorli funksiya
-Agar tana bitta ifoda bo'lsa, `->` bilan bir qatorda yozsa bo'ladi:
+### Single-line function
+If the body is a single expression, you can write it on one line with `->`:
 ```flux
 fn double x -> x * 2
 ```
 
-### Qaytarish (return)
-Ikki usul, lekin ular bir xil natija beradi:
-- `ret x` — aniq qaytarish
-- **Oxirgi ifoda** — avtomat qaytariladi (`ret`siz)
+### Return
+Two ways, but they give the same result:
+- `ret x` — explicit return
+- **The last expression** is returned automatically (without `ret`)
 
 ```flux
 fn add a b
-  a + b            # oxirgi ifoda — avtomat qaytadi
+  a + b            # the last expression — returned automatically
 
 fn check x
   if x > 0
-    ret "musbat"   # erta qaytish uchun ret kerak
-  "nomusbat"       # oxirgi ifoda
+    ret "positive"   # ret is needed for an early return
+  "non-positive"     # the last expression
 ```
 
-> **Eslatma:** `ret` faqat **erta** (o'rtada) qaytish kerak bo'lganda
-> ishlatiladi. Oxirida — shunchaki ifodani yozing.
+> **Note:** `ret` is used only when you need an **early** (mid-function) return.
+> At the end — just write the expression.
 
-**`ret` lambda ichida ham ishlaydi.** Bu — HTTP handlerlarda eng muhim.
-Validatsiya uchun chuqur `if/elif/else` piramidasi o'rniga **guard-clause**
-(erta chiqish) yozing — kod tekis qoladi:
+**`ret` also works inside a lambda.** This matters most in HTTP handlers. Instead
+of a deep `if/elif/else` pyramid for validation, write a **guard clause** (early
+exit) — the code stays flat:
 ```flux
-# ❌ Chuqur nesting (yomon):       ✅ Guard-clause (yaxshi):
+# ❌ Deep nesting (bad):           ✅ Guard clause (good):
 http.on :post "/x" \req ->        http.on :post "/x" \req ->
   if req.body.email                 if !req.body.email
-    if req.body.body                  ret rep 400 {error:"email kerak"}
+    if req.body.body                  ret rep 400 {error:"email required"}
       rep 201 (...)                 if !req.body.body
-    else                              ret rep 400 {error:"body kerak"}
+    else                              ret rep 400 {error:"body required"}
       rep 400 {...}                 rep 201 (db.ins "t" {...})
   else
     rep 400 {...}
 ```
 
-### Funksiyani chaqirish
-Argumentlar bo'shliq bilan, qavssiz:
+### Calling a function
+Arguments are separated by spaces, without parentheses:
 ```flux
 add 2 3            # → 5
 double 4           # → 8
 ```
-Qavs faqat **guruhlash** uchun kerak (funksiya natijasini boshqasiga uzatish):
+Parentheses are only needed for **grouping** (passing the result of one function
+into another):
 ```flux
-double (add 2 3)   # avval add 2 3 = 5, keyin double 5 = 10
+double (add 2 3)   # first add 2 3 = 5, then double 5 = 10
 ```
 
-**Argumentsiz funksiya — bo'sh qavs `()` bilan chaqiriladi.** Qavssiz chaqirish
-argument bilan aniqlangani uchun, parametri yo'q funksiyani chaqirishning yagona
-yo'li shu. Bu nom (qiymat) bilan chaqiruvni aniq ajratadi:
+**A no-argument function is called with empty parentheses `()`.** Since a
+call without parentheses is defined by its arguments, this is the only way to
+call a function that has no parameters. This clearly distinguishes a name (value)
+from a call:
 ```flux
 fn new_id -> rand.str 8
-new_id()           # CHAQIRUV → har safar yangi tasodifiy id
-new_id             # CHAQIRMAYDI → funksiya QIYMATI (callback/reg uchun)
+new_id()           # CALL → a new random id each time
+new_id             # NOT a call → the function VALUE (for callback/reg)
 ```
-> `f(x)` (qavs ichida argument) **ishlamaydi** — canonical shakl `f x`. Bo'sh
-> `()` faqat argumentsiz chaqiruv uchun (bir ish = bir yo'l).
+> `f(x)` (argument inside parentheses) **does not work** — the canonical form is
+> `f x`. Empty `()` is only for a no-argument call (one task = one way).
 
-### Lambda (anonim funksiya)
-`\` belgisi bilan, inline ishlatiladi:
+### Lambda (anonymous function)
+With the `\` character, used inline:
 ```flux
 \x -> x * 2
-each_map nums \x -> x * 2    # har elementni 2 ga ko'paytirish
+each_map nums \x -> x * 2    # multiply each element by 2
 ```
 
 ---
 
-## 6. Boshqaruv oqimi (control flow)
+## 6. Control flow
 
-### Shartlar: `if` / `elif` / `else`
+### Conditions: `if` / `elif` / `else`
 ```flux
 if x > 0
-  log "musbat"
+  log "positive"
 elif x == 0
-  log "nol"
+  log "zero"
 else
-  log "manfiy"
+  log "negative"
 ```
-Kalit so'zlar **to'liq** yoziladi (`elif`, `else`) — bir qarashda tushunarli
-bo'lishi uchun.
+Keywords are spelled out **in full** (`elif`, `else`) — so they are
+understandable at a glance.
 
-### Takrorlash: `each` (yagona loop)
-Flux'da **faqat bitta** loop bor — `each`. U ro'yxat, diapazon yoki map
-ustidan yuradi. `while`, `for`, `do-while` **yo'q**:
+### Iteration: `each` (the only loop)
+Flux has **only one** loop — `each`. It iterates over a list, range, or map.
+There is **no** `while`, `for`, or `do-while`:
 
 ```flux
-each item in list           # ro'yxat elementlari
+each item in list           # list elements
   log item
 
-each i in 1..5              # diapazon: 1,2,3,4,5
+each i in 1..5              # range: 1,2,3,4,5
   log i
 
-each k, v in map            # map: kalit va qiymat
+each k, v in map            # map: key and value
   log "$k = $v"
 ```
 
-Loop ichida:
-- `skip` — keyingi iteratsiyaga o'tish (boshqa tillarda `continue`)
-- `stop` — loopdan chiqish (boshqa tillarda `break`)
+Inside a loop:
+- `skip` — move to the next iteration (in other languages `continue`)
+- `stop` — exit the loop (in other languages `break`)
 
 ```flux
 each n in nums
   if n < 0
-    skip          # manfiylarni o'tkazib yuborish
+    skip          # skip negatives
   if n > 100
-    stop          # 100 dan oshsa to'xtash
+    stop          # stop if over 100
   log n
 ```
 
-> **"While qani?"** Agar shart bo'yicha takrorlash kerak bo'lsa: diapazon
-> ustidan yuring (`each i in 1..n`) yoki rekursiya ishlating. Bitta loop —
-> bitta yo'l.
+> **"Where is while?"** If you need to repeat based on a condition: iterate over
+> a range (`each i in 1..n`) or use recursion. One loop — one way.
 
-### Qiymat bo'yicha tanlash: `match`
-Bir qiymatni bir nechta variant bilan solishtirish. Asosan belgilar (symbols)
-uchun:
+### Selecting by value: `match`
+Comparing one value against several variants. Mostly for symbols:
 ```flux
 match status
-  :new -> log "yangi"
-  :confirmed -> log "tasdiqlangan"
-  :cancelled -> log "bekor"
-  _ -> log "noma'lum"        # _ = standart (default)
+  :new -> log "new"
+  :confirmed -> log "confirmed"
+  :cancelled -> log "cancelled"
+  _ -> log "unknown"         # _ = default
 ```
-`match` va `if` — **boshqa ish** qiladi: `if` mantiqiy shart uchun, `match`
-bir qiymatni variantlarga taqsimlash uchun. Shuning uchun ikkalasi ham bor.
+`match` and `if` do **different things**: `if` is for a boolean condition,
+`match` is for distributing one value across variants. That is why both exist.
 
-> **⚠️ Muhim:** `match` faqat **qiymat** (symbol yoki son) bilan ishlaydi.
-> Mantiqiy shart (`conf > 0.85` kabi) uchun **har doim `if/elif/else`**
-> ishlating. `match true` deb yozib, ostiga shartlar qo'yish — **xato**,
-> bunday qilmang:
+> **⚠️ Important:** `match` only works with a **value** (symbol or number). For a
+> boolean condition (like `conf > 0.85`) **always use `if/elif/else`**. Writing
+> `match true` and putting conditions under it is **wrong** — do not do this:
 > ```flux
-> # NOTO'G'RI:
+> # WRONG:
 > match true
 >   conf > 0.85 -> ...
-> # TO'G'RI:
+> # CORRECT:
 > if conf > 0.85
 >   ...
 > ```
 
 ---
 
-## 7. Xatolar (error handling)
+## 7. Errors (error handling)
 
-Flux'da funksiya muvaffaqiyat (`ok`) yoki xato (`err`) qaytarishi mumkin. Xato
-bilan ishlashning **bitta** asosiy usuli — `!` operatori, va `nil` uchun `??`.
+In Flux a function can return success (`ok`) or an error (`err`). The **one**
+primary way to work with errors is the `!` operator, and `??` for `nil`.
 
-### `!` — xatoni avtomat yuqoriga uzatish
-Funksiya nomidan keyin `!` qo'ysangiz: agar u xato qaytarsa, xato **avtomat**
-chaqiruvchiga uzatiladi (siz qo'lda tekshirmaysiz). Agar muvaffaqiyatli bo'lsa,
-natijani oladi:
+### `!` — automatically propagate the error upward
+If you put `!` after a function name: if it returns an error, the error is
+**automatically** propagated to the caller (you do not check it by hand). If it
+succeeds, you get the result:
 ```flux
 fn process id
   user = db.one "select * from users where id=$1" [id]!
-  # agar db.one xato qaytarsa, process ham shu xatoni qaytaradi —
-  # keyingi qator umuman ishlamaydi
+  # if db.one returns an error, process also returns that error —
+  # the next line never runs
   log user.name
 ```
-Bu `if err != nil { return err }` ko'p qatorli naqshni **bitta belgiga**
-qisqartiradi.
+This shrinks the multi-line `if err != nil { return err }` pattern into **a
+single character**.
 
-### `??` — nil bo'lsa muqobil
-Agar qiymat `nil` bo'lsa (xato emas, shunchaki bo'sh), `??` bilan muqobil
-bering:
+### `??` — an alternative if nil
+If a value is `nil` (not an error, just empty), provide an alternative with `??`:
 ```flux
-name = user.name ?? "mehmon"
+name = user.name ?? "guest"
 each it in items
-  p = db.one "...narx..." [it.product]
-  p ?? (ask_owner "Narx?"; skip)    # p nil bo'lsa — so'ra va o'tkaz
+  p = db.one "...price..." [it.product]
+  p ?? (ask_owner "Price?"; skip)    # if p is nil — ask and skip
   log p.price
 ```
 
-### `fail` — xato chiqarish
-O'z kodingizdan xato ko'tarish:
+### `fail` — raise an error
+Raise an error from your own code:
 ```flux
 if qty < 1
-  fail "miqdor noto'g'ri"
+  fail "invalid quantity"
 ```
 
-**`fail` status kodi bilan — kutilgan xatolar uchun.** HTTP handler ichida
-`fail` ga status kodini bersangiz, u **avtomat** o'sha statusli javobga
-aylanadi. Bu — `try/catch` o'rnini bosadi: kutilgan xatoda chuqur nesting
-o'rniga shunchaki `fail` qiling:
+**`fail` with a status code — for expected errors.** If you give `fail` a status
+code inside an HTTP handler, it **automatically** turns into a response with that
+status. This replaces `try/catch`: for an expected error, instead of deep nesting
+just `fail`:
 ```flux
 http.on :post "/transfer" \req ->
   acc = db.one "select * from accounts where id=$1" [req.body.from]
   if acc.balance < req.body.amount
-    fail 422 "balans yetarli emas"     # → mijozga 422 {error:"balans yetarli emas"}
-  # ... asosiy yo'l, nesting yo'q
+    fail 422 "insufficient balance"     # → 422 {error:"insufficient balance"} to the client
+  # ... the main path, no nesting
 ```
-- `fail 4xx "xabar"` — **kutilgan** (biznes) xato → o'sha statusli JSON javob.
-- `fail "xabar"` (status'siz) — **kutilmagan** xato → 500.
+- `fail 4xx "message"` — an **expected** (business) error → a JSON response with
+  that status.
+- `fail "message"` (no status) — an **unexpected** error → 500.
 
-> **Canonical:** `!` = xatoni uzat, `??` = nil'ni almashtir, `fail` = xato
-> chiqar (status bilan yoki status'siz). Har belgi bitta ma'no. `try/catch`
-> **yo'q** — `fail`+status uning o'rnini bosadi, kod tekis qoladi.
+> **Canonical:** `!` = propagate the error, `??` = replace nil, `fail` = raise an
+> error (with or without a status). Each marker has one meaning. There is **no**
+> `try/catch` — `fail`+status replaces it, and the code stays flat.
 
 ---
 
-## 8. Modullar (import / export)
+## 8. Modules (import / export)
 
-### `use` — modul chaqirish
-Standart kutubxona yoki o'z faylingizni chaqirasiz. O'rnatish (`install`) yo'q:
+### `use` — import a module
+You import the standard library or your own file. There is no installation
+(`install`):
 ```flux
-use http db ai json        # standart batteries — bo'shliq bilan ko'p modul
-use ./tools                # o'z faylingiz → tools.funksiya
+use http db ai json        # standard batteries — multiple modules with spaces
+use ./tools                # your own file → tools.function
 ```
-Chaqirilgandan keyin nomlar modul ostida: `db.one`, `http.serve`,
+After importing, names live under the module: `db.one`, `http.serve`,
 `tools.create_order`.
 
-**`as` — qayta nomlash (alias).** Agar o'z faylingiz batareya nomi bilan bir
-xil bo'lsa (masalan `ai.flux` fayl va `ai` batareyasi), to'qnashuv bo'ladi.
-`as` bilan o'z modulingizni qayta nomlang:
+**`as` — renaming (alias).** If your own file has the same name as a battery (for
+example an `ai.flux` file and the `ai` battery), there is a clash. Rename your
+own module with `as`:
 ```flux
-use ai                     # batareya
-use ./ai as helper         # o'z faylingiz → helper.classify (to'qnashmaydi)
+use ai                     # the battery
+use ./ai as helper         # your own file → helper.classify (no clash)
 ```
-**Qoida:** o'z fayllaringizga batareya nomini (`ai db http cron`...) bermang,
-yoki bersangiz `as` bilan qayta nomlang.
+**Rule:** do not give your own files battery names (`ai db http cron`...), or if
+you do, rename them with `as`.
 
-### `exp` — eksport qilish
-Faylingizdagi funksiya yoki qiymatni boshqa fayllar uchun ochish:
+### `exp` — export
+Expose a function or value from your file to other files:
 ```flux
 exp fn create_order items customer
   ...
 exp price_limit = 1000
 ```
-Faqat `exp` bilan belgilangan narsalar tashqaridan ko'rinadi.
+Only things marked with `exp` are visible from the outside.
 
 ---
 
-## 9. Batteries — standart kutubxona
+## 9. Batteries — the standard library
 
-Bu — Flux'ning eng kuchli qismi. Eng kerakli narsalarning **hammasi** tilning
-ichida. Hech narsa o'rnatmaysiz — faqat `use` qilasiz va ishlatasiz.
+This is Flux's most powerful part. **All** the most-needed things are built into
+the language. You install nothing — you just `use` it and go.
 
-### 9.1 `http` — server va klient
+### 9.1 `http` — server and client
 
-**Server.** Marshrutni (route) bitta qatorda e'lon qilasiz:
+**Server.** You declare a route on a single line:
 ```flux
 use http
 
@@ -472,49 +469,52 @@ http.on :post "/notes" \req -> rep 201 {ok:true}
 http.on :get "/notes/:id" \req -> rep 200 {id:req.params.id}
 http.serve 8080
 ```
-- `http.on :metod "/yo'l" handler` — marshrut. Metod belgi (`:get :post :put
-  :patch :del`).
-- Handler — lambda. Argument `req`:
-  - `req.body` — JSON tanasi (avtomat map'ga aylantirilgan)
-  - `req.params.id` — yo'ldagi `:id`
-  - `req.query` — so'rov parametrlari (`?key=val`)
-  - `req.headers` — sarlavhalar
-- `rep status body` — javob. `body` map bo'lsa, **avtomat JSON** bo'ladi.
-- `http.serve port` — serverni ishga tushiradi.
+- `http.on :method "/path" handler` — a route. The method is a symbol (`:get
+  :post :put :patch :del`).
+- The handler is a lambda. Its argument is `req`:
+  - `req.body` — the JSON body (automatically converted to a map)
+  - `req.params.id` — the `:id` in the path
+  - `req.query` — query parameters (`?key=val`)
+  - `req.headers` — headers
+- `rep status body` — the response. If `body` is a map, it **automatically**
+  becomes JSON.
+- `http.serve port` — starts the server.
 
-**Redirect (yo'naltirish).** Maxsus fe'l yo'q — `rep` bilan 302 status va
-`location` kalitini berasiz; u Location header'ga aylanadi:
+**Redirect.** There is no special verb — with `rep` you give a 302 status and a
+`location` key; it becomes the Location header:
 ```flux
 http.on :get "/:code" \req ->
   link = db.one "select * from links where code=$1" [req.params.code]
-  link ?? (rep 404 {error:"topilmadi"})
+  link ?? (rep 404 {error:"not found"})
   rep 302 {location:link.url}
 ```
 
-**Route ustunligi.** Agar ikki marshrut bir-biriga to'g'ri kelsa (`/:code` va
-`/stats/:code`), **literal (aniq) yo'l avtomat ustun** bo'ladi — yozish
-tartibidan qat'i nazar. `/stats/:code` har doim `/:code` dan oldin tekshiriladi.
+**Route precedence.** If two routes overlap (`/:code` and `/stats/:code`), the
+**literal (exact) path automatically wins** — regardless of the order written.
+`/stats/:code` is always checked before `/:code`.
 
-**Klient.** Tashqi API chaqirish:
+**Client.** Calling an external API:
 ```flux
 res = http.get "https://api.example.com/data"
-res = http.post url {key:"val"}      # tana avtomat JSON
-# res.status, res.body, res.headers (map, kalit kichik harf)
-loc = res.headers.location           # yoki res.headers["content-type"]
+res = http.post url {key:"val"}      # the body becomes JSON automatically
+# res.status, res.body, res.headers (a map, keys lowercased)
+loc = res.headers.location           # or res.headers["content-type"]
 ```
 
-Redirect (3xx) **default kuzatilmaydi** — `res.status` 30x, `res.headers.location`
-o'qiladi. Avtomat kuzatish kerak bo'lsa opsiya map qo'shing:
+A redirect (3xx) is **not followed by default** — `res.status` is 30x, and
+`res.headers.location` is read. If you need automatic following, add an options
+map:
 ```flux
-res = http.get url {follow:true}         # 3xx → Location'ga ergashadi
-res = http.get url {follow:true max:5}   # hop limiti (default 10)
-# res.hops — necha marta redirect bo'lgani
+res = http.get url {follow:true}         # 3xx → follows Location
+res = http.get url {follow:true max:5}   # hop limit (default 10)
+# res.hops — how many redirects happened
 ```
-`max`'dan oshsa xato. Opsiya oxirgi argument: `http.post url body {follow:true}`.
+Exceeding `max` is an error. The options map is the last argument:
+`http.post url body {follow:true}`.
 
-**Custom so'rov header'lari.** Autentifikatsiya talab qiladigan API'lar uchun
-(`x-api-key`, `Authorization`, `anthropic-version`...) opsiya map'iga `headers`
-qo'shing — bu javobdagi `res.headers` bilan simmetrik:
+**Custom request headers.** For APIs that require authentication (`x-api-key`,
+`Authorization`, `anthropic-version`...), add `headers` to the options map — this
+is symmetric with `res.headers` in the response:
 ```flux
 res = http.post "https://api.anthropic.com/v1/messages" body {
   headers: {
@@ -523,47 +523,47 @@ res = http.post "https://api.anthropic.com/v1/messages" body {
   }
 }
 ```
-Header qiymati str bo'lmasa matnga aylantiriladi; `nil` qiymatli header
-tashlanadi. Foydalanuvchi `content-type` bersa, avtomatik `application/json`
-o'rniga o'sha ishlatiladi.
+If a header value is not a string it is converted to text; a header with a `nil`
+value is dropped. If the user provides `content-type`, that is used instead of
+the automatic `application/json`.
 
-### 9.2 `db` — ma'lumotlar bazasi (Postgres)
+### 9.2 `db` — database (Postgres)
 
-Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi. Hech
-qanday ulanish kodi yozmaysiz.
+The connection is **automatic**: it is read from the `$DATABASE_URL` environment
+variable. You write no connection code.
 
 ```flux
 use db
 
-# So'rov — natija map'lar ro'yxati
+# Query — the result is a list of maps
 rows = db.q "select * from products where owner=$1" [owner_id]
 
-# Bitta qator (yoki nil)
+# A single row (or nil)
 user = db.one "select * from users where id=$1" [id]
 
-# Qo'shish — qo'shilgan qatorni qaytaradi
+# Insert — returns the inserted row
 row = db.ins "orders" {cust:5 total:0 status::new}
 
-# Yangilash — db.up "jadval" {o'zgartirish} {shart}
+# Update — db.up "table" {changes} {condition}
 db.up "orders" {total:1500} {id:order_id}
 
-# O'chirish — db.del "jadval" {shart}
+# Delete — db.del "table" {condition}
 db.del "cart_items" {id:item_id}
 
-# UPSERT — db.put "jadval" {o'zgartirish} {kalit}
-# kalit bo'yicha bor bo'lsa yangilaydi, yo'q bo'lsa qo'shadi (atomik)
+# UPSERT — db.put "table" {changes} {key}
+# updates if it exists by key, inserts if not (atomic)
 db.put "agent_memory" {val:v} {agent:aid key:k}
 ```
 
-> **`db.put` nega kerak?** "Bor bo'lsa yangila, yo'q bo'lsa qo'sh" naqshi
-> (memory, cache, hisoblagich) uchun. Buni qo'lda `db.one` + `if` + `db.ins`
-> bilan qilsa, ikki parallel so'rov ikkalasi ham "yo'q" deb ko'rib, ikki marta
-> qo'shishi mumkin (race). `db.put` buni atomik qiladi.
+> **Why is `db.put` needed?** For the "update if it exists, insert if not"
+> pattern (memory, cache, counters). If you did this by hand with `db.one` + `if`
+> + `db.ins`, two parallel requests might both see "not there" and insert twice
+> (a race). `db.put` makes it atomic.
 
-**Tranzaksiya — `db.tx`.** Ko'p qadamli mutatsiya **atomik** bo'lishi kerak
-bo'lsa (masalan checkout: buyurtma + qatorlar + stok kamaytirish), `db.tx`
-blokiga o'rang. Blok ichida xato (`fail` yoki `!`) chiqsa, **hamma** o'zgarish
-**qaytariladi** (rollback) — DB hech qachon yarim holatda qolmaydi:
+**Transactions — `db.tx`.** If a multi-step mutation must be **atomic** (for
+example checkout: order + line items + decrementing stock), wrap it in a `db.tx`
+block. If an error (`fail` or `!`) occurs inside the block, **all** changes are
+**rolled back** — the DB never stays in a half-finished state:
 ```flux
 db.tx \->
   ord = db.ins "orders" {cust:c.id total:total}
@@ -571,57 +571,58 @@ db.tx \->
     db.ins "order_items" {ord:ord.id prod:it.id qty:it.qty price:it.price}
     db.up "products" {stock:it.stock - it.qty} {id:it.id}
   db.up "carts" {status::converted} {id:cart.id}
-  # blok oxirigacha yetsa — commit. O'rtada fail bo'lsa — hammasi bekor.
+  # if it reaches the end of the block — commit. If a fail happens midway — all cancelled.
 ```
 
-`db.tx` qiymat ham qaytaradi (`ret` orqali):
+`db.tx` can also return a value (via `ret`):
 ```flux
 ord = db.tx \->
   o = db.ins "orders" {...}
-  ret o            # blok qiymati tashqariga
+  ret o            # the block value goes outside
 ```
 
-**Concurrency (parallel so'rovlar) kafolati.** `db.tx` avtomat eng kuchli
-izolyatsiyada ishlaydi va konflikt bo'lsa **avtomat qayta uriniladi**. Bu
-shuni anglatadiki, "o'qib → tekshirib → o'zgartirish" naqshi xavfsiz. Masalan,
-bir hisobdan ikki parallel pul yechish — ikkalasi ham bir balansni ko'rib,
-ikkalasi ham o'tib ketmaydi (overdraft bo'lmaydi):
+**Concurrency (parallel requests) guarantee.** `db.tx` automatically runs at the
+strongest isolation and **automatically retries** on conflict. This means the
+"read → check → modify" pattern is safe. For example, two parallel withdrawals
+from one account — both see the same balance, and they do not both go through (no
+overdraft):
 ```flux
 db.tx \->
   acc = db.one "select * from accounts where id=$1" [aid]
   if acc.balance < amt
-    fail 422 "balans yetarli emas"
-  db.up "accounts" {balance:acc.balance - amt} {id:aid}   # race-xavfsiz
+    fail 422 "insufficient balance"
+  db.up "accounts" {balance:acc.balance - amt} {id:aid}   # race-safe
 ```
-> Boshqa tillarda buning uchun `SELECT FOR UPDATE`, lock, mutex yozish kerak.
-> Flux'da — kerak emas, `db.tx` o'zi kafolatlaydi. "Til AI'ga moslashadi":
-> AI lock haqida o'ylamaydi, shunchaki `db.tx` ichiga yozadi.
+> In other languages you would write `SELECT FOR UPDATE`, locks, or mutexes for
+> this. In Flux it is not needed — `db.tx` guarantees it itself. "The language
+> adapts to the AI": the AI does not think about locks, it just writes inside
+> `db.tx`.
 
-**Idempotency — bir amalni ikki marta bajarmaslik.** Pul ko'chirish kabi
-joylarda mijoz so'rovni qayta yuborishi mumkin. Unikal kalit (`uniq` ustun)
-bilan himoyalang: avval mavjudini tekshiring, keyin tranzaksiya ichida kalitni
-yozing — dublikat bo'lsa `uniq` xato → tx rollback:
+**Idempotency — not performing the same operation twice.** In places like money
+transfers, a client may resend a request. Protect it with a unique key (a `uniq`
+column): first check whether it exists, then write the key inside a transaction —
+if it is a duplicate, the `uniq` error → tx rollback:
 ```flux
 old = db.one "select * from transactions where ikey=$1" [key]
-old ?? (ret old)              # allaqachon bajarilgan → eski natijani qaytar
+old ?? (ret old)              # already done → return the old result
 db.tx \->
-  db.ins "transactions" {ikey:key amount:amt ...}   # dublikat → uniq → rollback
-  # ... pul ko'chirish
+  db.ins "transactions" {ikey:key amount:amt ...}   # duplicate → uniq → rollback
+  # ... transfer the money
 ```
-> Bu — e-commerce checkout kabi joylar uchun **majburiy**. Tranzaksiyasiz
-> o'rtada xato bo'lsa, ba'zi stok kamaygan, lekin buyurtma yaratilmagan
-> holat qoladi.
-- Parametrlar `$1, $2...` orqali, qiymatlar ro'yxat sifatida `[...]`.
-- `db.ins`/`db.up`'da map kalitlari — ustun nomlari.
-- **Param'siz so'rov** — ro'yxat shart emas: `db.q "select * from links"`.
-- **Aggregat (count/sum)** bo'sh jadvalda `nil` qaytarishi mumkin —
-  `?? 0` bilan himoyalang:
+> This is **mandatory** for places like e-commerce checkout. Without a
+> transaction, if an error happens midway, you can end up with some stock
+> decremented but no order created.
+- Parameters via `$1, $2...`, values passed as a list `[...]`.
+- In `db.ins`/`db.up`, the map keys are column names.
+- **A query without parameters** does not need a list: `db.q "select * from links"`.
+- An **aggregate (count/sum)** can return `nil` on an empty table — protect it
+  with `?? 0`:
   ```flux
   r = db.one "select count(*) c, sum(clicks) s from links"
   log "links: ${r.c}, clicks: ${r.s ?? 0}"
   ```
 
-**Schema e'loni — `tbl`.** Jadvallarni Flux'ning o'zida e'lon qilasiz:
+**Schema declaration — `tbl`.** You declare tables in Flux itself:
 ```flux
 tbl products
   id    serial pk
@@ -630,165 +631,167 @@ tbl products
   price flt
   ts    now
 ```
-Tip kalit so'zlari: `serial int flt str bool json now sym money`. Modifikatorlar:
-`pk` (primary key), `uniq`, `null`, `ref:jadval.ustun` (tashqi kalit).
-Ko'p ustunli unikal: jadval tanasida `uniq(agent, key)` (ikki ustun birga
-unikal — masalan har agent uchun har kalit faqat bir marta).
+Type keywords: `serial int flt str bool json now sym money`. Modifiers: `pk`
+(primary key), `uniq`, `null`, `ref:table.column` (foreign key). Multi-column
+unique: in the table body, `uniq(agent, key)` (two columns unique together — for
+example each key only once per agent).
 
-**`json` ustun** — o'qiganda **avtomat map/list** bo'ladi (string emas,
-`json.dec` shart emas); yozganda map/list avtomat enkod qilinadi.
+**A `json` column** — when read it **automatically becomes a map/list** (not a
+string, no need for `json.dec`); when written, a map/list is automatically
+encoded.
 
-**`money` tipi — pul uchun.** Pul HECH QACHON `flt` (float) bo'lmasligi kerak —
-float yaxlitlash xatosi pulni buzadi. `money` — butun **minor birlik** (tiyin,
-sent): `15000` = 150.00 so'm. Hamma pul-math `money`/`int` bilan (`int` 64-bit):
+**The `money` type — for money.** Money should NEVER be a `flt` (float) — float
+rounding errors corrupt money. `money` is a whole number of **minor units**
+(tiyin, cents): `15000` = 150.00 so'm. All money math uses `money`/`int` (`int`
+is 64-bit):
 ```flux
 tbl accounts
   id      serial pk
-  balance money       # tiyinda, masalan 15000 = 150.00
-total = price * qty   # int math, float emas
+  balance money       # in tiyin, e.g. 15000 = 150.00
+total = price * qty   # int math, not float
 ```
 
-**`sym` tipi — enum uchun.** Bu Flux'ning chiroyli yechimi. Ustun `sym`
-bo'lsa: DB'da **matn** saqlanadi, lekin Flux uni o'qiganda avtomat **symbol**
-qaytaradi. Yozish va filtrlashda symbol avtomat matnga aylanadi. Shunda `match`
-to'g'ridan-to'g'ri ishlaydi:
+**The `sym` type — for enums.** This is Flux's elegant solution. If a column is
+`sym`: the DB stores **text**, but when Flux reads it, it automatically returns a
+**symbol**. On writing and filtering, a symbol is automatically converted to
+text. Then `match` works directly:
 ```flux
 tbl tickets
-  category sym         # DB: matn ("billing"), Flux: symbol (:billing)
+  category sym         # DB: text ("billing"), Flux: symbol (:billing)
   status   sym
 
-# Yozish: symbol berasiz, DB matn saqlaydi
+# Writing: you give a symbol, the DB stores text
 db.ins "tickets" {category::billing status::new}
 
-# O'qish: schema sym desa, Flux symbol qaytaradi
+# Reading: if the schema says sym, Flux returns a symbol
 t = db.one "select * from tickets where id=$1" [id]
-match t.category       # t.category — symbol, shuning uchun match ishlaydi
-  :billing -> log "to'lov masalasi"
-  :technical -> log "texnik"
-  _ -> log "boshqa"
+match t.category       # t.category is a symbol, so match works
+  :billing -> log "billing matter"
+  :technical -> log "technical"
+  _ -> log "other"
 
-# Filtrlash: symbol uzatiladi, avtomat matnga aylanadi
+# Filtering: a symbol is passed, automatically converted to text
 db.q "select * from tickets where category=$1" [:billing]
 ```
-**Bitta qoida:** `sym` ustun — DB'da matn, Flux'da symbol, aylanish avtomat.
+**One rule:** a `sym` column — text in the DB, a symbol in Flux, conversion
+automatic.
 
-### 9.3 `ai` — LLM (birinchi darajali primitiv)
+### 9.3 `ai` — LLM (a first-class primitive)
 
-Bu Flux'ni boshqa tillardan ajratib turadigan eng katta narsa. LLM — kalit
-so'z, SDK emas. **Provayder avtomatik aniqlanadi** (OS env yoki `.env`) — hech
-narsa sozlash shart emas:
+This is the biggest thing that sets Flux apart from other languages. The LLM is a
+keyword, not an SDK. **The provider is detected automatically** (OS env or
+`.env`) — you configure nothing:
 
-- `ANTHROPIC_API_KEY` bo'lsa → Claude (default `claude-opus-4-8`)
-- `OPENAI_API_KEY` bo'lsa → GPT (default `gpt-4o`)
-- Ikkalasi bo'lsa Anthropic ustun. Override: `$AI_PROVIDER` (`anthropic|openai`),
-  `$AI_KEY` (umumiy kalit), `$AI_MODEL` (model nomi).
+- if `ANTHROPIC_API_KEY` is set → Claude (default `claude-opus-4-8`)
+- if `OPENAI_API_KEY` is set → GPT (default `gpt-4o`)
+- if both are set, Anthropic wins. Override: `$AI_PROVIDER`
+  (`anthropic|openai`), `$AI_KEY` (a shared key), `$AI_MODEL` (the model name).
 
-Bu `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` kabi keng tarqalgan standart nomlarga
-moslashadi — boshqa toollar bilan bir xil `.env` ishlaydi.
+This adapts to common standard names like `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` —
+the same `.env` works with other tools.
 
 ```flux
 use ai
 
-# Oddiy savol-javob → matn
-javob = ai.ask "Bu xabarni o'zbekchaga tarjima qil: ${text}"
+# Simple question-and-answer → text
+answer = ai.ask "Translate this message into English: ${text}"
 
-# Strukturali ajratish (typed extraction) → schema bo'yicha map
+# Structured extraction (typed extraction) → a map according to the schema
 schema = {
   intent: ":new_order|:question|:other"
   items: [{product:str qty:int}]
 }
-r = ai.json "Buyurtmani ajrat: ${text}" schema
+r = ai.json "Extract the order: ${text}" schema
 # r.intent, r.items[0].product ...
 
 ```
 
-**Audit metadata — avtomat.** Har bir `ai.*` natijasi `_` ostida metadata
-olib keladi:
+**Audit metadata — automatic.** Each `ai.*` result carries metadata under `_`:
 ```flux
 r = ai.json prompt schema
-log r._.conf        # ishonch balli (0..1)
-log r._.tokens      # ishlatilgan token
-log r._.cost        # narx
-log r._.ms          # kechikish (millisekund)
+log r._.conf        # confidence score (0..1)
+log r._.tokens      # tokens used
+log r._.cost        # cost
+log r._.ms          # latency (milliseconds)
 ```
-Bu ishonch-asosli yo'naltirish (confidence routing) uchun asosiy:
+This is the basis for confidence routing:
 ```flux
 if r._.conf > 0.85
-  auto_javob r          # yuqori ishonch → avtomat
+  auto_answer r         # high confidence → automatic
 elif r._.conf >= 0.6
-  egadan_sora r         # o'rta → tasdiq so'ra
+  ask_owner r           # medium → ask for confirmation
 else
-  egaga_yubor r         # past → to'liq eskalatsiya
+  escalate_to_owner r   # low → full escalation
 ```
 
-> **Eslatma:** `_.conf` — LLM batareyasi qaytaradigan kalibrlangan ishonch.
-> Real hayotda buni logprob yoki self-eval bilan ta'minlash kerak; til buni
-> batareya ortida yashiradi.
+> **Note:** `_.conf` is the calibrated confidence returned by the LLM battery. In
+> real life this should be backed by logprobs or self-eval; the language hides
+> this behind the battery.
 
-**`ai.run` — agent tool-loop (BIR qadam).** AI tool ishlatmoqchi bo'lsa,
-`ai.run` uni **o'zi bajarmaydi** — sizga *nima qilmoqchiligini* qaytaradi.
-Siz tool'ni bajarib (logging, narx, tasdiq bilan), natijani qaytarib berasiz.
-Loop **qo'lda** — bu sizga to'liq nazorat beradi:
+**`ai.run` — agent tool loop (ONE step).** If the AI wants to use a tool,
+`ai.run` does **not** execute it itself — it returns to you *what it wants to
+do*. You run the tool (with logging, cost, confirmation) and return the result.
+The loop is **manual** — this gives you full control:
 ```flux
 msgs <- [{role::user content:text}]
-each i in 1..10                          # maksimum 10 qadam
-  r = ai.run msgs tools                  # tools: [{name desc params}] ro'yxati
+each i in 1..10                          # maximum 10 steps
+  r = ai.run msgs tools                  # tools: a list of [{name desc params}]
   if r.kind == :final
-    ret r.text                           # AI tugadi → final javob
-  # r.kind == :call → AI tool chaqirmoqchi
-  out = reg.call r.tool r.args           # tool'ni nomi bilan bajar (pastга qara)
-  log "tool ${r.tool}: ${r._.ms}ms"      # logging/cost/tasdiq shu yerda
+    ret r.text                           # AI is done → final answer
+  # r.kind == :call → the AI wants to call a tool
+  out = reg.call r.tool r.args           # run the tool by name (see below)
+  log "tool ${r.tool}: ${r._.ms}ms"      # logging/cost/confirmation goes here
   msgs <- msgs.push {role::tool name:r.tool content:(json.enc out)}
 ```
-> `ai.run` ataylab bir qadamli. Agar AI'ning tool chaqiruvlarini avtomat,
-> nazoratsiz bajartirsa, logging/narx/tasdiq qila olmas edingiz. Loop sizniki —
-> shuning uchun har tool chaqiruvini ko'rasiz va boshqarasiz.
+> `ai.run` is intentionally single-step. If you let the AI's tool calls run
+> automatically and uncontrolled, you could not do logging/cost/confirmation. The
+> loop is yours — so you see and control every tool call.
 
-### 9.4 `reg` — funksiya registri (dinamik dispatch)
+### 9.4 `reg` — function registry (dynamic dispatch)
 
-Funksiyani **string nomi bilan** saqlash va chaqirish. Agent tool'lari uchun
-zarur: AI sizga tool **nomini** (matn) beradi, siz uni funksiyaga aylantirib
-chaqirishingiz kerak.
+Storing and calling a function **by its string name**. Essential for agent tools:
+the AI gives you the tool **name** (text), and you must turn it into a function
+and call it.
 
 ```flux
-reg.add "calc" \args -> args.a + args.b          # nom → funksiya
+reg.add "calc" \args -> args.a + args.b          # name → function
 reg.add "search" \args -> http.get "/s?q=${args.q}"
 
-out = reg.call "calc" {a:2 b:3}                  # nomi bilan chaqir → 5
-reg.has "search"                                  # ro'yxatda bormi → bool
-reg.names                                         # barcha nomlar ro'yxati
+out = reg.call "calc" {a:2 b:3}                  # call by name → 5
+reg.has "search"                                  # is it in the registry → bool
+reg.names                                         # a list of all names
 ```
 
-> **Nega `reg` kerak?** Boshqacha bo'lsa, AI'dan kelgan tool nomini
-> `match name` (hardcoded switch) bilan bajarish kerak edi — har yangi tool
-> uchun kodni o'zgartirib. `reg` bilan tool'lar **runtime'da** qo'shiladi
-> (`reg.add`), AI istalganini `reg.call` bilan chaqiradi. Agent platforma
-> aynan shusiz qurib bo'lmaydi.
+> **Why is `reg` needed?** Otherwise, you would have to execute the tool name
+> coming from the AI with `match name` (a hardcoded switch) — changing the code
+> for each new tool. With `reg`, tools are added **at runtime** (`reg.add`), and
+> the AI calls any of them with `reg.call`. You simply cannot build an agent
+> platform without this.
 
-### 9.5 `list` metodlari, `str` / `math` / `rand` / `time` — yadro
+### 9.5 `list` methods, `str` / `math` / `rand` / `time` — the core
 
-Bularning hammasi **yadro** — `use` qilmasdan ishlaydi (xuddi `log` kabi).
+All of these are **core** — they work without `use` (just like `log`).
 
-**`list` — ro'yxat metodlari** (qiymat ustida, `.metod`):
+**`list` — list methods** (on a value, `.method`):
 ```flux
-l.len                  # uzunlik
-l.push x               # element qo'shadi → yangi ro'yxat
-l.filter \x -> x > 0   # shartga mosini qoldiradi → yangi ro'yxat
-l.map \x -> x * 2      # har birini o'zgartiradi → yangi ro'yxat
-l.has x                # ichida bormi → bool
-l.index x              # birinchi mos elementning indeksi, topilmasa -1
-l.find \x -> x > 4     # predikatga mos birinchi element, topilmasa nil
-l.0  l.1               # indeks bo'yicha element
-l.slice a b            # a..b oralig'i (b kirmaydi) → yangi ro'yxat
-l.join ", "            # → matn: [1 2 3].join "," → "1,2,3"
-l.reduce 0 \acc x -> acc + x   # yig'ish: (boshlang'ich qiymat, funksiya)
+l.len                  # length
+l.push x               # adds an element → a new list
+l.filter \x -> x > 0   # keeps those matching the condition → a new list
+l.map \x -> x * 2      # transforms each → a new list
+l.has x                # is it inside → bool
+l.index x              # index of the first matching element, -1 if not found
+l.find \x -> x > 4     # first element matching the predicate, nil if not found
+l.0  l.1               # element by index
+l.slice a b            # the a..b range (b excluded) → a new list
+l.join ", "            # → text: [1 2 3].join "," → "1,2,3"
+l.reduce 0 \acc x -> acc + x   # accumulate: (initial value, function)
 ```
 
-> **Muhim:** ro'yxat qurish uchun `l.push x` ishlating, `l + [x]` **emas**.
-> Filtrlash uchun qo'lda `each` loop o'rniga `l.filter`, matn qurish uchun
-> qo'lda akkumulyator o'rniga `l.join`:
+> **Important:** to build a list use `l.push x`, **not** `l + [x]`. To filter, use
+> `l.filter` instead of a manual `each` loop; to build text, use `l.join` instead
+> of a manual accumulator:
 > ```flux
-> # Qo'lda (uzun):              Metod bilan (toza):
+> # Manual (long):              With methods (clean):
 > result <- []                  result = items.filter \t -> t.active
 > each t in items
 >   if t.active
@@ -799,59 +802,59 @@ l.reduce 0 \acc x -> acc + x   # yig'ish: (boshlang'ich qiymat, funksiya)
 >   text <- text + n + ", "
 > ```
 
-**`map` — kalit-qiymat metodlari** (qiymat ustida, `.metod`):
+**`map` — key-value methods** (on a value, `.method`):
 ```flux
-m.set k v              # kalit qo'yadi/yangilaydi → yangi map
-m.del k                # kalitni o'chiradi → yangi map
-m.has k                # kalit bormi → bool
-m.keys                 # kalitlar ro'yxati
-m.vals                 # qiymatlar ro'yxati
-m.key   m[k]           # o'qish (m[k] — dinamik, o'zgaruvchi kalit)
+m.set k v              # sets/updates a key → a new map
+m.del k                # removes a key → a new map
+m.has k                # is the key present → bool
+m.keys                 # a list of keys
+m.vals                 # a list of values
+m.key   m[k]           # read (m[k] — dynamic, variable key)
 ```
-> **Muhim:** map'ga **yozish** uchun `m.set k v` ishlating. `m[k]` faqat
-> **o'qiydi** (yozmaydi). Bu list bilan izchil: list'da `push`, map'da `set`.
-> Shared state (masalan, realtime'da kim qaysi xonada) shu metodlar bilan
-> boshqariladi.
+> **Important:** to **write** to a map use `m.set k v`. `m[k]` only **reads**
+> (does not write). This is consistent with lists: `push` for a list, `set` for a
+> map. Shared state (for example, who is in which room in realtime) is managed
+> with these methods.
 
-**`str` — matn funksiyalari:**
+**`str` — text functions:**
 ```flux
-str.len s              # uzunlik (son)
-str.slice s 0 3        # 0..3 oralig'i (3 kirmaydi): "salom" → "sal"
-str.up s               # KATTA HARF
-str.low s              # kichik harf
-str.split s ","        # ajratish → ro'yxat: "a,b" → ["a" "b"]
-str.has s "qism"       # ichida bormi → bool
-str.int "42"           # matn → son
-str.str 42             # son → matn
+str.len s              # length (number)
+str.slice s 0 3        # the 0..3 range (3 excluded): "hello" → "hel"
+str.up s               # UPPERCASE
+str.low s              # lowercase
+str.split s ","        # split → a list: "a,b" → ["a" "b"]
+str.has s "part"       # is it inside → bool
+str.int "42"           # text → number
+str.str 42             # number → text
 ```
 
-> **Nega `str.len s` ro'yxatdagi `list.len` dan farqli?** Ro'yxat uzunligi —
-> a'zo (`list.len`), matn uzunligi — modul funksiyasi (`str.len s`). Sabab:
-> ro'yxat va matn alohida tiplar, va ularning operatsiyalari aralashmasligi
-> kerak. Ikkalasi bir xil `.len` bo'lsa chalkashardi.
+> **Why is `str.len s` different from `list.len` on a list?** List length is a
+> member (`list.len`), text length is a module function (`str.len s`). The reason:
+> a list and text are separate types, and their operations should not mix. If both
+> were the same `.len` it would be confusing.
 
-**`math` — matematika:**
+**`math` — math:**
 ```flux
 math.floor 3.7         # → 3
 math.ceil 3.2          # → 4
 math.abs -5            # → 5
 ```
 
-**`rand` — tasodifiy:**
+**`rand` — random:**
 ```flux
-rand.int 1 100         # 1..100 oralig'ida tasodifiy butun son
-rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod uchun ideal)
+rand.int 1 100         # a random integer in the range 1..100
+rand.str 6             # a random string of 6 characters (ideal for short codes)
 ```
 
-**`time` — vaqt va sana:**
+**`time` — time and date:**
 ```flux
-time.now               # hozirgi vaqt (timestamp)
-time.ago 24 :hr        # 24 birlik oldingi vaqt. Birlik: :sec :min :hr :day
-time.in  60 :min       # 60 birlik keyingi vaqt (TTL/expiry). Birlik bir xil
-time.fmt t "..."       # timestamp'ni matnga formatlash
+time.now               # the current time (timestamp)
+time.ago 24 :hr        # the time 24 units ago. Units: :sec :min :hr :day
+time.in  60 :min       # the time 60 units later (TTL/expiry). Same units
+time.fmt t "..."       # format a timestamp into text
 ```
-> DB so'rovida raw `now() - interval '24 hours'` yozish o'rniga `time.ago`
-> ishlating — toza va xavfsiz:
+> Instead of writing raw `now() - interval '24 hours'` in a DB query, use
+> `time.ago` — it is clean and safe:
 > ```flux
 > r = db.one "select count(*) c from tickets where created > $1" [time.ago 24 :hr]
 > ```
@@ -859,80 +862,85 @@ time.fmt t "..."       # timestamp'ni matnga formatlash
 ### 9.6 `json`
 ```flux
 use json
-s = json.enc value     # qiymat → JSON matn
-v = json.dec str       # JSON matn → qiymat
+s = json.enc value     # value → JSON text
+v = json.dec str       # JSON text → value
 ```
 
-### 9.7 `env` — muhit o'zgaruvchilari
+### 9.7 `env` — environment variables
 ```flux
-port = env.PORT ?? "8080"      # to'g'ridan-to'g'ri env.NOM
+port = env.PORT ?? "8080"      # directly env.NAME
 key = env.AI_KEY
 ```
 
-### 9.8 `cron` — rejalashtirish
-Standart **Unix 5-maydonli** cron ifoda: `daqiqa soat kun oy hafta-kuni`. Har
-AI agent shu formatni biladi (crontab, GitHub Actions, ...). `cron.on` ifodani
-**tirnoqsiz** o'qiydi — `*` bu yerda ko'paytirish emas, cron belgisi:
+### 9.8 `cron` — scheduling
+A standard **Unix 5-field** cron expression: `minute hour day month weekday`.
+Every AI agent knows this format (crontab, GitHub Actions, ...). `cron.on` reads
+the expression **without quotes** — here `*` is not multiplication, it is a cron
+marker:
 ```flux
 use cron
-cron.on 0 * * * * check_prices    # har soat boshida (daqiqa=0)
-cron.on 30 9 * * * daily_check    # har kun 09:30
-cron.on 0 18 * * 0 briefing       # yakshanba (0) 18:00
-cron.on */15 * * * * poll         # har 15 daqiqada
-cron.on 0 9 * * 1-5 \->           # ish kunlari 09:00 (inline lambda)
-  log "ish kuni"
+cron.on 0 * * * * check_prices    # at the start of every hour (minute=0)
+cron.on 30 9 * * * daily_check    # every day at 09:30
+cron.on 0 18 * * 0 briefing       # Sunday (0) at 18:00
+cron.on */15 * * * * poll         # every 15 minutes
+cron.on 0 9 * * 1-5 \->           # weekdays at 09:00 (inline lambda)
+  log "weekday"
 ```
-Maydonlar: `*` har qiymat, `*/N` har N, `A-B` diapazon, `A,B,C` ro'yxat.
-Hafta-kuni: 0=yakshanba ... 6=shanba.
+Fields: `*` any value, `*/N` every N, `A-B` a range, `A,B,C` a list. Weekday:
+0=Sunday ... 6=Saturday.
 
-`cron.on` **bloklamaydi** — `http.on` kabi faqat ro'yxatga oladi va scheduler
-fonda ishga tushadi. Server (`http.serve`/`ws.serve`) processni tirik ushlaydi,
-cron fonda o'z vaqtida ishlaydi. Tartib: `cron.on` lar `http.serve` dan **oldin**.
+`cron.on` **does not block** — like `http.on` it just registers, and the
+scheduler runs in the background. A server (`http.serve`/`ws.serve`) keeps the
+process alive, and cron runs in the background at its scheduled times. Order:
+`cron.on` calls go **before** `http.serve`.
 
-Faqat-cron skript (server yo'q) uchun — `cron.run` processni o'z qo'liga oladi:
+For a cron-only script (no server) — `cron.run` takes over the process:
 ```flux
 cron.on 0 9 * * * daily_check
-cron.run                          # bloklaydi: dastur tugamaydi, cron ishlayveradi
+cron.run                          # blocks: the program does not end, cron keeps running
 ```
 
-> Qulaylik: ifodani tirnoq bilan ham yozsa bo'ladi (`cron.on "0 9 * * *" f`) —
-> natija bir xil. AI uchun kanonik shakl tirnoqsiz (kam token).
+> Convenience: you can also write the expression with quotes (`cron.on "0 9 * *
+> *" f`) — the result is the same. For an AI the canonical form is without quotes
+> (fewer tokens).
 
-### 9.9 `queue` — fon navbati
-Webhook tez javob berishi uchun og'ir ishni fonga uzatasiz:
+### 9.9 `queue` — background queue
+So a webhook can respond quickly, you offload heavy work to the background:
 ```flux
 use queue
 
-queue.on "send" \job -> tools.send job.ph job.body   # ishlovchi (handler)
-queue.push "send" {ph:phone body:text}               # navbatga qo'shish
+queue.on "send" \job -> tools.send job.ph job.body   # the handler
+queue.push "send" {ph:phone body:text}               # add to the queue
 ```
 
-- `queue.on <nom> <handler>` — shu nomli ishlar uchun ishlovchi. Handler bittagina
-  `job` argumenti oladi — bu `queue.push`'ga berilgan payload (map).
-- `queue.push <nom> <payload>` — navbatga ish qo'shadi. Payload ixtiyoriy
-  (berilmasa `nil`). **Bloklamaydi** — darhol qaytadi, ish fonda bajariladi.
-- Ishlar **bitta worker thread'da, FIFO (kelgan tartibda)** bajariladi —
-  ketma-ketlik kafolatlangan. Handler ichidagi xato worker'ni o'ldirmaydi.
-- `push` `on`'dan oldin yozilsa, ish **navbatda kutadi** va handler ro'yxatga
-  olingach bajariladi (tartibga bog'liq emas).
-- Worker fon thread'i — server (`http.serve`/`ws.serve`) yoki `cron.run` processni
-  ushlab turganda navbatni qayta ishlaydi. Faqat-queue skriptda processni ushlash
-  uchun shu bloklovchi chaqiruvlardan biri kerak.
+- `queue.on <name> <handler>` — the handler for jobs with this name. The handler
+  takes a single `job` argument — this is the payload given to `queue.push` (a
+  map).
+- `queue.push <name> <payload>` — adds a job to the queue. The payload is optional
+  (if not given, `nil`). It **does not block** — it returns immediately, and the
+  job runs in the background.
+- Jobs run **on a single worker thread, FIFO (in arrival order)** — ordering is
+  guaranteed. An error inside a handler does not kill the worker.
+- If `push` is written before `on`, the job **waits in the queue** and runs once
+  the handler is registered (order-independent).
+- The worker is a background thread — it processes the queue while a server
+  (`http.serve`/`ws.serve`) or `cron.run` holds the process. In a queue-only
+  script you need one of these blocking calls to hold the process.
 
 ### 9.10 `ws` — websocket (realtime)
 
-Real-time ilovalar (chat, jonli yangilanish) uchun. `http` so'rov-javob bo'lsa,
-`ws` doimiy ikki tomonlama ulanish.
+For real-time applications (chat, live updates). Where `http` is
+request-response, `ws` is a persistent two-way connection.
 
 ```flux
 use ws
 
-ws.on :connect \conn ->         # yangi ulanish. conn.id — barqaror unikal id
-  ws.data.set conn :user nil    # ws.data — SHU ulanish uchun sessiya holati
+ws.on :connect \conn ->         # a new connection. conn.id — a stable unique id
+  ws.data.set conn :user nil    # ws.data — session state for THIS connection
 
-ws.on :message \conn msg ->     # msg — kelgan matn (JSON bo'lsa json.dec qiling)
+ws.on :message \conn msg ->     # msg — the incoming text (if JSON, json.dec it)
   m = json.dec msg
-  ws.send conn (json.enc {ok:true})    # SHU ulanishga javob
+  ws.send conn (json.enc {ok:true})    # reply to THIS connection
 
 ws.on :disconnect \conn ->
   ws.room.leave conn "ch:5"
@@ -940,34 +948,37 @@ ws.on :disconnect \conn ->
 ws.serve 9000
 ```
 
-- `ws.on :hodisa handler` — hodisa: `:connect`, `:message`, `:disconnect`.
-  `:message` handler `\conn msg ->` (msg — kelgan **matn**), qolganlari `\conn ->`.
-- `ws.send conn matn` — SHU ulanishga yuboradi (matn; JSON kerak bo'lsa `json.enc`).
-- `ws.data.set conn :kalit qiymat` / `ws.data.get conn :kalit` — SHU ulanish
-  uchun sessiya holati (Flux ulanish uzilguncha saqlaydi, uzilganda tozalaydi).
-- `ws.serve port` — serverni ishga tushiradi (bloklovchi).
+- `ws.on :event handler` — events: `:connect`, `:message`, `:disconnect`. The
+  `:message` handler is `\conn msg ->` (msg — the incoming **text**), the others
+  are `\conn ->`.
+- `ws.send conn text` — sends to THIS connection (text; if you need JSON,
+  `json.enc`).
+- `ws.data.set conn :key value` / `ws.data.get conn :key` — session state for
+  THIS connection (Flux keeps it until the connection drops, and clears it on
+  disconnect).
+- `ws.serve port` — starts the server (blocking).
 
-**Xona (room) — broadcast uchun.** Bir guruhga bir vaqtda yuborish. Flux
-xonalarni o'zi boshqaradi — siz qo'lda "kim qaysi xonada" map'ini yuritmaysiz:
+**Rooms — for broadcast.** Sending to a group at once. Flux manages rooms itself
+— you do not maintain a manual "who is in which room" map:
 ```flux
-ws.room.join conn "ch:5"                          # ulanishni xonaga qo'shish
-ws.room.leave conn "ch:5"                         # xonadan chiqarish
-ws.room.send "ch:5" (json.enc {t:"msg" body:b})   # xonadagi HAMMAGA yuborish
-ws.room.members "ch:5"                            # xonadagilar (presence uchun)
+ws.room.join conn "ch:5"                          # add the connection to a room
+ws.room.leave conn "ch:5"                         # remove it from the room
+ws.room.send "ch:5" (json.enc {t:"msg" body:b})   # send to EVERYONE in the room
+ws.room.members "ch:5"                            # the room members (for presence)
 ```
 
-> `http.serve` va `ws.serve` **birga** ishlaydi (har xil portda). Xona
-> a'zoligi va presence — `ws.room` ichida boshqariladi, qo'lda shared-state
-> map kerak emas.
+> `http.serve` and `ws.serve` work **together** (on different ports). Room
+> membership and presence are managed inside `ws.room` — no manual shared-state
+> map is needed.
 
-### 9.11 `log` — stderr'ga chiqarish
+### 9.11 `log` — printing to stderr
 ```flux
-log "xabar"          # diagnostika uchun stderr'ga
+log "message"          # to stderr for diagnostics
 ```
 
 ---
 
-## 10. To'liq kichik dastur (hammasi birga)
+## 10. A complete small program (all together)
 
 ```flux
 use http db ai json
@@ -984,9 +995,9 @@ http.on :post "/notes" \req ->
 http.on :get "/notes" \req ->
   rep 200 (db.q "select * from notes order by ts desc")
 
-log "server :8080 da"
+log "server on :8080"
 http.serve 8080
 ```
 
-Mana butun til. `use` qiling, `tbl` bilan jadval, `http.on` bilan marshrut,
-`db` bilan saqlash — paket yo'q, ulanish kodi yo'q, boilerplate yo'q.
+Here is the whole language. `use` it, declare a table with `tbl`, a route with
+`http.on`, storage with `db` — no packages, no connection code, no boilerplate.
