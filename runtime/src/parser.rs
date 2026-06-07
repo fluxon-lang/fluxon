@@ -139,6 +139,7 @@ impl Parser {
         match self.peek() {
             Tok::Fn => self.parse_fn(false),
             Tok::View => self.parse_view(),
+            Tok::Theme => self.parse_theme(),
             Tok::Exp => self.parse_exp(),
             Tok::If => Ok(Stmt::Expr(self.parse_if()?)),
             Tok::Match => Ok(Stmt::Expr(self.parse_match()?)),
@@ -422,6 +423,32 @@ impl Parser {
         }
         self.expect(&Tok::Dedent, "jadval oxiri")?;
         Ok(Stmt::Tbl { name, columns })
+    }
+
+    // theme bloki — global dizayn tokenlari (space-separated, `tbl` kabi):
+    //   theme
+    //     primary "#e84d8a"
+    //     radius  :lg
+    // Har qator: nom + bitta qiymat ifoda. CSS custom properties'ga aylanadi.
+    fn parse_theme(&mut self) -> ParseResult<Stmt> {
+        self.advance(); // theme
+        self.expect(&Tok::Newline, "theme tanasi")?;
+        self.expect(&Tok::Indent, "theme tokenlari (chekinish)")?;
+        let mut tokens = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
+            let key = self.expect_ident("theme token nomi")?;
+            // Qiymat — bitta atom (str/sym/int). no_app: juxtaposition-call yo'q
+            // (token qiymati keyingi qatorga o'tib ketmasin).
+            let saved = self.no_app;
+            self.no_app = true;
+            let value = self.parse_expr()?;
+            self.no_app = saved;
+            tokens.push((key, value));
+            self.skip_newlines();
+        }
+        self.expect(&Tok::Dedent, "theme oxiri")?;
+        Ok(Stmt::Theme { tokens })
     }
 
     // --- ifodalar (precedence climbing) ---

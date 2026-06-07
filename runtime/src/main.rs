@@ -1316,4 +1316,72 @@ out = ui.html (danger())
 (out == "<p>a &lt; b &amp; c &gt; d</p>") | (fail "escape xato: ${out}")
 "#);
     }
+
+    // --- 2-BOSQICH: each / if / match / theme ---
+
+    // view ichida `each` — ro'yxat render (har element bir node).
+    #[test]
+    fn view_each_render() {
+        run(r#"
+view menu items
+  h1 "Menyu"
+  each it in items
+    p it
+
+out = ui.html (menu ["Atirgul" "Lola"])
+(out == "<h1>Menyu</h1><p>Atirgul</p><p>Lola</p>") | (fail "each xato: ${out}")
+"#);
+    }
+
+    // view ichida `if/else` — shartli render.
+    #[test]
+    fn view_if_render() {
+        run(r#"
+view sv ok
+  if ok
+    p "ha"
+  else
+    p "yo'q"
+
+(ui.html (sv true) == "<p>ha</p>") | (fail "if-true xato")
+(ui.html (sv false) == "<p>yo'q</p>") | (fail "if-false xato")
+"#);
+    }
+
+    // view ichida `match` — symbol bo'yicha render.
+    #[test]
+    fn view_match_render() {
+        run(r#"
+view bv st
+  match st
+    :new -> span "Yangi" {kind::info}
+    _ -> span "?" {kind::muted}
+
+(ui.html (bv :new) == "<span class=\"flux-info\">Yangi</span>") | (fail "match-new xato: ${ui.html (bv :new)}")
+(ui.html (bv :x) == "<span class=\"flux-muted\">?</span>") | (fail "match-default xato")
+"#);
+    }
+
+    // theme -> CSS custom properties; ui.page to'liq hujjat.
+    // r##"..."## — ichida `#e84d8a` ("#" + tirnoq) raw string'ni erta yopmasligi uchun.
+    #[test]
+    fn theme_va_page() {
+        run(r##"
+theme
+  primary "#e84d8a"
+  radius  :lg
+
+css = ui.css
+(str.has css "--primary:#e84d8a;") | (fail "primary token yo'q")
+(str.has css "--radius:lg;") | (fail "radius token yo'q")
+
+view home
+  h1 "Salom"
+
+doc = ui.page (home())
+(str.has doc "<!doctype html>") | (fail "doctype yo'q")
+(str.has doc "<style>") | (fail "style yo'q")
+(str.has doc "<body><h1>Salom</h1></body>") | (fail "body yo'q")
+"##);
+    }
 }

@@ -121,14 +121,69 @@ pub fn fragment(children: Vec<Value>) -> Value {
 impl Interp {
     pub fn ui_dispatch(self: &Arc<Self>, func: &str, args: Vec<Value>) -> Result<Value, Flow> {
         match func {
-            // ui.html node -> str (server-side render). Argument {__node} yoki nil.
+            // ui.html node -> str (element/komponent server-side render). To'liq
+            // hujjat EMAS — faqat element daraxti HTML'i (3-bosqich ui.serve to'liq
+            // sahifani theme + body bilan birlashtiradi). Argument {__node} yoki nil.
             "html" => {
                 let node = args.first().cloned().unwrap_or(Value::Nil);
                 Ok(Value::Str(node_to_html(&node)))
             }
+            // ui.css -> str: theme tokenlaridan CSS custom properties + base CSS.
+            // `<style>` ichiga qo'yiladi (ui.serve yoki qo'lda).
+            "css" => {
+                let theme = self.theme.read();
+                Ok(Value::Str(theme_to_css(&theme)))
+            }
+            // ui.page node -> str: to'liq HTML hujjat (doctype + head[theme css] +
+            // body[node]). ui.serve shuni beradi; qo'lda render uchun ham foydali.
+            "page" => {
+                let node = args.first().cloned().unwrap_or(Value::Nil);
+                let css = {
+                    let theme = self.theme.read();
+                    theme_to_css(&theme)
+                };
+                Ok(Value::Str(full_document(&css, &node_to_html(&node))))
+            }
             _ => Err(Flow::err(format!("ui.{} funksiyasi yo'q", func))),
         }
     }
+}
+
+// theme tokenlarini CSS custom properties'ga aylantiradi + base semantik CSS.
+//   theme {primary "#e84d8a" radius :lg}  ->  :root{--primary:#e84d8a;--radius:lg}
+fn theme_to_css(theme: &BTreeMap<String, Value>) -> String {
+    let mut out = String::new();
+    out.push_str(":root{");
+    for (k, v) in theme {
+        out.push_str("--");
+        out.push_str(k);
+        out.push(':');
+        out.push_str(&v.to_text());
+        out.push(';');
+    }
+    out.push('}');
+    // Semantik proplar uchun minimal base CSS (kind/pad/gap). To'liq dizayn
+    // tizimi keyingi bosqich; hozir tokenlarni ishlatadigan asos.
+    out.push_str(BASE_CSS);
+    out
+}
+
+// Semantik prop class'lari uchun minimal base CSS. theme tokenlariga (`--primary`
+// va h.k.) bog'lanadi, shunda `{kind::primary}` -> `.flux-primary` rang oladi.
+const BASE_CSS: &str = "\
+.flux-primary{background:var(--primary,#333);color:#fff}\
+.flux-muted{color:var(--muted,#888)}\
+.flux-panel{padding:1rem;border-radius:var(--radius,8px);background:var(--surface,#fff)}\
+.flux-badge{display:inline-block;padding:.2em .5em;border-radius:.4em;font-size:.85em}";
+
+// To'liq HTML hujjat: doctype + head (theme CSS) + body (element HTML).
+fn full_document(css: &str, body_html: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<style>{}</style></head><body>{}</body></html>",
+        css, body_html
+    )
 }
 
 // --- SSR: element daraxti -> HTML string (sof funksiya) ---
@@ -356,5 +411,26 @@ mod tests {
         let html = node_to_html(&n);
         // badge -> span.flux-badge
         assert_eq!(html, "<span class=\"flux-badge\">Yangi</span>");
+    }
+
+    #[test]
+    fn fragment_yopuvchi_tegsiz() {
+        let a = node("h1", vec![Value::Str("A".into())]);
+        let b = node("p", vec![Value::Str("B".into())]);
+        let frag = fragment(vec![a, b]);
+        // fragment teg chiqarmaydi — faqat bolalar.
+        assert_eq!(node_to_html(&frag), "<h1>A</h1><p>B</p>");
+    }
+
+    #[test]
+    fn theme_css_custom_properties() {
+        let mut theme = BTreeMap::new();
+        theme.insert("primary".to_string(), Value::Str("#e84d8a".into()));
+        theme.insert("radius".to_string(), Value::Sym("lg".into()));
+        let css = theme_to_css(&theme);
+        // sym `:` prefiksisiz (to_text), str o'z holicha.
+        assert!(css.contains("--primary:#e84d8a;"), "css: {}", css);
+        assert!(css.contains("--radius:lg;"), "css: {}", css);
+        assert!(css.contains(".flux-primary{"), "base css yo'q: {}", css);
     }
 }

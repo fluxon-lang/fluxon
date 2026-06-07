@@ -176,6 +176,12 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
 
+    // theme bloki — global dizayn tokenlari (space-separated, `tbl` kabi).
+    // CSS custom properties'ga aylanadi (`primary "#e84d8a"` -> --primary).
+    Theme {
+        tokens: Vec<(String, Expr)>,
+    },
+
     // each x in iter / each k, v in iter
     Each {
         vars: Vec<String>,

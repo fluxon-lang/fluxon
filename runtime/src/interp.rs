@@ -185,6 +185,10 @@ pub struct Interp {
     // db natijalarini post-process qilish (sym/json/bool) va auto-migration uchun.
     // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
     pub schema: Arc<RwLock<HashMap<String, BTreeMap<String, ColMeta>>>>,
+    // theme battery: global dizayn tokenlari (`theme` bloki to'ldiradi). `ui.html`
+    // ularni CSS custom properties'ga aylantiradi. Arc<RwLock> — top-level yozadi,
+    // (kelajakda) server thread'lari o'qiydi (schema naqshi).
+    pub theme: Arc<RwLock<BTreeMap<String, Value>>>,
     // .env fayl cache: LAZY — faqat birinchi `env.X` ishlatilganda joriy
     // katalogdagi `.env` o'qiladi va parse qilinadi. `env.X` umuman bo'lmasa,
     // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
@@ -241,6 +245,7 @@ impl Interp {
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),
             schema: Arc::new(RwLock::new(HashMap::new())),
+            theme: Arc::new(RwLock::new(BTreeMap::new())),
             env_file: OnceLock::new(),
             ws: Arc::new(crate::ws_mod::WsState::new()),
             reg: Arc::new(crate::reg_mod::RegState::new()),
@@ -577,21 +582,152 @@ impl Interp {
     // `ret` (erta qaytish) bo'lsa — o'sha qiymatni qaytaradi (guard-clause).
     fn exec_view_body(&self, stmts: &[Stmt], env: &Env) -> ExecResult {
         let mut nodes: Vec<Value> = Vec::new();
-        for s in stmts {
-            let v = match self.exec_stmt(s, env) {
-                Ok(v) => v,
-                Err(Flow::Return(v)) => return Ok(v),
-                Err(other) => return Err(other),
-            };
-            if crate::ui_mod::is_node_value(&v) {
-                nodes.push(v);
-            }
+        if let Some(v) = self.collect_view_nodes(stmts, env, &mut nodes)? {
+            return Ok(v); // erta `ret`
         }
         match nodes.len() {
             0 => Ok(Value::Nil),
             1 => Ok(nodes.into_iter().next().unwrap()),
             _ => Ok(crate::ui_mod::fragment(nodes)),
         }
+    }
+
+    // View statementlarini kezib element ({__node}) qiymatlarini `out`ga yig'adi.
+    // `each`/`if`/`match` ni REKURSIV kiradi — ularning tanasidagi elementlar ham
+    // yig'iladi (ro'yxat/shartli render). Erta `ret` bo'lsa Some(qiymat) qaytaradi
+    // (chaqiruvchi darhol uzadi); aks holda None.
+    fn collect_view_nodes(
+        &self,
+        stmts: &[Stmt],
+        env: &Env,
+        out: &mut Vec<Value>,
+    ) -> Result<Option<Value>, Flow> {
+        for s in stmts {
+            match s {
+                // each x in iter — har iteratsiya tanasini rekursiv yig'amiz.
+                Stmt::Each { vars, iter, body } => {
+                    if let Some(v) = self.collect_each_nodes(vars, iter, body, env, out)? {
+                        return Ok(Some(v));
+                    }
+                }
+                // if/elif/else — tanlangan shox tanasini rekursiv yig'amiz.
+                Stmt::Expr(Expr::If(ifx)) => {
+                    if let Some(block) = self.select_if_block(ifx, env)? {
+                        let inner = Scope::child_of(env);
+                        if let Some(v) = self.collect_view_nodes(&block, &inner, out)? {
+                            return Ok(Some(v));
+                        }
+                    }
+                }
+                // match — tanlangan arm tanasini rekursiv yig'amiz.
+                Stmt::Expr(Expr::Match(mx)) => {
+                    if let Some(block) = self.select_match_block(mx, env)? {
+                        let inner = Scope::child_of(env);
+                        if let Some(v) = self.collect_view_nodes(&block, &inner, out)? {
+                            return Ok(Some(v));
+                        }
+                    }
+                }
+                // ret — erta qaytish (guard-clause): qiymatni darhol qaytaramiz.
+                Stmt::Ret(opt) => {
+                    let v = match opt {
+                        Some(e) => self.eval(e, env)?,
+                        None => Value::Nil,
+                    };
+                    return Ok(Some(v));
+                }
+                // qolgan har qanday statement — oddiy bajariladi; natija node
+                // bo'lsa yig'iladi (to'g'ridan element-call, bind+chaqiruv, ...).
+                other => {
+                    let v = match self.exec_stmt(other, env) {
+                        Ok(v) => v,
+                        Err(Flow::Return(v)) => return Ok(Some(v)),
+                        Err(e) => return Err(e),
+                    };
+                    if crate::ui_mod::is_node_value(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    // each tanasini har iteratsiyada rekursiv yig'adi (exec_each'ning render
+    // varianti). skip/stop loop boshqaruvini saqlaydi; erta ret'ni uzatadi.
+    fn collect_each_nodes(
+        &self,
+        vars: &[String],
+        iter: &Expr,
+        body: &[Stmt],
+        env: &Env,
+        out: &mut Vec<Value>,
+    ) -> Result<Option<Value>, Flow> {
+        let iterable = self.eval(iter, env)?;
+        let items: Vec<(Option<Value>, Value)> = match iterable {
+            Value::List(xs) => xs.into_iter().map(|x| (None, x)).collect(),
+            Value::Map(m) => m
+                .into_iter()
+                .map(|(k, v)| (Some(Value::Str(k)), v))
+                .collect(),
+            Value::Str(s) => s
+                .chars()
+                .map(|c| (None, Value::Str(c.to_string())))
+                .collect(),
+            Value::Nil => Vec::new(), // bo'sh manba (masalan source.data hali yo'q)
+            other => {
+                return Err(Flow::err(format!(
+                    "each faqat list/map/str ustidan yuradi (view), {} berildi",
+                    other.type_name()
+                )));
+            }
+        };
+        for (key, val) in items {
+            let loop_env = Scope::child_of(env);
+            {
+                let mut s = loop_env.write();
+                if vars.len() == 2 {
+                    s.define(&vars[0], key.unwrap_or(Value::Nil), true);
+                    s.define(&vars[1], val, true);
+                } else {
+                    s.define(&vars[0], val, true);
+                }
+            }
+            match self.collect_view_nodes(body, &loop_env, out) {
+                Ok(None) => {}
+                Ok(Some(v)) => return Ok(Some(v)), // erta ret loopdan ham uzadi
+                Err(Flow::Skip) => continue,
+                Err(Flow::Stop) => break,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(None)
+    }
+
+    // if/elif zanjiridan rost shox blokini tanlaydi (eval_if'ning blok varianti).
+    fn select_if_block(&self, ifx: &IfExpr, env: &Env) -> Result<Option<Vec<Stmt>>, Flow> {
+        for (cond, block) in &ifx.arms {
+            if self.eval(cond, env)?.truthy() {
+                return Ok(Some(block.clone()));
+            }
+        }
+        Ok(ifx.else_block.clone())
+    }
+
+    // match arm blokini tanlaydi (eval_match'ning blok varianti).
+    fn select_match_block(&self, mx: &MatchExpr, env: &Env) -> Result<Option<Vec<Stmt>>, Flow> {
+        let subj = self.eval(&mx.subject, env)?;
+        for arm in &mx.arms {
+            let matched = match &arm.pattern {
+                MatchPat::Wildcard => true,
+                MatchPat::Sym(s) => matches!(&subj, Value::Sym(v) if v == s),
+                MatchPat::Int(n) => matches!(&subj, Value::Int(v) if v == n),
+            };
+            if matched {
+                return Ok(Some(arm.body.clone()));
+            }
+        }
+        Ok(None)
     }
 
     fn exec_stmt(&self, stmt: &Stmt, env: &Env) -> ExecResult {
@@ -655,6 +791,15 @@ impl Interp {
                 })
             }
             Stmt::Each { vars, iter, body } => self.exec_each(vars, iter, body, env),
+            // theme — tokenlarni eval qilib global theme state'ga yozadi.
+            Stmt::Theme { tokens } => {
+                let mut t = self.theme.write();
+                for (k, expr) in tokens {
+                    let v = self.eval(expr, env)?;
+                    t.insert(k.clone(), v);
+                }
+                Ok(Value::Nil)
+            }
             Stmt::Expr(e) => self.eval(e, env),
             // use — modul import. Ikki xil:
             //  • Batareya (`use http`, `use db`) — dispatch nom asosida ishlaydi,
@@ -993,6 +1138,11 @@ impl Interp {
                     // bo'lsa, argumentsiz reg funksiyasi sifatida chaqiramiz.
                     if id == "reg" && self.lookup(id, env).is_err() {
                         return self.reg_dispatch(name, vec![]);
+                    }
+                    // `ui.css` argumentsiz -> Field bo'lib keladi. ui o'zgaruvchi
+                    // sifatida e'lon qilinmagan bo'lsa, argumentsiz ui funksiyasi.
+                    if id == "ui" && self.lookup(id, env).is_err() {
+                        return self.arc_self().ui_dispatch(name, vec![]);
                     }
                     // `cron.run` argumentsiz -> Call emas, Field bo'lib keladi. cron
                     // o'zgaruvchi sifatida e'lon qilinmagan bo'lsa, argumentsiz cron
