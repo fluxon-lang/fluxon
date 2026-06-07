@@ -702,7 +702,9 @@ impl Parser {
         let mut items = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::RBracket) && !self.check(&Tok::Eof) {
-            items.push(self.parse_expr()?);
+            // Element pozitsiyasida ham bare tip nomi (`[str]`) sym'ga aylanadi —
+            // map qiymat pozitsiyasi (`{k:str}`) bilan izchil, schema uchun.
+            items.push(schema_type_sym(self.parse_expr()?));
             self.eat(&Tok::Comma); // vergul ixtiyoriy/tolerantlik
             self.skip_newlines();
         }
@@ -986,6 +988,34 @@ mod tests {
         match schema_type_sym(Expr::Int(5)) {
             Expr::Int(5) => {}
             _ => panic!("Int literal o'zgarmasligi kerak"),
+        }
+    }
+
+    // `s = [str int]` da ro'yxat element pozitsiyasida bare tip nomi sym'ga
+    // aylanadi — schema (`{blocks:[str]}`) uchun map qiymati bilan izchil.
+    fn first_expr(src: &str) -> Expr {
+        let prog = parse(crate::lexer::lex(src).unwrap()).unwrap();
+        match &prog[0] {
+            Stmt::Bind { value, .. } => value.clone(),
+            other => panic!("Bind kutilgan, {:?} topildi", other),
+        }
+    }
+
+    #[test]
+    fn list_element_bare_type_to_sym() {
+        match first_expr("s = [str int]") {
+            Expr::List(items) => {
+                assert!(matches!(&items[0], Expr::Sym(s) if s == "str"));
+                assert!(matches!(&items[1], Expr::Sym(s) if s == "int"));
+            }
+            other => panic!("List kutilgan, {:?} topildi", other),
+        }
+        // tip BO'LMAGAN ident ro'yxatda o'zgaruvchi sifatida qoladi.
+        match first_expr("s = [x y]") {
+            Expr::List(items) => {
+                assert!(matches!(&items[0], Expr::Ident(s) if s == "x"));
+            }
+            other => panic!("List kutilgan, {:?} topildi", other),
         }
     }
 }
