@@ -10,7 +10,17 @@
 // `ui.html node -> str`. Reaktivlik/server/source — keyingi bosqichlar.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Request, Response};
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpListener;
 
 use crate::interp::{Flow, Interp};
 use crate::value::Value;
@@ -144,6 +154,25 @@ impl Interp {
                 };
                 Ok(Value::Str(full_document(&css, &node_to_html(&node))))
             }
+            // ui.serve [app] port — frontend serverini DARHOL bloklamaydi, deferred
+            // ro'yxatga qo'shadi (http.serve naqshi). Top-level tugagach bitta umumiy
+            // event-loopda ishga tushadi. `app` argument ixtiyoriy (3-bosqichda
+            // `page` marshrutlari to'g'ridan ishlatiladi); port = oxirgi int argument.
+            "serve" => {
+                let port = args.iter().rev().find_map(|a| match a {
+                    Value::Int(n) => Some(*n as u16),
+                    _ => None,
+                });
+                let port = match port {
+                    Some(p) => p,
+                    None => return Err(Flow::err("ui.serve: port (int) bo'lishi kerak")),
+                };
+                self.pending_servers
+                    .lock()
+                    .unwrap()
+                    .push(crate::serve_mod::PendingServer::Ui { port });
+                Ok(Value::Nil)
+            }
             _ => Err(Flow::err(format!("ui.{} funksiyasi yo'q", func))),
         }
     }
@@ -184,6 +213,187 @@ fn full_document(css: &str, body_html: &str) -> String {
 <style>{}</style></head><body>{}</body></html>",
         css, body_html
     )
+}
+
+// --- ui.serve: SSR sahifa + /api/* http routes bitta portda ---
+
+// Bitta UI server uchun accept loop (http_mod::serve_loop naqshi). Umumiy
+// event-loopda spawn qilinadi (serve_mod). Bind'ni shu yerda bajaradi (deferred).
+pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Flux UI port {} bind xatosi: {}", port, e);
+            return;
+        }
+    };
+    eprintln!("Flux UI server: http://localhost:{}", port);
+
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ui accept xatosi: {}", e);
+                continue;
+            }
+        };
+        let io = TokioIo::new(stream);
+        let interp = interp.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |req: Request<Incoming>| {
+                let interp = interp.clone();
+                async move { ui_handle_request(interp, req).await }
+            });
+            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+            {
+                eprintln!("ui ulanish xatosi: {}", e);
+            }
+        });
+    }
+}
+
+// Bitta UI so'rovini boshqaradi. Dispatch tartibi:
+//   1. http `routes` (http.on bilan ro'yxatga olingan, masalan /api/*) — REST javob.
+//   2. `pages` (page bilan ro'yxatga olingan, GET) — SSR HTML sahifa.
+//   3. topilmasa — 404.
+// REST oldin: API endpoint'lar UI sahifalardan ustun (aniqroq, /api prefiksli).
+async fn ui_handle_request(
+    interp: Arc<Interp>,
+    req: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let method = req.method().as_str().to_lowercase();
+    let uri = req.uri().clone();
+    let path = uri.path().to_string();
+    let query = uri.query().unwrap_or("").to_string();
+
+    // Sarlavhalar (http_mod naqshi: lowercase, '-' -> '_').
+    let mut headers = BTreeMap::new();
+    let mut is_json = false;
+    for (k, v) in req.headers() {
+        let key = k.as_str().to_lowercase().replace('-', "_");
+        let val = v.to_str().unwrap_or("").to_string();
+        if key == "content_type" && val.contains("application/json") {
+            is_json = true;
+        }
+        headers.insert(key, Value::Str(val));
+    }
+
+    // 1) http routes (REST/API) — bor bo'lsa o'sha javob.
+    let api_match = {
+        let routes = interp.routes.lock().unwrap();
+        crate::http_mod::match_route(&routes, &method, &path)
+    };
+    // 2) page routes (SSR) — faqat GET.
+    let page_match = if method == "get" {
+        let pages = interp.pages.lock().unwrap();
+        crate::http_mod::match_route(&pages, &method, &path)
+    } else {
+        None
+    };
+
+    let (route, params, is_page) = match (api_match, page_match) {
+        (Some((r, p)), _) => (r, p, false),
+        (None, Some((r, p))) => (r, p, true),
+        (None, None) => {
+            return Ok(crate::http_mod::json_response(
+                404,
+                format!("{{\"error\":\"topilmadi: {} {}\"}}", method, path),
+            ));
+        }
+    };
+
+    // Tanani yig'amiz (page GET'da odatda bo'sh).
+    let body_bytes = match req.into_body().collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => Bytes::new(),
+    };
+    let request_value =
+        crate::http_mod::build_req(method, path, query, headers, params, body_bytes, is_json);
+    let handler = route.handler;
+
+    // Handler'ni blocking thread'da chaqiramiz (sinxron interp) — Value qaytaradi.
+    // page/REST ajratishni TASHQARIDA qilamiz (REST -> Response, page -> HTML).
+    let interp2 = interp.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        // page view'lar req argument OLISHI SHART EMAS (`page "/" -> dashboard`).
+        // Handler arity 0 bo'lsa argumentsiz, aks holda req bilan chaqiramiz —
+        // shunda ham `view home` (0 param) ham `\req -> ...` (1 param) ishlaydi.
+        let args = if is_page && interp2.fn_arity(&handler) == Some(0) {
+            vec![]
+        } else {
+            vec![request_value]
+        };
+        let v = interp2.apply(handler, args)?;
+        // page bo'lsa shu thread'da HTML render qilamiz (theme o'qish ham bu yerda),
+        // REST bo'lsa xom Value qaytaramiz (tashqarida value_to_response).
+        if is_page {
+            Ok(PageOrRest::Page(interp2.render_page(&v)))
+        } else {
+            Ok(PageOrRest::Rest(v))
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(PageOrRest::Page(html))) => Ok(html_response(&html)),
+        Ok(Ok(PageOrRest::Rest(v))) => Ok(crate::http_mod::value_to_response(v)),
+        Ok(Err(flow)) => Ok(crate::http_mod::json_response(
+            500,
+            format!("{{\"error\":\"{}\"}}", flow_message(&flow)),
+        )),
+        Err(join_err) => Ok(crate::http_mod::json_response(
+            500,
+            format!("{{\"error\":\"handler panic: {}\"}}", join_err),
+        )),
+    }
+}
+
+// Handler natijasi: page (render qilingan HTML) yoki REST (xom Value).
+enum PageOrRest {
+    Page(String),
+    Rest(Value),
+}
+
+// Flow xato xabarini oladi (json xato uchun).
+fn flow_message(flow: &Flow) -> String {
+    match flow {
+        Flow::Error(e) => e.clone(),
+        Flow::Fail { message, .. } => message.clone(),
+        _ => "noma'lum xato".to_string(),
+    }
+}
+
+// HTML javob (text/html).
+fn html_response(html: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(Full::new(Bytes::from(html.to_string())))
+        .unwrap()
+}
+
+impl Interp {
+    // Funksiya qiymatining parametr sonini qaytaradi (Value::Fn). Native yoki
+    // boshqa qiymat uchun None (arity noma'lum -> req beriladi).
+    pub fn fn_arity(&self, f: &Value) -> Option<usize> {
+        match f {
+            Value::Fn(fv) => Some(fv.params.len()),
+            _ => None,
+        }
+    }
+
+    // page handler natijasini (element daraxti) to'liq HTML hujjatga aylantiradi
+    // (theme CSS + body). ui.page bilan bir xil, lekin serve_loop ichidan.
+    pub fn render_page(&self, node: &Value) -> String {
+        let css = {
+            let theme = self.theme.read();
+            theme_to_css(&theme)
+        };
+        full_document(&css, &node_to_html(node))
+    }
 }
 
 // --- SSR: element daraxti -> HTML string (sof funksiya) ---

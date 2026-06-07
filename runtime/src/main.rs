@@ -1384,4 +1384,42 @@ doc = ui.page (home())
 (str.has doc "<body><h1>Salom</h1></body>") | (fail "body yo'q")
 "##);
     }
+
+    // --- 3-BOSQICH: page routing + ui.serve ---
+
+    // page e'lonlari pages ro'yxatiga tushadi; ui.serve deferred server qo'shadi.
+    // (Real port ochmaymiz — top-level tugashidan oldin tekshiramiz emas; bu test
+    // faqat parse + page/handler bog'lanishini tekshiradi, server bloklamaydi
+    // chunki ui.serve chaqirilmaydi.)
+    #[test]
+    fn page_declaratsiya() {
+        run(r#"
+view home
+  h1 "Bosh"
+
+view item req
+  h1 "Element ${req.params.id}"
+
+page "/" -> home
+page "/items/:id" \req -> item req
+
+# ui.serve chaqirilmaydi (test bloklamasin) — page'lar baribir ro'yxatga tushdi.
+log "page e'lonlari ok"
+"#);
+    }
+
+    // each ichida element-bola (indentatsiya): `each ... \n div \n  h2`.
+    #[test]
+    fn view_each_ichida_element_bola() {
+        run(r#"
+view list items
+  each it in items
+    div {kind::row}
+      h2 it
+
+out = ui.html (list ["A" "B"])
+want = "<div class=\"flux-row\"><h2>A</h2></div><div class=\"flux-row\"><h2>B</h2></div>"
+(out == want) | (fail "each-bola xato: ${out}")
+"#);
+    }
 }

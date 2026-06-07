@@ -189,6 +189,10 @@ pub struct Interp {
     // ularni CSS custom properties'ga aylantiradi. Arc<RwLock> — top-level yozadi,
     // (kelajakda) server thread'lari o'qiydi (schema naqshi).
     pub theme: Arc<RwLock<BTreeMap<String, Value>>>,
+    // page routing: UI marshrutlari (`page` to'ldiradi, `ui.serve` o'qiydi). HTTP
+    // `routes` bilan bir xil struktura (http_mod::Route, method doim "get") —
+    // SSR sahifa render qilish uchun. Arc<Mutex> server thread'lari bilan ulashiladi.
+    pub pages: Arc<Mutex<Vec<crate::http_mod::Route>>>,
     // .env fayl cache: LAZY — faqat birinchi `env.X` ishlatilganda joriy
     // katalogdagi `.env` o'qiladi va parse qilinadi. `env.X` umuman bo'lmasa,
     // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
@@ -246,6 +250,7 @@ impl Interp {
             db: OnceLock::new(),
             schema: Arc::new(RwLock::new(HashMap::new())),
             theme: Arc::new(RwLock::new(BTreeMap::new())),
+            pages: Arc::new(Mutex::new(Vec::new())),
             env_file: OnceLock::new(),
             ws: Arc::new(crate::ws_mod::WsState::new()),
             reg: Arc::new(crate::reg_mod::RegState::new()),
@@ -798,6 +803,24 @@ impl Interp {
                     let v = self.eval(expr, env)?;
                     t.insert(k.clone(), v);
                 }
+                Ok(Value::Nil)
+            }
+            // page — handler'ni eval qilib (view fn yoki lambda) UI marshrut
+            // ro'yxatiga qo'shadi (method doim "get"). `ui.serve` o'qiydi.
+            Stmt::Page { pattern, handler } => {
+                let h = self.eval(handler, env)?;
+                if !matches!(h, Value::Fn(_) | Value::Native(_)) {
+                    return Err(Flow::err(format!(
+                        "page handler funksiya (view nomi yoki lambda) bo'lishi kerak, {} berildi",
+                        h.type_name()
+                    )));
+                }
+                let route = crate::http_mod::Route {
+                    method: "get".to_string(),
+                    pattern: crate::http_mod::parse_pattern(pattern),
+                    handler: h,
+                };
+                self.pages.lock().unwrap().push(route);
                 Ok(Value::Nil)
             }
             Stmt::Expr(e) => self.eval(e, env),

@@ -23,6 +23,9 @@ use crate::interp::{Flow, Interp};
 pub enum PendingServer {
     Http { port: u16 },
     Ws { port: u16 },
+    // ui.serve — frontend serveri (SSR sahifa + UI client + /api/* http routes)
+    // bitta portda. http serve'ga o'xshash, lekin page marshrutlarini ham boshqaradi.
+    Ui { port: u16 },
     // cron.run — port yo'q; scheduler fon thread'da ishlaydi, bu faqat dasturni
     // ushlab turish (top-level tugaganda chiqib ketmaslik) belgisi.
     Cron,
@@ -78,6 +81,9 @@ pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
                 }
                 PendingServer::Ws { port } => {
                     tokio::spawn(async move { crate::ws_mod::serve_loop(interp, port).await })
+                }
+                PendingServer::Ui { port } => {
+                    tokio::spawn(async move { crate::ui_mod::serve_loop(interp, port).await })
                 }
                 // Cron yuqorida filtrlangan — bu yerga yetib kelmaydi.
                 PendingServer::Cron => continue,

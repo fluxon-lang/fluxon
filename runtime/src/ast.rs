@@ -182,6 +182,14 @@ pub enum Stmt {
         tokens: Vec<(String, Expr)>,
     },
 
+    // page "/yo'l" -> handler  (UI routing; http.on'ning UI varianti).
+    // handler — view nomi (`-> home`) yoki lambda (`\params -> ...`). URL ochilganda
+    // handler chaqirilib, natija (element daraxti) SSR HTML sifatida beriladi.
+    Page {
+        pattern: String,
+        handler: Expr,
+    },
+
     // each x in iter / each k, v in iter
     Each {
         vars: Vec<String>,

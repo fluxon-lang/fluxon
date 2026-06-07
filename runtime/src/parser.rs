@@ -140,6 +140,7 @@ impl Parser {
             Tok::Fn => self.parse_fn(false),
             Tok::View => self.parse_view(),
             Tok::Theme => self.parse_theme(),
+            Tok::Page => self.parse_page(),
             Tok::Exp => self.parse_exp(),
             Tok::If => Ok(Stmt::Expr(self.parse_if()?)),
             Tok::Match => Ok(Stmt::Expr(self.parse_match()?)),
@@ -305,8 +306,21 @@ impl Parser {
         self.expect(&Tok::In, "'in'")?;
         let iter = self.parse_expr()?;
         self.expect(&Tok::Newline, "each tanasi")?;
-        let body = self.parse_block()?;
+        // View ichida bo'lsa element-bola indentation rejimida (each ichidagi
+        // `div\n  h2 g` element daraxti), aks holda oddiy blok.
+        let body = self.parse_body_block()?;
         Ok(Stmt::Each { vars, iter, body })
+    }
+
+    // Blok tanasi: `in_view` bo'lsa element-daraxt rejimida (parse_view_block),
+    // aks holda oddiy blok. each/if/else/match arm view ichida elementlarni
+    // (va ularning indentatsiyalangan bolalarini) to'g'ri o'qishi uchun.
+    fn parse_body_block(&mut self) -> ParseResult<Vec<Stmt>> {
+        if self.in_view {
+            self.parse_view_block()
+        } else {
+            self.parse_block()
+        }
     }
 
     fn parse_fail(&mut self) -> ParseResult<Stmt> {
@@ -449,6 +463,55 @@ impl Parser {
         }
         self.expect(&Tok::Dedent, "theme oxiri")?;
         Ok(Stmt::Theme { tokens })
+    }
+
+    // page "/yo'l" -> handler   (UI routing). Ikki shakl:
+    //   page "/" -> home                 # handler = view nomi
+    //   page "/x/:id" \params -> ...      # handler = lambda (params olib element qaytaradi)
+    fn parse_page(&mut self) -> ParseResult<Stmt> {
+        self.advance(); // page
+        // Pattern — str literal ("/products", "/orders/:id").
+        let pattern = match self.peek().clone() {
+            Tok::Str(parts) => {
+                self.advance();
+                // Faqat oddiy literal yo'l (interpolatsiyasiz) kutiladi.
+                self.str_parts_to_literal(&parts)?
+            }
+            other => {
+                return Err(format!(
+                    "{}-qatorda page dan keyin yo'l (str) kutilgan, {:?} topildi",
+                    self.line(),
+                    other
+                ));
+            }
+        };
+        // handler: `\params -> ...` lambda YOKI `-> ifoda` (view nomi/chaqiruv).
+        let handler = if self.check(&Tok::Backslash) {
+            self.parse_lambda()?
+        } else {
+            self.expect(&Tok::Arrow, "page handler ('->' yoki lambda)")?;
+            // bir qatorli ifoda (view nomi yoki chaqiruv).
+            self.parse_expr()?
+        };
+        Ok(Stmt::Page { pattern, handler })
+    }
+
+    // Str literal bo'laklarini oddiy stringga yig'adi (interpolatsiyasiz — page
+    // yo'li statik bo'lishi kerak). Expr bo'lagi bo'lsa xato.
+    fn str_parts_to_literal(&self, parts: &[StrPart]) -> ParseResult<String> {
+        let mut s = String::new();
+        for p in parts {
+            match p {
+                StrPart::Lit(t) => s.push_str(t),
+                StrPart::Expr(_) => {
+                    return Err(format!(
+                        "{}-qatorda page yo'li interpolatsiyasiz statik str bo'lishi kerak",
+                        self.line()
+                    ));
+                }
+            }
+        }
+        Ok(s)
     }
 
     // --- ifodalar (precedence climbing) ---
@@ -885,7 +948,8 @@ impl Parser {
         let mut arms = Vec::new();
         let cond = self.parse_expr()?;
         self.expect(&Tok::Newline, "if tanasi")?;
-        let block = self.parse_block()?;
+        // parse_body_block: view ichida element-daraxt rejimi (if shoxida element).
+        let block = self.parse_body_block()?;
         arms.push((cond, block));
         let mut else_block = None;
         loop {
@@ -894,12 +958,12 @@ impl Parser {
                 self.advance();
                 let c = self.parse_expr()?;
                 self.expect(&Tok::Newline, "elif tanasi")?;
-                let b = self.parse_block()?;
+                let b = self.parse_body_block()?;
                 arms.push((c, b));
             } else if self.check(&Tok::Else) {
                 self.advance();
                 self.expect(&Tok::Newline, "else tanasi")?;
-                else_block = Some(self.parse_block()?);
+                else_block = Some(self.parse_body_block()?);
                 break;
             } else {
                 break;

@@ -45,7 +45,7 @@ pub struct Route {
 }
 
 // "/notes/:id" -> [Lit("notes"), Param("id")]. Bo'sh segmentlar tashlanadi.
-fn parse_pattern(path: &str) -> Vec<Seg> {
+pub(crate) fn parse_pattern(path: &str) -> Vec<Seg> {
     path.split('/')
         .filter(|s| !s.is_empty())
         .map(|s| {
@@ -64,7 +64,7 @@ fn path_segments(path: &str) -> Vec<&str> {
 }
 
 // method+path bo'yicha birinchi mos marshrutni topadi; topilsa params map qaytadi.
-fn match_route(
+pub(crate) fn match_route(
     routes: &[Route],
     method: &str,
     path: &str,
@@ -118,7 +118,7 @@ fn parse_query(q: &str) -> Value {
 // --- request -> Value::Map ---
 
 // req = {method, path, query:{}, headers:{}, params:{}, body:(JSON map/str)}
-fn build_req(
+pub(crate) fn build_req(
     method: String,
     path: String,
     query: String,
@@ -157,7 +157,7 @@ fn build_req(
 
 // --- Value/Flow -> hyper::Response ---
 
-fn json_response(status: u16, body: String) -> Response<Full<Bytes>> {
+pub(crate) fn json_response(status: u16, body: String) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
         .header("content-type", "application/json")
@@ -175,7 +175,7 @@ fn text_response(status: u16, body: String) -> Response<Full<Bytes>> {
 
 // Handler muvaffaqiyatli qaytargan qiymatni javobga aylantiradi.
 // `rep` -> {__resp:true status body}. Aks holda 200 + qiymat.
-fn value_to_response(v: Value) -> Response<Full<Bytes>> {
+pub(crate) fn value_to_response(v: Value) -> Response<Full<Bytes>> {
     if let Value::Map(m) = &v
         && matches!(m.get("__resp"), Some(Value::Bool(true)))
     {
