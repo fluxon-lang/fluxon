@@ -852,6 +852,7 @@ time.now               # the current time (timestamp)
 time.ago 24 :hr        # the time 24 units ago. Units: :sec :min :hr :day
 time.in  60 :min       # the time 60 units later (TTL/expiry). Same units
 time.fmt t "..."       # format a timestamp into text
+time.sleep 1           # waits 1 second (flt too — 0.5). Polling/retry backoff
 ```
 > Instead of writing raw `now() - interval '24 hours'` in a DB query, use
 > `time.ago` — it is clean and safe:

@@ -220,6 +220,15 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
             })?;
             Ok(Value::Str(fmt_unix(now_unix() + n * secs)))
         }
+        // time.sleep secs -> secs soniya kutadi (flt ham — 0.5 yarim soniya).
+        // Polling/retry backoff uchun: xato holatda qayta urinishdan oldin
+        // kutish (burst/rate-limit halqasini oldini olish). Manfiy qiymat 0 ga
+        // klamp qilinadi (Duration::from_secs_f64 manfiyda panic beradi).
+        "sleep" => {
+            let secs = arg_num(&args, 0, "time.sleep")?.max(0.0);
+            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+            Ok(Value::Nil)
+        }
         // time.fmt timestamp "..." -> matn formatlash.
         // Kirish: matn timestamp ("YYYY-MM-DD HH:MM:SS") yoki unix int.
         // Token'lar: YYYY MM DD HH mm ss
@@ -1009,6 +1018,31 @@ mod time_tests {
     fn in_rejects_bad_unit() {
         let r = time_module("in", vec![Value::Int(1), Value::Str("year".into())]);
         assert!(r.is_err(), "noma'lum birlik xato berishi kerak");
+    }
+
+    #[test]
+    fn sleep_waits_and_returns_nil() {
+        use std::time::Instant;
+        // Qisqa flt kechikish — int emas, kasr ham qabul qilinishini tekshiramiz.
+        let t0 = Instant::now();
+        let r = time_module("sleep", vec![Value::Flt(0.05)]);
+        let elapsed = t0.elapsed();
+        assert!(
+            matches!(r, Ok(Value::Nil)),
+            "time.sleep nil qaytarishi kerak"
+        );
+        assert!(
+            elapsed.as_millis() >= 45,
+            "time.sleep kamida kutilgan vaqtni kutishi kerak: {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn sleep_negative_clamps_to_zero() {
+        // Manfiy qiymat panic bermasligi kerak — 0 ga klamp qilinadi.
+        let r = time_module("sleep", vec![Value::Int(-5)]);
+        assert!(matches!(r, Ok(Value::Nil)), "manfiy sleep nil qaytarsin");
     }
 }
 

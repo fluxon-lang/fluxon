@@ -849,6 +849,7 @@ time.now               # hozirgi vaqt (timestamp)
 time.ago 24 :hr        # 24 birlik oldingi vaqt. Birlik: :sec :min :hr :day
 time.in  60 :min       # 60 birlik keyingi vaqt (TTL/expiry). Birlik bir xil
 time.fmt t "..."       # timestamp'ni matnga formatlash
+time.sleep 1           # 1 soniya kutadi (flt ham — 0.5). Polling/retry backoff
 ```
 > DB so'rovida raw `now() - interval '24 hours'` yozish o'rniga `time.ago`
 > ishlating — toza va xavfsiz:
