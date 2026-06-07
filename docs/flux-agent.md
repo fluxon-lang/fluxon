@@ -20,6 +20,7 @@ log "outside"
 [1 2 3] list · {a:1 b:2} map        # NO COMMAS, space-separated
 ```
 Str interpolation: `"$x"` (bare var only) or `"${expr}"` (any expr — `.field`, calls).
+Symbol→text (interp, `str.str`, `+`, `log`) drops the `:` prefix: `str.str :ok` → `"ok"`. Inside a list/map it keeps `:` (`[:a]` → `[:a]`).
 Truthy: only `nil`/`false` are false.
 
 ## Bindings

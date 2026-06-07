@@ -31,7 +31,7 @@ pub fn install(env: &Env) {
     add(
         "log",
         Box::new(|args: Vec<Value>| {
-            let parts: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
+            let parts: Vec<String> = args.iter().map(|v| v.to_text()).collect();
             eprintln!("{}", parts.join(" "));
             Ok(Value::Nil)
         }),
@@ -128,7 +128,7 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
                 Err(_) => Ok(Value::Nil),
             }
         }
-        "str" => Ok(Value::Str(format!("{}", arg(&args, 0, "str.str")?))),
+        "str" => Ok(Value::Str(arg(&args, 0, "str.str")?.to_text())),
         _ => Err(Flow::err(format!(
             "str modulida '{}' funksiyasi yo'q",
             func
