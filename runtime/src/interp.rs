@@ -1504,7 +1504,10 @@ impl Interp {
             && crate::ui_mod::is_element_tag(tag)
             && self.lookup(tag, env).is_err()
         {
-            let argv = self.eval_args(args, env)?;
+            // Element argumentlari: oddiy eval, LEKIN props'dagi `on`/`bind`
+            // qiymatlari NOM (handler/state), qiymat EMAS — ularni eval qilmasdan
+            // ident nomi sifatida string'ga olamiz (`bind:q` -> "q", qiymat emas).
+            let argv = self.eval_element_args(args, env)?;
             return crate::ui_mod::build_element(tag, argv);
         }
         let f = self.eval(callee, env)?;
@@ -1576,6 +1579,58 @@ impl Interp {
             out.push(self.eval(a, env)?);
         }
         Ok(out)
+    }
+
+    // Element argumentlari uchun maxsus eval: oddiy eval, LEKIN props map'idagi
+    // `on`/`bind` qiymatlari ident bo'lsa NOM (string) sifatida saqlanadi, eval
+    // QILINMAYDI. Sabab: `on:add`/`bind:q` da `add`/`q` — handler/state NOMI
+    // (analyzer/PR-5 shu nom orqali bog'lanadi), qiymat emas — `bind:q` da `q`
+    // qiymati (`""`) emas, "q" nomi marker'ga ketishi kerak.
+    fn eval_element_args(&self, args: &[Expr], env: &Env) -> Result<Vec<Value>, Flow> {
+        let mut out = Vec::with_capacity(args.len());
+        for a in args {
+            match a {
+                Expr::Map(entries) => out.push(self.eval_element_props(entries, env)?),
+                other => out.push(self.eval(other, env)?),
+            }
+        }
+        Ok(out)
+    }
+
+    // Element props map'ini eval qiladi, `on`/`bind` ident qiymatini nom-string
+    // qilib saqlaydi (eval qilmaydi). Qolgan kalitlar oddiy eval.
+    fn eval_element_props(&self, entries: &[MapEntry], env: &Env) -> Result<Value, Flow> {
+        let mut m = BTreeMap::new();
+        for en in entries {
+            match en {
+                MapEntry::Pair { key, value } if key == "on" || key == "bind" => {
+                    // Ident bo'lsa nomni string sifatida (eval emas); lambda/boshqa
+                    // bo'lsa — sym sifatida belgisini saqlaymiz (handler nomi yo'q).
+                    let marker = match value {
+                        Expr::Ident(name) => Value::Str(name.clone()),
+                        Expr::Sym(s) => Value::Sym(s.clone()),
+                        // lambda yoki murakkab ifoda — nom yo'q; mavjudlik belgisi.
+                        _ => Value::Sym("_".to_string()),
+                    };
+                    m.insert(key.clone(), marker);
+                }
+                MapEntry::Pair { key, value } => {
+                    m.insert(key.clone(), self.eval(value, env)?);
+                }
+                MapEntry::Dynamic { key, value } => {
+                    let k = self.eval(key, env)?.to_text();
+                    m.insert(k, self.eval(value, env)?);
+                }
+                MapEntry::Spread(ex) => {
+                    if let Value::Map(other) = self.eval(ex, env)? {
+                        for (k, v) in other {
+                            m.insert(k, v);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Value::Map(m))
     }
 
     pub fn apply(&self, f: Value, args: Vec<Value>) -> EvalResult {

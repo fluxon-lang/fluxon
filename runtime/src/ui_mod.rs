@@ -126,6 +126,119 @@ pub fn fragment(children: Vec<Value>) -> Value {
     Value::Map(node)
 }
 
+// --- PR-4b: island markerlash (node-daraxt walk) ---
+//
+// Render {__node} daraxtni qurgach, uni BIR MARTA walk qilib "island"larni
+// belgilaymiz. Falsafa (FRONTEND-PROD-ARCHITECTURE 1.2): interaktivlik izi
+// (`on:`/`bind:` props) bo'lgan eng kichik o'rovchi element = ISLAND ILDIZI
+// (client JS kerak), qolgani sof statik (SSR, 0 JS).
+//
+// Bu yondashuv AST-indeks emas — to'g'ridan render natijasida ishlaydi, shuning
+// uchun analyzer/render indeks-moslik muammosi YO'Q. `on:`/`bind:` node props'da
+// (build_node saqlaydi). Sof `<-` reaktiv-o'qish izi (event'siz) bu walk'da
+// ko'rinmaydi — uni analyzer view-flag qoplaydi (interp render'da view interaktiv
+// bo'lsa-yu walk hech island topmasa, butun view island bo'ladi — keyingi PR).
+//
+// Natija: island ildiz {__node}ga `__island:N`, on:/bind: elementga `__on`/`__bind`.
+
+// Butun node daraxtni walk qilib island markerlar qo'shadi. `next_id` — keyingi
+// island raqami (har sahifada 1, 2, ...). Qaytaradi: topilgan island soni.
+pub fn mark_islands(node: &mut Value, next_id: &mut u32) -> u32 {
+    mark_walk(node, next_id, false)
+}
+
+// Rekursiv walk. `inside_island` — biz allaqachon island ichidamizmi (shunda
+// ichki elementga YANGI island bermaymiz — bitta island, ko'p emas).
+fn mark_walk(node: &mut Value, next_id: &mut u32, inside_island: bool) -> u32 {
+    let Value::Map(m) = node else {
+        return 0;
+    };
+    if !matches!(m.get("__node"), Some(Value::Bool(true))) {
+        return 0;
+    }
+
+    // Fragment (ko'rinmas o'rov) — HTML'da tegi yo'q, shuning uchun island ildizi
+    // BO'LA OLMAYDI (marker qo'yadigan element yo'q). Faqat bolalariga o'tamiz.
+    let is_fragment = matches!(m.get("tag"), Some(Value::Str(t)) if t == "__fragment");
+
+    // Bu element o'zida interaktivlik izi (on:/bind:) bormi.
+    let (on_marker, bind_marker) = extract_event_bind(m);
+    let self_interactive = on_marker.is_some() || bind_marker.is_some();
+
+    // Subtree interaktivmi (o'zi yoki biror bolasi). Island ildizini aniqlash
+    // uchun: agar biz island ichida EMASMIZ va subtree interaktiv bo'lsa, bu
+    // element island ildizi (eng kichik o'rovchi — chunki yuqoridan tushganimizda
+    // eng birinchi interaktiv element shu).
+    let subtree_interactive = self_interactive || children_interactive(m);
+
+    let mut count = 0;
+    let mut now_inside = inside_island;
+
+    if !inside_island && !is_fragment && subtree_interactive {
+        // Island ildizi shu element.
+        let id = *next_id;
+        *next_id += 1;
+        m.insert("__island".to_string(), Value::Int(id as i64));
+        count += 1;
+        now_inside = true;
+    }
+
+    // on:/bind: markerlarini shu elementga qo'shamiz (island ichida bo'lsa ham).
+    if let Some(on) = on_marker {
+        m.insert("__on".to_string(), Value::Str(on));
+    }
+    if let Some(b) = bind_marker {
+        m.insert("__bind".to_string(), Value::Str(b));
+    }
+
+    // Bolalarga rekursiv (island ichidamizmi holatini uzatib).
+    if let Some(Value::List(children)) = m.get_mut("children") {
+        for c in children.iter_mut() {
+            count += mark_walk(c, next_id, now_inside);
+        }
+    }
+    count
+}
+
+// Element props'idan on:/bind: izini ajratadi (marker string sifatida).
+// on -> "event:handler" (event default "click"); bind -> "state_nomi".
+fn extract_event_bind(node: &BTreeMap<String, Value>) -> (Option<String>, Option<String>) {
+    let Some(Value::Map(props)) = node.get("props") else {
+        return (None, None);
+    };
+    // on: qiymati (eval_element_props bergan): Str=handler nomi, Sym=event/belgi.
+    // Marker formati "event:handler". PR-4b'da event default "click" (aniq event
+    // sintaksisi keyingi PR); handler nomi bo'lsa o'shani, lambda bo'lsa "_".
+    let on = props.get("on").map(|v| match v {
+        Value::Str(handler) => format!("click:{}", handler),
+        Value::Sym(_) => "click:_".to_string(),
+        _ => "click:_".to_string(),
+    });
+    // bind: qiymati — state nomi (Str). eval_element_props ident'ni nom qilib saqlaydi.
+    let bind = props.get("bind").map(|v| v.to_text());
+    (on, bind)
+}
+
+// Node bolalaridan birortasi interaktivmi (rekursiv, o'zini hisobga olmasdan).
+fn children_interactive(node: &BTreeMap<String, Value>) -> bool {
+    let Some(Value::List(children)) = node.get("children") else {
+        return false;
+    };
+    children.iter().any(node_interactive)
+}
+
+// Node (yoki uning subtree'si) interaktivmi (on:/bind: izi bor).
+fn node_interactive(v: &Value) -> bool {
+    let Value::Map(m) = v else {
+        return false;
+    };
+    if !matches!(m.get("__node"), Some(Value::Bool(true))) {
+        return false;
+    }
+    let (on, bind) = extract_event_bind(m);
+    on.is_some() || bind.is_some() || children_interactive(m)
+}
+
 // `ui.*` dispatch — Interp'ga ulanadi (kelajakda `ui.serve` state kerak).
 // MVP'da faqat `ui.html`. eval_call shu yerga yo'naltiradi.
 impl Interp {
@@ -135,7 +248,9 @@ impl Interp {
             // hujjat EMAS — faqat element daraxti HTML'i (3-bosqich ui.serve to'liq
             // sahifani theme + body bilan birlashtiradi). Argument {__node} yoki nil.
             "html" => {
-                let node = args.first().cloned().unwrap_or(Value::Nil);
+                let mut node = args.first().cloned().unwrap_or(Value::Nil);
+                let mut id = 1;
+                mark_islands(&mut node, &mut id);
                 Ok(Value::Str(node_to_html(&node)))
             }
             // ui.css -> str: theme tokenlaridan CSS custom properties + base CSS.
@@ -145,14 +260,10 @@ impl Interp {
                 Ok(Value::Str(theme_to_css(&theme)))
             }
             // ui.page node -> str: to'liq HTML hujjat (doctype + head[theme css] +
-            // body[node]). ui.serve shuni beradi; qo'lda render uchun ham foydali.
+            // body[node] + island markerlar + window.__fx). render_page bilan bir xil.
             "page" => {
                 let node = args.first().cloned().unwrap_or(Value::Nil);
-                let css = {
-                    let theme = self.theme.read();
-                    theme_to_css(&theme)
-                };
-                Ok(Value::Str(full_document(&css, &node_to_html(&node))))
+                Ok(Value::Str(self.render_page(&node)))
             }
             // ui.serve [app] port — frontend serverini DARHOL bloklamaydi, deferred
             // ro'yxatga qo'shadi (http.serve naqshi). Top-level tugagach bitta umumiy
@@ -206,12 +317,35 @@ const BASE_CSS: &str = "\
 .flux-badge{display:inline-block;padding:.2em .5em;border-radius:.4em;font-size:.85em}";
 
 // To'liq HTML hujjat: doctype + head (theme CSS) + body (element HTML).
-fn full_document(css: &str, body_html: &str) -> String {
+// island_count > 0 bo'lsa body oxiriga `window.__fx` bootstrap script qo'shiladi
+// (PR-4b minimal: island ro'yxati + mode; PR-5 to'ldiradi). 0 island = 0 JS
+// (sof statik sahifa CDN-cacheable).
+fn full_document(css: &str, body_html: &str, island_count: u32) -> String {
+    let script = fx_bootstrap_script(island_count);
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<style>{}</style></head><body>{}</body></html>",
-        css, body_html
+<style>{}</style></head><body>{}{}</body></html>",
+        css, body_html, script
+    )
+}
+
+// PR-4b minimal bootstrap: island ro'yxati + mode (HAL QILINGAN QARORLAR:
+// hammasi server-driven). 0 island = script YO'Q (sof statik, 0 JS).
+fn fx_bootstrap_script(island_count: u32) -> String {
+    if island_count == 0 {
+        return String::new();
+    }
+    let mut islands = String::new();
+    for i in 1..=island_count {
+        if i > 1 {
+            islands.push(',');
+        }
+        islands.push_str(&format!("\"{}\":{{\"mode\":\"server\"}}", i));
+    }
+    format!(
+        "<script>window.__fx={{\"islands\":{{{}}}}}</script>",
+        islands
     )
 }
 
@@ -388,11 +522,15 @@ impl Interp {
     // page handler natijasini (element daraxti) to'liq HTML hujjatga aylantiradi
     // (theme CSS + body). ui.page bilan bir xil, lekin serve_loop ichidan.
     pub fn render_page(&self, node: &Value) -> String {
+        // Island markerlar (PR-4b) — node clone'iga qo'shamiz (kiruvchi o'zgarmaydi).
+        let mut node = node.clone();
+        let mut next_id = 1u32;
+        let island_count = mark_islands(&mut node, &mut next_id);
         let css = {
             let theme = self.theme.read();
             theme_to_css(&theme)
         };
-        full_document(&css, &node_to_html(node))
+        full_document(&css, &node_to_html(&node), island_count)
     }
 }
 
@@ -423,6 +561,8 @@ pub fn node_to_html(v: &Value) -> String {
             out.push('<');
             out.push_str(html_tag);
             out.push_str(&attrs_html(tag, m.get("props")));
+            // PR-4b island markerlari (mark_islands qo'ygan): data-fx-*.
+            out.push_str(&fx_markers_html(m));
             if is_void_tag(html_tag) {
                 out.push_str(" />");
                 return out;
@@ -517,6 +657,22 @@ fn base_class_attr(tag: &str, extra: &[String]) -> String {
         return String::new();
     }
     format!(" class=\"{}\"", escape_attr(&classes.join(" ")))
+}
+
+// PR-4b: island markerlarini (mark_islands qo'ygan `__island`/`__on`/`__bind`)
+// data-fx-* atributlariga aylantiradi. PR-5 bu markerlarni client'da ishlatadi.
+fn fx_markers_html(node: &BTreeMap<String, Value>) -> String {
+    let mut out = String::new();
+    if let Some(Value::Int(id)) = node.get("__island") {
+        out.push_str(&format!(" data-fx-island=\"{}\"", id));
+    }
+    if let Some(Value::Str(on)) = node.get("__on") {
+        out.push_str(&format!(" data-fx-on=\"{}\"", escape_attr(on)));
+    }
+    if let Some(Value::Str(b)) = node.get("__bind") {
+        out.push_str(&format!(" data-fx-bind=\"{}\"", escape_attr(b)));
+    }
+    out
 }
 
 // HTML matn kontekstida xavfli belgilarni escape qiladi.
@@ -642,5 +798,86 @@ mod tests {
         assert!(css.contains("--primary:#e84d8a;"), "css: {}", css);
         assert!(css.contains("--radius:lg;"), "css: {}", css);
         assert!(css.contains(".flux-primary{"), "base css yo'q: {}", css);
+    }
+
+    // --- PR-4b: island markerlash ---
+
+    // on: bo'lgan element -> island ildizi, marker.
+    fn props_node(tag: &str, props: Vec<(&str, Value)>, text: Option<&str>) -> Value {
+        let mut p = BTreeMap::new();
+        for (k, v) in props {
+            p.insert(k.to_string(), v);
+        }
+        let mut args = vec![];
+        if let Some(t) = text {
+            args.push(Value::Str(t.into()));
+        }
+        args.push(Value::Map(p));
+        node(tag, args)
+    }
+
+    #[test]
+    fn statik_element_island_emas() {
+        let mut n = node("h1", vec![Value::Str("Salom".into())]);
+        let mut id = 1;
+        let cnt = mark_islands(&mut n, &mut id);
+        assert_eq!(cnt, 0, "statik element island bermasligi kerak");
+        assert!(!node_to_html(&n).contains("data-fx"));
+    }
+
+    #[test]
+    fn on_element_island_boladi() {
+        let mut n = props_node("btn", vec![("on", Value::Str("add".into()))], Some("Qo'sh"));
+        let mut id = 1;
+        let cnt = mark_islands(&mut n, &mut id);
+        assert_eq!(cnt, 1, "on: bo'lgan element island ildizi");
+        let html = node_to_html(&n);
+        assert!(html.contains("data-fx-island=\"1\""), "html: {}", html);
+        assert!(html.contains("data-fx-on=\"click:add\""), "html: {}", html);
+    }
+
+    #[test]
+    fn eng_kichik_orovchi_island() {
+        // Tashqi statik div ichida interaktiv btn -> island ildizi DIV (eng kichik
+        // o'rovchi interaktiv), ichidagi btn YANGI island OLMAYDI (bitta island).
+        let btn = props_node("btn", vec![("on", Value::Str("go".into()))], Some("Bos"));
+        let div = node("div", vec![Value::List(vec![btn])]);
+        let mut n = div;
+        let mut id = 1;
+        let cnt = mark_islands(&mut n, &mut id);
+        assert_eq!(cnt, 1, "faqat bitta island (div), btn alohida emas");
+        let html = node_to_html(&n);
+        // div island, btn faqat data-fx-on (island emas).
+        assert!(html.contains("<div data-fx-island=\"1\""), "html: {}", html);
+        let island_count = html.matches("data-fx-island").count();
+        assert_eq!(island_count, 1, "bitta island bo'lishi kerak: {}", html);
+    }
+
+    #[test]
+    fn bind_marker() {
+        let mut n = props_node("input", vec![("bind", Value::Str("q".into()))], None);
+        let mut id = 1;
+        mark_islands(&mut n, &mut id);
+        let html = node_to_html(&n);
+        assert!(html.contains("data-fx-bind=\"q\""), "html: {}", html);
+    }
+
+    #[test]
+    fn fragment_island_olmaydi() {
+        // Fragment (ko'rinmas o'rov) island ildizi bo'la olmaydi; bolasi (btn) bo'ladi.
+        let btn = props_node("btn", vec![("on", Value::Str("x".into()))], Some("B"));
+        let mut frag = fragment(vec![node("h1", vec![Value::Str("S".into())]), btn]);
+        let mut id = 1;
+        let cnt = mark_islands(&mut frag, &mut id);
+        assert_eq!(cnt, 1, "fragment emas, btn island bo'ladi");
+    }
+
+    #[test]
+    fn bootstrap_script_island_bilan() {
+        assert_eq!(fx_bootstrap_script(0), "", "0 island -> script yo'q");
+        let s = fx_bootstrap_script(2);
+        assert!(s.contains("window.__fx"), "s: {}", s);
+        assert!(s.contains("\"1\":{\"mode\":\"server\"}"), "s: {}", s);
+        assert!(s.contains("\"2\":{\"mode\":\"server\"}"), "s: {}", s);
     }
 }

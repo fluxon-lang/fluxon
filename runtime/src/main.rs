@@ -1436,6 +1436,46 @@ view counter
         );
     }
 
+    // PR-4b: island markerlar SSR HTML'da (ui.page). Interaktiv qism marker oladi,
+    // statik qism 0 JS.
+    #[test]
+    fn island_markerlar_ssr() {
+        run(r##"
+view shop
+  q <- ""
+  h1 "Do'kon"
+  div {kind::panel}
+    input {bind:q placeholder:"qidir"}
+    btn "Qo'sh" {on:add}
+
+doc = ui.page (shop())
+# statik h1 markersiz
+(str.has doc "<h1>Do'kon</h1>") | (fail "h1 statik bo'lishi kerak: ${doc}")
+# div island ildizi
+(str.has doc "data-fx-island=\"1\"") | (fail "island marker yo'q: ${doc}")
+# bind state NOMI (qiymat emas)
+(str.has doc "data-fx-bind=\"q\"") | (fail "bind nomi yo'q: ${doc}")
+# on handler NOMI
+(str.has doc "data-fx-on=\"click:add\"") | (fail "on marker yo'q: ${doc}")
+# bootstrap script
+(str.has doc "window.__fx") | (fail "window.__fx yo'q: ${doc}")
+"##);
+    }
+
+    // PR-4b: sof statik sahifa 0 JS (CDN-cacheable invariant).
+    #[test]
+    fn sof_statik_nol_js() {
+        run(r#"
+view home
+  h1 "Salom"
+  p "statik"
+
+doc = ui.page (home())
+(!(str.has doc "data-fx")) | (fail "statik sahifada marker bo'lmasligi kerak")
+(!(str.has doc "window.__fx")) | (fail "statik sahifada JS bo'lmasligi kerak")
+"#);
+    }
+
     // each ichida element-bola (indentatsiya): `each ... \n div \n  h2`.
     #[test]
     fn view_each_ichida_element_bola() {
