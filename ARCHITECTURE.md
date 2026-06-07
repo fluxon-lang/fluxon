@@ -4,7 +4,7 @@ Bu hujjat `runtime/` ichidagi interpretator qanday qurilganini tushuntiradi.
 Contributor (odam yoki AI) yangi imkoniyat qo'shishdan oldin shu yerni o'qisin.
 
 > Tilning **o'zi** qanday ishlashi (sintaksis/semantika): `docs/flux-agent.md`
-> (ixcham) yoki `docs/flux-human.md` (batafsil). Bu hujjat — **implementatsiya**
+> (ixcham) yoki `docs/flux-human.uz.md` (batafsil). Bu hujjat — **implementatsiya**
 > haqida.
 
 ---

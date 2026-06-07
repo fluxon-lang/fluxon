@@ -1,16 +1,19 @@
 # Flux
 
-**AI agentlar yaxshi yozadigan backend dasturlash tili.**
+> 🌐 **Language:** English (current) · [O'zbek](README.uz.md)
 
-> Falsafa: *"Til AI'ga moslashadi, AI tilga emas."*
+**A backend programming language that AI agents write well.**
 
-Hozirgi dasturlash tillari odamlar uchun yaratilgan. Ularda bir ishni o'nlab
-yo'l bilan qilish mumkin, sintaksis qulay lekin token-isrofgar, va eng oddiy
-narsa ham qo'shimcha paket talab qiladi. AI agent uchun bu — shovqin: har
-"tanlov nuqtasi" potensial xato, har ortiqcha belgi sarflangan kontekst.
+> Philosophy: *"The language adapts to the AI, not the AI to the language."*
 
-Flux boshqacha qurilgan — AI nimani oson va ishonchli yozishini o'lchab, tilni
-shunga moslab.
+Today's programming languages were built for humans. They let you do one thing
+a dozen different ways, with syntax that is convenient but token-wasteful, where
+even the simplest task requires an extra package. For an AI agent that is noise:
+every "decision point" is a potential mistake, every redundant character is
+wasted context.
+
+Flux is built differently — by measuring what AI writes easily and reliably, and
+shaping the language around that.
 
 ```fx
 use http db
@@ -29,91 +32,93 @@ http.on :get "/notes" \req ->
 http.serve 8080
 ```
 
-Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
+That is the whole application. No package installs, no connection code, no
+boilerplate.
 
 ---
 
-## Asosiy tamoyillar
+## Core principles
 
-1. **Bir ish = bir yo'l (canonical form).** Takrorlash uchun faqat `each`.
-   Chiqarish uchun faqat bitta usul. AI "qaysi yo'lni tanlay?" deb o'ylamaydi —
-   tanlov yo'q, xato kam.
+1. **One task = one way (canonical form).** The only way to iterate is `each`.
+   There is only one way to output. The AI never wonders "which way should I
+   choose?" — there is no choice, so there are fewer mistakes.
 
-2. **Kam token, lekin tushunarli.** Sintaksis qisqa, lekin shifrli emas.
-   Kalit so'zlar to'liq (`each`, `match`, `else`) — Flux'ni birinchi marta
-   ko'rgan AI ham darhol tushunadi.
+2. **Few tokens, but readable.** The syntax is short, but not cryptic. Keywords
+   are spelled out in full (`each`, `match`, `else`) — an AI seeing Flux for the
+   first time understands it immediately.
 
-3. **Batteries included.** `http`, `db` (tranzaksiya + concurrency kafolati),
-   `ai`, `reg` (tool registry), `ws`, `cron`, `queue`, `sh` (shell), `json` — hammasi tilning
-   ichida. `npm install` yo'q. Compile vaqtida faqat ishlatilgani binary'ga
-   kiradi (tree-shaking).
+3. **Batteries included.** `http`, `db` (transactions + concurrency guarantees),
+   `ai`, `reg` (tool registry), `ws`, `cron`, `queue`, `sh` (shell), `json` —
+   all built into the language. No `npm install`. At compile time only what is
+   used ends up in the binary (tree-shaking).
 
-4. **AI — birinchi darajali primitiv.** LLM chaqirish — kalit so'z, SDK emas:
+4. **AI is a first-class primitive.** Calling an LLM is a keyword, not an SDK:
    ```fx
-   r = ai.json "buyurtmani ajrat: ${text}" {intent::a items:[{product:str qty:int}]}
+   r = ai.json "extract the order: ${text}" {intent::a items:[{product:str qty:int}]}
    if r._.conf > 0.85
-     auto r          # ishonch metadata tilning ichida
+     auto r          # confidence metadata is built into the language
    ```
 
 ---
 
-## Bu til qanday dizayn qilindi (metodologiya)
+## How this language was designed (methodology)
 
-Flux **stress-test orqali** qurildi — taxmin bilan emas, dalil bilan:
+Flux was built through **stress testing** — with evidence, not guesswork:
 
-1. **Tadqiqot:** AI qaysi kod-naqshlarni eng ishonchli va kam token bilan
-   yozishini o'rgandik (deklarativ DSL'lar, canonical form, batteries —
-   `research/` papkasiga qarang).
-2. **Ixtiro:** turli AI modellariga "AI uchun til ixtiro qil" topshirig'i
-   berildi. Mustaqil ravishda bir nechta model bir xil g'oyalarga keldi —
-   konvergensiya "to'g'ri" dizayn borligini ko'rsatdi.
-3. **Sinov:** Flux spec'i tilni **hech ko'rmagan** AI modellariga berilib
-   (opus, sonnet, haiku), real loyihalar yozdirildi. Har model topgan
-   "spec bo'shliqlari" tilning haqiqiy kamchiligini ko'rsatdi.
-4. **Sayqal:** topilgan bo'shliqlar yopildi, qayta sinaldi. Bir necha raundda
-   til chuqurlashdi — kichik utilitalardan (URL qisqartiruvchi) katta
-   tizimlargacha (e-commerce, realtime chat).
+1. **Research:** we studied which code patterns AI writes most reliably and with
+   the fewest tokens (declarative DSLs, canonical form, batteries — see the
+   `research/` folder).
+2. **Invention:** several AI models were each given the task "invent a language
+   for AI." Independently, multiple models converged on the same ideas — and
+   that convergence showed there is a "correct" design.
+3. **Testing:** the Flux spec was handed to AI models that had **never seen** the
+   language (opus, sonnet, haiku), which were asked to write real projects. Each
+   "spec gap" a model hit exposed a real shortcoming of the language.
+4. **Refinement:** the gaps found were closed, then re-tested. Over several
+   rounds the language deepened — from small utilities (URL shortener) to large
+   systems (e-commerce, realtime chat).
 
-Bu jarayon `research/` papkasida to'liq saqlangan.
+This whole process is preserved in full in the `research/` folder.
 
 ---
 
-## Repo tuzilishi
+## Repository structure
 
 ```
 flux-lang/
 ├── docs/
-│   ├── flux-human.md      # batafsil qo'llanma (odamlar uchun)
-│   └── flux-agent.md      # ixcham spec (AI agent uchun — ~2700 token)
-├── examples/              # ishlaydigan misol loyihalar
-│   ├── support-tickets/   # AI klassifikatsiya + confidence routing
-│   ├── ecommerce/         # katalog, savat, checkout (tranzaksiya), AI tavsiya
-│   └── chat/              # realtime websocket, AI moderatsiya
-└── research/              # til qanday tug'ilgani — dizayn eksperimentlari
+│   ├── flux-human.md      # detailed guide (for humans, English)
+│   ├── flux-human.uz.md   # detailed guide (for humans, Uzbek)
+│   └── flux-agent.md      # compact spec (for AI agents — ~2700 tokens)
+├── examples/              # working example projects
+│   ├── support-tickets/   # AI classification + confidence routing
+│   ├── ecommerce/         # catalog, cart, checkout (transaction), AI recommendations
+│   └── chat/              # realtime websocket, AI moderation
+└── research/              # how the language was born — design experiments
     └── language-design/
-        ├── round1-invented-langs/   # AI'lar til ixtiro qiladi
-        ├── round2-whatsapp/         # real loyiha bilan ixtiro
-        └── validation-tests/        # Flux'ni toza AI'larda sinash
+        ├── round1-invented-langs/   # AIs invent languages
+        ├── round2-whatsapp/         # invention driven by a real project
+        └── validation-tests/        # testing Flux on fresh AIs
 ```
 
 ---
 
-## Hozirgi holat
+## Current status
 
-🚧 **Faol ishlab chiqilmoqda.** Til yadrosi ishlaydigan **runtime** (Rust,
-tree-walking interpreter) mavjud — `.fx` fayllarni ishga tushira oladi.
+🚧 **Under active development.** A working **runtime** for the language core
+exists (Rust, tree-walking interpreter) — it can run `.fx` files.
 
-**Ishlaydi:**
+**Working:**
 
-- Til yadrosi: tiplar, bindings (`=`/`<-`), `fn`/lambda/closure, `if`/`each`/
-  `match`, operatorlar, string interpolatsiya, `fail`/`!`/`??`/`|>`.
-- Yadro modullari: `str`, `math`, `rand`, `json`, `time`, `env`.
-- Batareyalar: **`http`** (server + klient), **`db`** (SQLite, tranzaksiya,
+- Language core: types, bindings (`=`/`<-`), `fn`/lambda/closure, `if`/`each`/
+  `match`, operators, string interpolation, `fail`/`!`/`??`/`|>`.
+- Core modules: `str`, `math`, `rand`, `json`, `time`, `env`.
+- Batteries: **`http`** (server + client), **`db`** (SQLite, transactions,
   schema, auto-migration).
 
-**Hali yo'q (spec'da bor):** `ai`, `reg`, `ws`, `cron`, `queue`.
+**Not yet (in the spec):** `ai`, `reg`, `ws`, `cron`, `queue`.
 
-Ishga tushirish:
+Run it:
 
 ```sh
 cd runtime
@@ -122,24 +127,24 @@ cargo run -- run examples/demo.fx
 
 ---
 
-## Hissa qo'shish
+## Contributing
 
-Flux ochiq manba — yordamingizni kutamiz.
+Flux is open source — we welcome your help.
 
-- **Odam contributor'lar:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, build,
-  test, PR jarayoni.
-- **AI agentlar (Claude Code va h.k.):** [`CLAUDE.md`](CLAUDE.md) — qoidalar,
-  navigatsiya, "qayer nima".
-- **Runtime ichki tuzilishi:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- **Human contributors:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, build,
+  test, PR process.
+- **AI agents (Claude Code etc.):** [`CLAUDE.md`](CLAUDE.md) — rules,
+  navigation, "what is where".
+- **Runtime internals:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
-## Litsenziya
+## License
 
 MIT
 
 ---
 
-> **Eslatma.** Flux mavjud global dasturlash tillarini almashtirish yoki
-> ulardan o'tib ketish uchun yaratilmayapti. Maqsad bitta: **AI eng yaxshi
-> biladigan va yoqtiradigan dasturlash tili** bo'lish.
+> **Note.** Flux is not being built to replace or outcompete existing global
+> programming languages. The goal is just one: to be **the programming language
+> AI knows best and likes most**.

@@ -59,7 +59,8 @@ Yangi battery yoki o'zgarish kiritishdan oldin tegishli faylni biling:
 | CLI kirish nuqtasi + integratsiya testlari | `runtime/src/main.rs` |
 
 **Spec'ni o'qish kerak bo'lsa:** `docs/flux-agent.md` (~2700 token, ixcham —
-til qanday ishlashini AI uchun yozilgan). Batafsil: `docs/flux-human.md`.
+til qanday ishlashini AI uchun yozilgan). Batafsil: `docs/flux-human.uz.md`
+(o'zbekcha) yoki `docs/flux-human.md` (inglizcha).
 
 **Battery qo'shish/o'zgartirish naqshi** uchun → [`ARCHITECTURE.md`](ARCHITECTURE.md)
 ning "Yangi battery qo'shish" bo'limi. Naqsh `http_mod.rs` va `db_mod.rs` da
