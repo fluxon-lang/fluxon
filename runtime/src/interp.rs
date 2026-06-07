@@ -193,6 +193,10 @@ pub struct Interp {
     // `routes` bilan bir xil struktura (http_mod::Route, method doim "get") —
     // SSR sahifa render qilish uchun. Arc<Mutex> server thread'lari bilan ulashiladi.
     pub pages: Arc<Mutex<Vec<crate::http_mod::Route>>>,
+    // view tahlil rejalari (analyzer natijasi): view nomi -> ViewPlan (interaktivmi,
+    // bind tabiati). `run`/`ui.serve` startup'da bir marta to'ldiradi (har request
+    // emas). Hozir validatsiya uchun; 4b'da render (island marker) o'qiydi.
+    pub view_plans: Arc<RwLock<HashMap<String, crate::ui_analyze::ViewPlan>>>,
     // .env fayl cache: LAZY — faqat birinchi `env.X` ishlatilganda joriy
     // katalogdagi `.env` o'qiladi va parse qilinadi. `env.X` umuman bo'lmasa,
     // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
@@ -251,6 +255,7 @@ impl Interp {
             schema: Arc::new(RwLock::new(HashMap::new())),
             theme: Arc::new(RwLock::new(BTreeMap::new())),
             pages: Arc::new(Mutex::new(Vec::new())),
+            view_plans: Arc::new(RwLock::new(HashMap::new())),
             env_file: OnceLock::new(),
             ws: Arc::new(crate::ws_mod::WsState::new()),
             reg: Arc::new(crate::reg_mod::RegState::new()),
@@ -373,6 +378,19 @@ impl Interp {
                 }
                 Stmt::Tbl { name, columns } => self.register_tbl(name, columns),
                 _ => {}
+            }
+        }
+        // View analyzer (frontend): har view'ni statik tahlil qilib interaktivmi
+        // yoki sof statikmi aniqlaydi (island vs SSR). Server-only qiymat noto'g'ri
+        // ishlatilsa shu yerda QATTIQ xato. Bir marta (hoisting'dan keyin, exec
+        // oldidan), har request emas. View bo'lmasa bo'sh — qo'shimcha yuk yo'q.
+        match crate::ui_analyze::analyze_program(prog) {
+            Ok(plans) => *self.view_plans.write() = plans,
+            Err(e) => {
+                return Err(format!(
+                    "frontend tahlil xatosi [{}]: {}",
+                    e.view, e.message
+                ));
             }
         }
         for stmt in prog {

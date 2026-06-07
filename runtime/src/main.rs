@@ -23,6 +23,7 @@ mod queue_mod;
 mod reg_mod;
 mod serve_mod;
 mod token;
+mod ui_analyze;
 mod ui_mod;
 mod value;
 mod ws_mod;
@@ -1406,6 +1407,33 @@ page "/items/:id" \req -> item req
 # ui.serve chaqirilmaydi (test bloklamasin) — page'lar baribir ro'yxatga tushdi.
 log "page e'lonlari ok"
 "#);
+    }
+
+    // Analyzer run'da chaqilib view_plans to'ldirishini tekshiradi: interaktiv
+    // view (on:) interactive=true, statik view interactive=false.
+    #[test]
+    fn analyzer_run_da_view_plans_toldiradi() {
+        let src = r#"
+view home
+  h1 "Salom"
+
+view counter
+  n <- 0
+  btn "+1" {on:bump}
+"#;
+        let toks = lexer::lex(src).expect("lex");
+        let prog = parser::parse(toks).expect("parse");
+        let interp = interp::Interp::new_arc();
+        interp.run(&prog).expect("run");
+        let plans = interp.view_plans.read();
+        assert!(
+            !plans.get("home").expect("home plan").interactive,
+            "statik view interactive=false bo'lishi kerak"
+        );
+        assert!(
+            plans.get("counter").expect("counter plan").interactive,
+            "on: bo'lgan view interactive=true bo'lishi kerak"
+        );
     }
 
     // each ichida element-bola (indentatsiya): `each ... \n div \n  h2`.
