@@ -307,6 +307,15 @@ else
 Keywords are spelled out **in full** (`elif`, `else`) — so they are
 understandable at a glance.
 
+`if` also works as an **expression** (ternary equivalent): it returns a value on
+one line. The `else` branch is required. Wrap calls in the condition in parens.
+
+```flux
+pad = if h < 10 ("0" + str.str h) else (str.str h)   # leading-zero
+kind = if n % 2 == 0 "even" else "odd"               # simple choice
+r    = if (str.len s) > 0 "full" else "empty"        # call condition → parens
+```
+
 ### Iteration: `each` (the only loop)
 Flux has **only one** loop — `each`. It iterates over a list, range, or map.
 There is **no** `while`, `for`, or `do-while`:

@@ -794,6 +794,12 @@ impl Parser {
 
     fn parse_if(&mut self) -> ParseResult<Expr> {
         self.advance(); // if
+        // `if shart a else b` — inline (ternary) shakli. Shu mantiqiy qatorda
+        // (qavslardan tashqarida) `else` bo'lsa, blok emas, ifoda shaklini
+        // o'qiymiz.
+        if self.if_is_inline() {
+            return self.parse_inline_if();
+        }
         let mut arms = Vec::new();
         let cond = self.parse_expr()?;
         self.expect(&Tok::Newline, "if tanasi")?;
@@ -818,6 +824,49 @@ impl Parser {
             }
         }
         Ok(Expr::If(Box::new(IfExpr { arms, else_block })))
+    }
+
+    // `if` dan keyin shu mantiqiy qatorda (qavs ichida emas) `else` uchrasa,
+    // bu inline ifoda shakli. Blok shaklida shartdan keyin avval Newline keladi,
+    // shuning uchun depth-0 Newline'ga birinchi yetsak — blok. Qavs/list/map
+    // ichidagi `else` (masalan ichki inline if) chuqurlik bilan o'tkazib
+    // yuboriladi.
+    fn if_is_inline(&self) -> bool {
+        let mut depth = 0i32;
+        let mut i = self.pos;
+        while i < self.toks.len() {
+            match &self.toks[i].tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
+                Tok::Else if depth == 0 => return true,
+                Tok::Newline | Tok::Indent | Tok::Dedent | Tok::Eof if depth <= 0 => {
+                    return false;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    // Inline if: `if shart a else b` — bir qiymat qaytaradi (ternary ekvivalenti).
+    // Shartda qavssiz (juxtaposition) chaqiruv o'chiriladi, shunda shart `a`
+    // tarmog'ini argument sifatida yutmaydi. Chaqiruvli shart kerak bo'lsa qavsga
+    // oling: `if (str.empty s) "" else s`. Tarmoqlar to'liq ifoda (chaqiruv ham
+    // mumkin). IfExpr sifatida quramiz, shunda interpreter o'zgarmaydi.
+    fn parse_inline_if(&mut self) -> ParseResult<Expr> {
+        let saved = self.no_app;
+        self.no_app = true;
+        let cond = self.parse_expr();
+        self.no_app = saved;
+        let cond = cond?;
+        let then_expr = self.parse_expr()?;
+        self.expect(&Tok::Else, "inline if 'else'")?;
+        let else_expr = self.parse_expr()?;
+        Ok(Expr::If(Box::new(IfExpr {
+            arms: vec![(cond, vec![Stmt::Expr(then_expr)])],
+            else_block: Some(vec![Stmt::Expr(else_expr)]),
+        })))
     }
 
     fn parse_match(&mut self) -> ParseResult<Expr> {

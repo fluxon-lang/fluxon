@@ -143,6 +143,56 @@ each i in 0..10
 "#);
     }
 
+    // Inline if (ternary ekvivalenti): `if shart a else b` bir qiymat qaytaradi.
+    // Issue #66 — ixcham shartli ifoda (leading-zero formatlash kabi joylar uchun).
+    #[test]
+    fn inline_if_ifoda() {
+        run(r#"
+# Issue'dagi asosiy misol: leading-zero formatlash
+h = 5
+pad = if h < 10 ("0" + str.str h) else (str.str h)
+(pad == "05") | (fail "inline if qiymat bermadi: ${pad}")
+
+# shart yolg'on bo'lganda else tarmog'i
+x = 20
+pad2 = if x < 10 ("0" + str.str x) else (str.str x)
+(pad2 == "20") | (fail "else tarmog'i ishlamadi: ${pad2}")
+
+# qavssiz oddiy tarmoqlar
+y = if h > 3 "katta" else "kichik"
+(y == "katta") | (fail "qavssiz tarmoq ishlamadi: ${y}")
+
+# else-if zanjiri (ichma-ich inline if)
+g = if h == 0 "nol" else if h < 0 "manfiy" else "musbat"
+(g == "musbat") | (fail "else-if zanjiri ishlamadi: ${g}")
+
+# chaqiruvli shart qavs ichida
+s = "hi"
+r = if (str.len s) > 0 "to'la" else "bo'sh"
+(r == "to'la") | (fail "qavsli shart ishlamadi: ${r}")
+
+# katta ifoda ichida ishlatish
+n = 7
+msg = "son " + (if n % 2 == 0 "juft" else "toq")
+(msg == "son toq") | (fail "ichki inline if ishlamadi: ${msg}")
+"#);
+    }
+
+    // Inline shakl qo'shilgach ham blok shakli (chaqiruvli shart bilan) ishlashi
+    // kerak — regressiya tekshiruvi.
+    #[test]
+    fn blok_if_inline_qoshilgach_ishlaydi() {
+        run(r#"
+s = "hi"
+out <- "yo'q"
+if str.len s > 0
+  out <- "to'la"
+else
+  out <- "bo'sh"
+(out == "to'la") | (fail "blok if buzildi: ${out}")
+"#);
+    }
+
     // Argumentsiz (nullary) chaqiruv: `f()`. Qavssiz chaqirish argument bilan
     // aniqlangani uchun 0-arity funksiyani chaqirishning yagona yo'li shu.
     // `f` (qavssiz) funksiya QIYMATI, `f()` esa CHAQIRUV.

@@ -66,6 +66,8 @@ elif x == 0
 else
   log "c"
 ```
+Inline `if` = expression (ternary): `pad = if h < 10 ("0" + str.str h) else (str.str h)`.
+`else` is required. Calls in the condition need parens: `if (str.len s) > 0 a else b`.
 Only loop = `each` (no while/for):
 ```flux
 each item in list   ·   each i in 1..5   ·   each k, v in map   ·   each i in inf

@@ -308,6 +308,15 @@ else
 Kalit so'zlar **to'liq** yoziladi (`elif`, `else`) — bir qarashda tushunarli
 bo'lishi uchun.
 
+`if` **ifoda sifatida** ham ishlaydi (ternary ekvivalenti): bir qatorda qiymat
+qaytaradi. `else` majburiy. Shartdagi qavssiz chaqiruvni qavsga oling.
+
+```flux
+pad = if h < 10 ("0" + str.str h) else (str.str h)   # leading-zero
+turi = if n % 2 == 0 "juft" else "toq"                # oddiy tanlov
+r    = if (str.len s) > 0 "to'la" else "bo'sh"        # chaqiruvli shart → qavs
+```
+
 ### Takrorlash: `each` (yagona loop)
 Flux'da **faqat bitta** loop bor — `each`. U ro'yxat, diapazon yoki map
 ustidan yuradi. `while`, `for`, `do-while` **yo'q**:
