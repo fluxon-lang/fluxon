@@ -84,6 +84,9 @@ pub trait DbTx: Send {
     fn rollback_to(&self, name: &str) -> Result<(), String>; // ichki rollback
     fn commit(self: Box<Self>) -> Result<(), String>;
     fn rollback(self: Box<Self>) -> Result<(), String>;
+    // Tx connection'i orqali ustun tiplarini introspeksiya qiladi — uncommitted
+    // DDL ko'rinishi uchun global pool o'rniga shu ishlatiladi (issue #63).
+    fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String>;
 }
 
 // ==================== SQLite backend ====================
@@ -508,6 +511,9 @@ impl DbTx for SqliteTx {
         self.give_back();
         r
     }
+    fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String> {
+        sqlite_column_types(self.conn()?, table)
+    }
 }
 
 impl Drop for SqliteTx {
@@ -901,16 +907,28 @@ impl Interp {
     // DB sxemasini introspeksiya qilib ustun tipini topadi (jadval bo'yicha
     // cache'lanadi — har qator uchun qayta so'rov bo'lmaydi). DB allaqachon ochiq:
     // bu metod faqat natija qatorini Value'ga aylantirish paytida chaqiriladi.
+    //
+    // Tranzaksiya ichida bo'lsa, uncommitted DDL ko'rinishi uchun tx connection
+    // ishlatiladi — global pool connection bu DDL ni ko'ra olmaydi (issue #63).
     fn db_col_type(&self, table: &str, col: &str) -> Option<String> {
         if let Some(entry) = self.db_schema.read().get(table) {
             return entry.get(col).cloned();
         }
-        let db = self.db().ok()?;
-        let cols: BTreeMap<String, String> = db
-            .column_types(table)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let raw = CURRENT_TX.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|tx| tx.column_types(table).ok())
+        });
+        let cols: BTreeMap<String, String> = match raw {
+            Some(v) => v.into_iter().collect(),
+            None => self
+                .db()
+                .ok()?
+                .column_types(table)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        };
         let result = cols.get(col).cloned();
         self.db_schema.write().insert(table.to_string(), cols);
         result
