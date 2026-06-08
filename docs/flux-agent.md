@@ -113,6 +113,9 @@ http.serve 8080
 - Method: `:get :post :put :patch :del`. `req.body` (JSON→map), `req.params.id`,
   `req.query`, `req.headers`. Missing key → `nil`.
 - `rep status body` (map→auto JSON). Redirect: `rep 302 {location:url}`.
+- Custom headers: optional 3rd arg map — `rep 200 "<h1>" {content_type:"text/html"}`.
+  Key `_`→`-` (`content_type`→`Content-Type`); name case-insensitive. Repeated
+  header (multiple Set-Cookie): list value — `rep 200 nil {set_cookie:["a=1" "b=2"]}`.
 - Route priority: a literal path auto-wins (`/stats/:c` > `/:c`).
 - Middleware (runs before handlers, in declaration order): `http.use \req -> ...`
   (all routes) or `http.before "/api/*" \req -> ...` (path prefix; `*` only at end,

@@ -82,6 +82,21 @@ eq r12.body.ver "2023-06-01" "anthropic-version server'ga yetdi"
 r13 = http.get "${base}/echo-headers"
 eq r13.body.key "yo'q" "headersiz so'rov → server default"
 
+# custom javob header'lari (issue #16): rep 3-argument map.
+# content_type → Content-Type body standartini (text/plain) bosadi.
+r14 = http.get "${base}/html"
+eq r14.status 200 "GET /html status"
+eq r14.headers["content-type"] "text/html" "rep custom content-type"
+eq r14.headers["x-powered-by"] "flux" "rep custom x-powered-by (_→-)"
+eq r14.body "<h1>Salom</h1>" "rep custom header bilan body saqlanadi"
+
+# takror Set-Cookie: server ikki alohida qator yuboradi (curl bilan tasdiqlangan).
+# Flux klienti res.headers map'ida bitta kalit saqlaydi (oxirgisi) — bu klient
+# tomonidagi cheklov (issue #13 oilasi), server YOZISH to'g'ri ishlaydi. Shuning
+# uchun bu yerda faqat klient ko'radigan qiymatni tekshiramiz.
+r15 = http.get "${base}/cookies"
+eq (str.has r15.headers["set-cookie"] "b=2") true "takror set-cookie qatori yetib keldi"
+
 if fails == 0
   log "=== 05_http: HAMMASI O'TDI ==="
 else

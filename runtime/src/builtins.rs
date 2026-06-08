@@ -36,9 +36,16 @@ pub fn install(env: &Env) {
             Ok(Value::Nil)
         }),
     );
-    // rep status body — HTTP javobi. Yangi Value variant qo'shmaslik uchun
-    // maxsus kalitli map sifatida ifodalanadi: {__resp:true status:N body:V}.
-    // http_mod::value_to_response shu kalitni taniydi.
+    // rep status body [headers] — HTTP javobi. Yangi Value variant qo'shmaslik
+    // uchun maxsus kalitli map sifatida ifodalanadi:
+    // {__resp:true status:N body:V headers:{...}}. http_mod::value_to_response
+    // shu kalitlarni taniydi.
+    //
+    // Ixtiyoriy 3-argument — custom header'lar map'i (issue #16). Body'dan
+    // alohida 3-arg qilingani body bilan to'qnashmaslik uchun: `rep 200 {ok}`
+    // da butun map = body, shuning uchun header'ni body ichidan o'qib bo'lmaydi.
+    // Header qiymati str (bitta sarlavha) yoki list (takror sarlavha, masalan
+    // bir nechta Set-Cookie) bo'lishi mumkin.
     add(
         "rep",
         Box::new(|args: Vec<Value>| {
@@ -57,6 +64,21 @@ pub fn install(env: &Env) {
             m.insert("__resp".to_string(), Value::Bool(true));
             m.insert("status".to_string(), Value::Int(status));
             m.insert("body".to_string(), body);
+            // 3-argument bo'lsa — headers map. Map bo'lmasa aniq xato beramiz,
+            // chunki jim e'tiborsiz qoldirish AI uchun chalg'ituvchi.
+            if let Some(h) = args.get(2) {
+                match h {
+                    Value::Map(_) => {
+                        m.insert("headers".to_string(), h.clone());
+                    }
+                    other => {
+                        return Err(Flow::err(format!(
+                            "rep: 3-argument headers (map) bo'lishi kerak, {} berildi",
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
             Ok(Value::Map(m))
         }),
     );

@@ -179,6 +179,36 @@ msg = "son " + (if n % 2 == 0 "juft" else "toq")
 "#);
     }
 
+    // rep'ning ixtiyoriy 3-argument headers map'i (issue #16). rep shunchaki
+    // {__resp:true status body headers} map qaytaradi — Flux'da kalitlarini
+    // o'qib tekshiramiz (haqiqiy header yozish http_mod testlarida).
+    #[test]
+    fn rep_headers_argumenti() {
+        run(r#"
+# 2-argument (eski shakl) — headers kaliti yo'q
+r = rep 200 {ok:true}
+(r.status == 200) | (fail "rep status buzildi: ${r.status}")
+(r.headers == nil) | (fail "headers'siz rep'da headers kaliti paydo bo'ldi")
+
+# 3-argument — headers map qo'shiladi. Defis o'rniga `_` (map kalitida defis
+# bo'lolmaydi; runtime yozishda `_` → `-` qiladi). O'qish ham `_` bilan.
+r2 = rep 200 "<h1>Salom</h1>" {content_type:"text/html"}
+(r2.headers.content_type == "text/html") | (fail "headers o'qilmadi")
+
+# body map + alohida headers — to'qnashmaydi
+r3 = rep 200 {data:1} {set_cookie:"s=abc"}
+(r3.body.data == 1) | (fail "body map buzildi")
+(r3.headers.set_cookie == "s=abc") | (fail "set-cookie o'qilmadi")
+"#);
+    }
+
+    // 3-argument map bo'lmasa rep aniq xato beradi (jim e'tiborsizlik emas).
+    #[test]
+    fn rep_headers_nomap_xato() {
+        let e = run_source(r#"x = rep 200 "body" "notmap""#).unwrap_err();
+        assert!(e.contains("3-argument headers"), "kutilmagan xato: {}", e);
+    }
+
     // Inline shakl qo'shilgach ham blok shakli (chaqiruvli shart bilan) ishlashi
     // kerak — regressiya tekshiruvi.
     #[test]
