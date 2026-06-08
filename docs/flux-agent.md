@@ -114,6 +114,23 @@ http.serve 8080
   `req.query`, `req.headers`. Missing key → `nil`.
 - `rep status body` (map→auto JSON). Redirect: `rep 302 {location:url}`.
 - Route priority: a literal path auto-wins (`/stats/:c` > `/:c`).
+- Middleware (runs before handlers, in declaration order): `http.use \req -> ...`
+  (all routes) or `http.before "/api/*" \req -> ...` (path prefix; `*` only at end,
+  `"/api/*"` matches `/api` and below at segment boundary; no `*` → exact path).
+  If a middleware returns `fail`/`rep`, the chain stops and that response is sent
+  (e.g. auth reject) — handler not called.
+- Request-scoped context: `req.ctx <- {tenant_id:5 role:"admin"}` (middleware
+  writes), `ctx = req.ctx` (handler reads). Lives for THIS request, shared between
+  middleware and handler — compute auth once, not per handler. Per-request, isolated.
+```flux
+http.before "/api/*" \req ->
+  if !req.headers.authorization
+    fail 401 "auth kerak"
+  req.ctx <- {tenant_id: 5 role: "admin"}
+http.on :get "/api/me" \req ->
+  ctx = req.ctx
+  rep 200 {tenant: ctx.tenant_id}
+```
 - Client: `http.get url`, `http.post url body` → `res.status res.body res.headers`.
   `res.headers` (map, lowercase keys): `res.headers.location`, also `m[k]`.
   Redirects not followed by default; opt-in: `http.get url {follow:true max:10}`

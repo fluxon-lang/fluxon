@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::ast::Stmt;
 
@@ -28,6 +28,13 @@ pub enum Value {
     Fn(Arc<FnValue>),
     // Rust'da yozilgan ichki funksiya (builtin).
     Native(Arc<NativeFn>),
+    // Request-scoped context store: `req.ctx` shu yerda turadi (issue #68).
+    // Map immutable + klonlanadi, shuning uchun middleware va handler bir xil
+    // ctx'ni ko'rishi uchun SHARED mutable kerak — `Arc<Mutex>` aynan shuni
+    // beradi (klonlanganda Arc ulashiladi, cell o'sha qoladi). Send+Sync
+    // invarianti saqlanadi. Foydalanuvchiga oddiy map ko'rinadi (type_name="map",
+    // o'qiganda snapshot Map qaytadi — interp::get_field).
+    Ctx(Arc<Mutex<BTreeMap<String, Value>>>),
 }
 
 pub struct FnValue {
@@ -47,6 +54,23 @@ pub struct NativeFn {
     pub func: Box<dyn Fn(Vec<Value>) -> Result<Value, crate::interp::Flow> + Send + Sync>,
 }
 
+// Map'ni `{k:v ...}` ko'rinishida chop etadi (Map va Ctx Display uchun umumiy).
+fn write_map(f: &mut fmt::Formatter<'_>, m: &BTreeMap<String, Value>) -> fmt::Result {
+    write!(f, "{{")?;
+    for (i, (k, v)) in m.iter().enumerate() {
+        if i > 0 {
+            write!(f, " ")?;
+        }
+        write!(f, "{}:{}", k, v.repr())?;
+    }
+    write!(f, "}}")
+}
+
+// Ikki map'ni Flux `==` semantikasi bilan taqqoslaydi (Map va Ctx uchun umumiy).
+fn maps_equal(a: &BTreeMap<String, Value>, b: &BTreeMap<String, Value>) -> bool {
+    a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w)))
+}
+
 impl Value {
     // Flux truthiness: faqat nil va false yolg'on; qolgan hammasi rost.
     pub fn truthy(&self) -> bool {
@@ -63,6 +87,8 @@ impl Value {
             Value::Sym(_) => "sym",
             Value::List(_) => "list",
             Value::Map(_) => "map",
+            // ctx foydalanuvchiga oddiy map ko'rinadi — ichki tipni oshkor qilmaymiz.
+            Value::Ctx(_) => "map",
             Value::Fn(_) | Value::Native(_) => "fn",
         }
     }
@@ -80,8 +106,11 @@ impl Value {
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y))
             }
-            (Value::Map(a), Value::Map(b)) => {
-                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w)))
+            (Value::Map(a), Value::Map(b)) => maps_equal(a, b),
+            // ctx oddiy map kabi taqqoslanadi (snapshot orqali).
+            (Value::Ctx(a), Value::Ctx(b)) => maps_equal(&a.lock().unwrap(), &b.lock().unwrap()),
+            (Value::Ctx(a), Value::Map(b)) | (Value::Map(b), Value::Ctx(a)) => {
+                maps_equal(&a.lock().unwrap(), b)
             }
             _ => false,
         }
@@ -115,16 +144,9 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Map(m) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in m.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{}:{}", k, v.repr())?;
-                }
-                write!(f, "}}")
-            }
+            Value::Map(m) => write_map(f, m),
+            // ctx oddiy map kabi chop etiladi (snapshot).
+            Value::Ctx(c) => write_map(f, &c.lock().unwrap()),
             Value::Fn(fv) => write!(f, "<fn {}>", fv.name),
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
         }

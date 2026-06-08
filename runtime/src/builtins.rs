@@ -665,6 +665,15 @@ fn json_module(func: &str, args: Vec<Value>) -> R {
     }
 }
 
+// Map'ni JSON obyektga kodlaydi (Map va Ctx uchun umumiy).
+fn json_encode_map(m: &std::collections::BTreeMap<String, Value>) -> String {
+    let parts: Vec<String> = m
+        .iter()
+        .map(|(k, val)| format!("{}:{}", json_str(k), json_encode(val)))
+        .collect();
+    format!("{{{}}}", parts.join(","))
+}
+
 pub fn json_encode(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
@@ -676,13 +685,9 @@ pub fn json_encode(v: &Value) -> String {
             let parts: Vec<String> = items.iter().map(json_encode).collect();
             format!("[{}]", parts.join(","))
         }
-        Value::Map(m) => {
-            let parts: Vec<String> = m
-                .iter()
-                .map(|(k, val)| format!("{}:{}", json_str(k), json_encode(val)))
-                .collect();
-            format!("{{{}}}", parts.join(","))
-        }
+        Value::Map(m) => json_encode_map(m),
+        // ctx oddiy map kabi kodlanadi (snapshot) — javob body'siga tushsa.
+        Value::Ctx(c) => json_encode_map(&c.lock().unwrap()),
         Value::Fn(_) | Value::Native(_) => "null".into(),
     }
 }
