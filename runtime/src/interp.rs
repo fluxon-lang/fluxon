@@ -1288,6 +1288,14 @@ impl Interp {
                     let argv = self.eval_args(args, env)?;
                     return self.ai_dispatch(name, argv);
                 }
+                // auth — autentifikatsiya primitivlari (JWT + parol hash). `ai`
+                // kabi holatsiz; `$AUTH_SECRET`ni env_lookup orqali o'qish uchun
+                // Interp'ga muhtoj (call_module emas). `auth` o'zgaruvchi sifatida
+                // e'lon qilingan bo'lsa, modul emas — o'zgaruvchi ustun.
+                if modname == "auth" && self.lookup(modname, env).is_err() {
+                    let argv = self.eval_args(args, env)?;
+                    return self.auth_dispatch(name, argv);
+                }
                 if crate::builtins::is_module(modname) {
                     let argv = self.eval_args(args, env)?;
                     return crate::builtins::call_module(modname, name, argv);

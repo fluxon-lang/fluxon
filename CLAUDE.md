@@ -56,6 +56,7 @@ Yangi battery yoki o'zgarish kiritishdan oldin tegishli faylni biling:
 | `http` battery (server + klient) | `runtime/src/http_mod.rs` |
 | `ai` battery (LLM — Anthropic Messages API) | `runtime/src/ai_mod.rs` |
 | `db` battery (SQLite, tx, schema) | `runtime/src/db_mod.rs` |
+| `auth` battery (JWT HS256 + parol hash argon2id) | `runtime/src/auth_mod.rs` |
 | CLI kirish nuqtasi + integratsiya testlari | `runtime/src/main.rs` |
 
 **Spec'ni o'qish kerak bo'lsa:** `docs/flux-agent.md` (~2700 token, ixcham —

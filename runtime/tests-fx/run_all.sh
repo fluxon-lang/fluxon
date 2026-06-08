@@ -99,6 +99,9 @@ run "11_sh"                 $BIN run $DIR/11_sh.fx
 echo "############ 12 modules (use ./fayl) ############"
 run "12_modules"            $BIN run $DIR/12_modules.fx
 
+echo "############ 13 auth (JWT + parol hash) ############"
+run "13_auth"  env AUTH_SECRET=sirli-kalit-13 $BIN run $DIR/13_auth.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

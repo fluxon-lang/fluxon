@@ -30,3 +30,13 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 cron = "0.12"
 # cron crate UTC sana-vaqt arifmetikasi uchun chrono'ga tayanadi (next-run hisoblash).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# auth battery: JWT (HS256) imzolash/tekshirish — HMAC-SHA256. Sof Rust
+# (RustCrypto), C toolchain/OpenSSL talab qilmaydi — `rusqlite bundled` /
+# webpki-roots falsafasiga mos, CI'da portativ va yashil.
+hmac = "0.12"
+sha2 = "0.10"
+# JWT segmentlari base64url (padding'siz) — header/payload/imzo kodlash.
+base64 = "0.22"
+# auth battery: parol hash (argon2id — bcrypt'dan afzal, default xavfsiz).
+# Salt avtomatik (PHC string ichida), `auth.check` doimiy-vaqt taqqoslash.
+argon2 = "0.5"

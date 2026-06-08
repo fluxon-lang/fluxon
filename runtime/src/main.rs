@@ -12,6 +12,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod ai_mod;
 mod ast;
+mod auth_mod;
 mod builtins;
 mod cron_mod;
 mod db_mod;
@@ -1463,6 +1464,146 @@ s = :florist
         run(r#"
 xs = [:a "b"]
 ((str.str xs) == "[:a \"b\"]") | (fail "list repr: ${str.str xs}")
+"#);
+    }
+
+    // --- auth battery (issue #69) ---
+    //
+    // $AUTH_SECRET env'ga muhtoj testlar uchun lock — parallel testlar env'ga
+    // race qilmasin (AI_ENV_LOCK naqshi).
+    static AUTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn auth_jwt_verify_roundtrip() {
+        let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
+        run(r#"
+use auth
+token = auth.jwt {sub:"u1" tenant:"t1" role:"admin"}
+# imzolangan JWT — 3 segment (header.payload.imzo)
+parts = str.split token "."
+(parts.len == 3) | (fail "JWT 3 segment emas: ${parts.len}")
+# verify -> payload map qaytaradi, da'volar saqlanadi
+claims = auth.verify token
+(claims.sub == "u1") | (fail "sub noto'g'ri: ${claims.sub}")
+(claims.tenant == "t1") | (fail "tenant noto'g'ri: ${claims.tenant}")
+(claims.role == "admin") | (fail "role noto'g'ri: ${claims.role}")
+# iat/exp avtomatik qo'shilgan
+(claims.exp > claims.iat) | (fail "exp iat'dan katta bo'lishi kerak")
+"#);
+    }
+
+    #[test]
+    fn auth_verify_buzilgan_token_xato() {
+        let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
+        // Imzo buzilgan token -> auth.verify err (Flux'da `try` o'tkazgich, xato
+        // run'ni to'xtatadi — shuning uchun Rust tomonda expect_err bilan
+        // tekshiramiz). token'ga belgi qo'shsak imzo mos kelmaydi.
+        let err = run_source(
+            r#"use auth
+token = auth.jwt {sub:"u1"}
+auth.verify (token + "x")"#,
+        )
+        .expect_err("buzilgan token xato berishi kerak");
+        assert!(
+            err.contains("imzo"),
+            "kutilgan imzo xatosi, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn auth_verify_yaroqsiz_shakl_xato() {
+        let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
+        // 3 segmentdan kam — JWT shakli noto'g'ri -> err.
+        let err = run_source(
+            r#"use auth
+auth.verify "faqat.ikki""#,
+        )
+        .expect_err("yaroqsiz shakl xato berishi kerak");
+        assert!(
+            err.contains("shakl") || err.contains("segment"),
+            "kutilgan shakl xatosi, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn auth_verify_exp_siz_token_rad_etiladi() {
+        let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
+        // `exp:nil` payload -> auth.jwt `or_insert` nil'ni override qilmaydi,
+        // ya'ni token sonli `exp`siz imzolanadi. To'g'ri imzolangan bo'lsa ham,
+        // auth.verify uni RAD ETISHI kerak (aks holda abadiy amal qilardi —
+        // Codex P2). Kalit to'g'ri, shuning uchun bu imzo emas, exp xatosi.
+        let err = run_source(
+            r#"use auth
+token = auth.jwt {sub:"u1" exp:nil}
+auth.verify token"#,
+        )
+        .expect_err("exp'siz token rad etilishi kerak");
+        assert!(
+            err.contains("exp") || err.contains("muddat"),
+            "kutilgan exp-yo'q xatosi, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn auth_secret_yoq_bolsa_aniq_xato() {
+        let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("AUTH_SECRET").ok();
+        unsafe { std::env::remove_var("AUTH_SECRET") };
+        let err = run_source(
+            r#"use auth
+token = auth.jwt {sub:"u1"}"#,
+        )
+        .expect_err("$AUTH_SECRET yo'qligida xato kutiladi");
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("AUTH_SECRET", v) };
+        }
+        assert!(
+            err.contains("AUTH_SECRET"),
+            "kutilgan AUTH_SECRET xatosi, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn auth_hash_check_roundtrip() {
+        // hash/check env'ga muhtoj emas (lock kerak emas).
+        run(r#"
+use auth
+h = auth.hash "user-parol"
+# argon2id PHC string
+(str.has h "argon2id") | (fail "argon2id hash emas: ${h}")
+# to'g'ri parol -> true
+(auth.check "user-parol" h) | (fail "to'g'ri parol check false berdi")
+# noto'g'ri parol -> false
+((auth.check "xato-parol" h) == false) | (fail "noto'g'ri parol check true berdi")
+"#);
+    }
+
+    #[test]
+    fn auth_noma_lum_funksiya_xato() {
+        // auth.foo -> dispatch'ga yetib "auth.foo yo'q" beradi (noma'lum nom EMAS).
+        let err =
+            run_source(r#"auth.foo "x""#).expect_err("noma'lum auth funksiyasi xato berishi kerak");
+        assert!(
+            err.contains("auth.foo") && !err.contains("noma'lum nom"),
+            "auth dispatch'ga yetib funksiya xatosi berishi kerak, topildi: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn auth_ozgaruvchi_modulni_yopadi() {
+        // `auth` o'zgaruvchi sifatida e'lon qilinsa, u modul emas — oddiy map.
+        run(r#"
+auth = {jwt:"shadowed"}
+log "auth.jwt = ${auth.jwt}"
 "#);
     }
 }

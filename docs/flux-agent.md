@@ -221,6 +221,21 @@ each i in 1..10
   msgs <- msgs.push {role::tool id:r.id content:(json.enc out)}
 ```
 
+### auth (JWT + password hash, $AUTH_SECRET auto)
+```flux
+token = auth.jwt {sub:user.id tenant:t.id role:"admin"}   # → signed JWT (HS256)
+token = auth.jwt {sub:user.id} {exp:3600}                 # optional expiry (seconds; default 24h)
+claims = auth.verify token        # → payload map (signature + exp checked), or err
+hash = auth.hash "user-parol"     # → argon2id hash (salt embedded)
+ok = auth.check "user-parol" hash # → bool (constant-time)
+```
+Signing key auto-detected from `$AUTH_SECRET` (OS env > .env), like `db`/`ai` —
+missing → explicit error. `auth.verify` returns `err` on bad signature, expired
+token, OR a token with no numeric `exp` (a token must expire — one without `exp`
+is rejected, not accepted forever). `iat`/`exp` are added to the payload
+automatically. Catch with `!`/propagate → 401 in a handler. Pairs with middleware:
+verify in `http.before`, put claims in `req.ctx`, read in the handler.
+
 ### reg (function registry — dynamic dispatch)
 Store/call a function by STRING name (for agent tools — NOT a `match`-switch,
 added at runtime):
