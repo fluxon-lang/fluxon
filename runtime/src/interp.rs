@@ -185,6 +185,11 @@ pub struct Interp {
     // db natijalarini post-process qilish (sym/json/bool) va auto-migration uchun.
     // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
     pub schema: Arc<RwLock<HashMap<String, BTreeMap<String, ColMeta>>>>,
+    // DB sxemasidan introspeksiya qilingan ustun tiplari cache'i (jadval -> ustun
+    // -> flux-tip). `tbl` e'lon QILINMAGAN process (masalan ikki-process setup'da
+    // o'qigich) `schema` bo'sh bo'lganda json ustunni shu cache orqali tiklaydi —
+    // shunda json process chegarasidan qat'i nazar bir xil map qaytaradi (issue #63).
+    pub(crate) db_schema: RwLock<HashMap<String, BTreeMap<String, String>>>,
     // .env fayl cache: LAZY — faqat birinchi `env.X` ishlatilganda joriy
     // katalogdagi `.env` o'qiladi va parse qilinadi. `env.X` umuman bo'lmasa,
     // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
@@ -241,6 +246,7 @@ impl Interp {
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),
             schema: Arc::new(RwLock::new(HashMap::new())),
+            db_schema: RwLock::new(HashMap::new()),
             env_file: OnceLock::new(),
             ws: Arc::new(crate::ws_mod::WsState::new()),
             reg: Arc::new(crate::reg_mod::RegState::new()),

@@ -757,6 +757,50 @@ tbl t
     }
 
     #[test]
+    fn db_json_col_cross_process_decode() {
+        // Issue #63: json ustun `tbl` e'lon QILINMAGAN process'da ham map qaytarsin.
+        // Ikki ALOHIDA Interp (= ikki process) bir FAYL DB ustida: birinchi yozadi
+        // (tbl bilan), ikkinchi tbl'siz o'qiydi — DB introspeksiyasi ustun json
+        // ekanini tiklab map beradi (ilgari xom string qaytib row.body.x xato berardi).
+        let path = std::env::temp_dir().join("flux_json_xproc_test.db");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guard ushlangan.
+        unsafe {
+            std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
+        }
+
+        // Yozuvchi process: tbl e'lon qiladi + json map (ichida list ham) yozadi.
+        run_source(
+            r#"
+use db
+tbl t
+  k    sym
+  body json
+db.ins "t" {k::a body:{x:1 y:[1 2 3]}}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("yozish: {}", e));
+
+        // O'qiydigan process: tbl YO'Q — faqat o'qiydi. json map bo'lib kelishi shart.
+        run_source(
+            r#"
+use db
+row = db.one "select * from t where k=$1" [:a]
+(row.body.x == 1) | (fail "json ustun map bo'lib dekod bo'lishi kerak (x)")
+(row.body.y.len == 3) | (fail "json ichki list ham tiklanishi kerak (y)")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("o'qish: {}", e));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
     fn db_tx_nested_savepoint() {
         // Ichki tx (SAVEPOINT). Ichki blok ret qiymat qaytaradi, tashqi commit.
         with_db_test("tx_nested", || {
