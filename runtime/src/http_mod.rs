@@ -228,22 +228,93 @@ fn value_to_response(v: Value) -> Response<Full<Bytes>> {
             _ => 200,
         };
         let body = m.get("body").cloned().unwrap_or(Value::Nil);
-        // Redirect: `rep 30x {location:url}` → body'dagi location'ni Location
-        // header'ga chiqaramiz (spec: "Redirect: rep 302 {location:url}").
+        // 3-argument custom header'lar (issue #16): `rep status body {hdr:val}`.
+        let custom = m.get("headers");
+        // Redirect: `rep 30x {location:url}` → body map'idagi location'ni Location
+        // header'ga chiqaramiz (spec: "Redirect: rep 302 {location:url}"). Eski
+        // qulaylik xulqi — custom headers'siz ham ishlaydi, body bo'sh qaytadi.
         if (300..400).contains(&status)
             && let Value::Map(bm) = &body
             && let Some(Value::Str(loc)) = bm.get("location")
         {
-            return Response::builder()
+            let mut b = Response::builder()
                 .status(StatusCode::from_u16(status).unwrap_or(StatusCode::FOUND))
-                .header("location", loc.clone())
-                .body(Full::new(Bytes::new()))
-                .unwrap();
+                .header("location", loc.clone());
+            b = apply_headers(b, custom);
+            return b.body(Full::new(Bytes::new())).unwrap();
         }
-        return body_value_to_response(status, body);
+        let mut resp = body_value_to_response(status, body);
+        apply_headers_mut(resp.headers_mut(), custom);
+        return resp;
     }
     // rep ishlatilmagan — qiymatning o'zini 200 bilan qaytaramiz.
     body_value_to_response(200, v)
+}
+
+// Custom header map'ini Response::Builder'ga qo'shadi (redirect yo'li uchun —
+// u hali builder bosqichida). Noto'g'ri header nomi/qiymati jim o'tkazib
+// yuboriladi: yagona buzuq header butun javobni 500 qilmasligi kerak.
+fn apply_headers(
+    mut b: hyper::http::response::Builder,
+    headers: Option<&Value>,
+) -> hyper::http::response::Builder {
+    if let Some(Value::Map(hm)) = headers
+        && let Some(hmap) = b.headers_mut()
+    {
+        apply_headers_mut(hmap, Some(&Value::Map(hm.clone())));
+    }
+    b
+}
+
+// Custom header map'ini tayyor Response'ning HeaderMap'iga qo'shadi.
+//
+// Qiymat str bo'lsa — bitta sarlavha. List bo'lsa — har element alohida
+// sarlavha qatori (takror header, masalan bir nechta Set-Cookie; RFC 7230 ga
+// ko'ra Set-Cookie vergulli ro'yxat bilan birlashmaydi). content-type kabi
+// turdagi sarlavhalar body'ning standart sarlavhasini bosib o'tadi (append
+// emas, insert): canonical body sarlavhasi ustidan dasturchi niyati ustun.
+//
+// Kalitda `_` → `-` ga aylanadi: Flux map kalitida defis bo'lolmaydi
+// (`content-type` uchta token sifatida parse bo'ladi), shuning uchun
+// `{content_type:"..."}` yoziladi. Bu o'qish bilan simmetrik — server
+// req.headers'da ham `-` → `_` qiladi (build_req), AI bitta naqshni o'rganadi.
+// Defisli string kalit (`{"set-cookie":...}`) ham ishlaydi: defisda `_` yo'q.
+fn apply_headers_mut(hmap: &mut hyper::HeaderMap, headers: Option<&Value>) {
+    use hyper::header::{HeaderName, HeaderValue};
+    let Some(Value::Map(hm)) = headers else {
+        return;
+    };
+    for (k, v) in hm {
+        // Header nomi case-insensitive (RFC 7230) — lowercase kanonik shaklda
+        // saqlaymiz. Buzuq nomni jim o'tkazib yuboramiz.
+        let canon = k.to_lowercase().replace('_', "-");
+        let Ok(name) = HeaderName::from_bytes(canon.as_bytes()) else {
+            continue;
+        };
+        match v {
+            // List — takror sarlavha: birinchisi insert (eskisini bosadi),
+            // qolganlari append.
+            Value::List(items) => {
+                let mut first = true;
+                for item in items.iter() {
+                    if let Ok(hv) = HeaderValue::from_str(&item.to_text()) {
+                        if first {
+                            hmap.insert(name.clone(), hv);
+                            first = false;
+                        } else {
+                            hmap.append(name.clone(), hv);
+                        }
+                    }
+                }
+            }
+            // Boshqa har qanday qiymat matn sifatida — bitta sarlavha.
+            other => {
+                if let Ok(hv) = HeaderValue::from_str(&other.to_text()) {
+                    hmap.insert(name, hv);
+                }
+            }
+        }
+    }
 }
 
 // Javob tanasini tipiga qarab formatlash: map/list -> JSON, str -> matn,
@@ -1065,5 +1136,96 @@ mod tests {
         // Oddiy map yoki nil — javob emas (middleware davom etadi).
         assert!(!is_resp(&Value::Map(BTreeMap::new())));
         assert!(!is_resp(&Value::Nil));
+    }
+
+    // --- custom header'lar (issue #16) ---
+
+    // `rep status body {headers}` natijasini taqlid qiluvchi __resp map.
+    fn resp_map(status: i64, body: Value, headers: Option<Value>) -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("__resp".to_string(), Value::Bool(true));
+        m.insert("status".to_string(), Value::Int(status));
+        m.insert("body".to_string(), body);
+        if let Some(h) = headers {
+            m.insert("headers".to_string(), h);
+        }
+        Value::Map(m)
+    }
+
+    fn hmap(pairs: &[(&str, Value)]) -> Value {
+        let mut m = BTreeMap::new();
+        for (k, v) in pairs {
+            m.insert(k.to_string(), v.clone());
+        }
+        Value::Map(m)
+    }
+
+    #[test]
+    fn custom_content_type_body_standartini_bosadi() {
+        // str body standart "text/plain" beradi; custom content-type uni bosadi.
+        let r = value_to_response(resp_map(
+            200,
+            Value::Str("<h1>Salom</h1>".into()),
+            Some(hmap(&[("content-type", Value::Str("text/html".into()))])),
+        ));
+        assert_eq!(r.headers().get("content-type").unwrap(), "text/html");
+    }
+
+    #[test]
+    fn custom_header_nomi_lowercase_kanonik() {
+        // Content-Type (katta harf) berilsa ham kichik harfda saqlanadi
+        // (RFC 7230 — header nomi case-insensitive).
+        let r = value_to_response(resp_map(
+            200,
+            Value::Nil,
+            Some(hmap(&[("X-Request-Id", Value::Str("abc".into()))])),
+        ));
+        assert_eq!(r.headers().get("x-request-id").unwrap(), "abc");
+    }
+
+    #[test]
+    fn set_cookie_list_takror_sarlavha() {
+        // List qiymat → har element alohida Set-Cookie qatori (RFC 7230:
+        // Set-Cookie vergulli ro'yxat bilan birlashmaydi).
+        let cookies = Value::List(vec![Value::Str("a=1".into()), Value::Str("b=2".into())]);
+        let r = value_to_response(resp_map(
+            200,
+            Value::Nil,
+            Some(hmap(&[("set-cookie", cookies)])),
+        ));
+        let got: Vec<_> = r.headers().get_all("set-cookie").iter().collect();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], "a=1");
+        assert_eq!(got[1], "b=2");
+    }
+
+    #[test]
+    fn redirect_location_plus_custom_header() {
+        // Eski `rep 302 {location:url}` xulqi + custom header birga ishlaydi
+        // (masalan redirect bilan birga Set-Cookie o'rnatish).
+        let r = value_to_response(resp_map(
+            302,
+            hmap(&[("location", Value::Str("/dest".into()))]),
+            Some(hmap(&[("set-cookie", Value::Str("s=xyz".into()))])),
+        ));
+        assert_eq!(r.status().as_u16(), 302);
+        assert_eq!(r.headers().get("location").unwrap(), "/dest");
+        assert_eq!(r.headers().get("set-cookie").unwrap(), "s=xyz");
+    }
+
+    #[test]
+    fn buzuq_header_jim_otkaziladi() {
+        // Yaroqsiz header qiymati (yangi qator) butun javobni buzmaydi —
+        // jim o'tkazib yuboriladi, qolgan header'lar o'rnatiladi.
+        let r = value_to_response(resp_map(
+            200,
+            Value::Nil,
+            Some(hmap(&[
+                ("x-bad", Value::Str("yomon\nqiymat".into())),
+                ("x-good", Value::Str("yaxshi".into())),
+            ])),
+        ));
+        assert!(r.headers().get("x-bad").is_none());
+        assert_eq!(r.headers().get("x-good").unwrap(), "yaxshi");
     }
 }

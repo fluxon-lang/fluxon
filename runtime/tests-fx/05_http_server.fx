@@ -37,6 +37,15 @@ http.on :get "/text" \req ->
 http.on :get "/echo-headers" \req ->
   rep 200 {key:(req.headers.x_api_key ?? "yo'q") ver:(req.headers.anthropic_version ?? "yo'q")}
 
+# custom javob header'lari (issue #16): 3-argument headers map.
+# `_` → `-` (content_type → Content-Type), nom case-insensitive.
+http.on :get "/html" \req ->
+  rep 200 "<h1>Salom</h1>" {content_type:"text/html" x_powered_by:"flux"}
+
+# takror Set-Cookie: list qiymat → har element alohida sarlavha qatori.
+http.on :get "/cookies" \req ->
+  rep 200 {ok:true} {set_cookie:["a=1" "b=2"]}
+
 # redirect zanjiri: /r1 → /r2 → /dest (klient follow:true bilan kuzatadi).
 http.on :get "/r1" \req ->
   rep 302 {location:"/r2"}
