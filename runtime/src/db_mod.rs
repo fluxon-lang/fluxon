@@ -63,6 +63,12 @@ pub trait Db: Send + Sync {
     fn build_upsert(&self, table: &str, set: &[String], key: &[String]) -> String;
     fn build_create_table(&self, table: &str, cols: &[ColDef]) -> String;
 
+    // Jadval ustunlarining (nom, flux-tip) ro'yxati — DB sxemasidan introspeksiya.
+    // `tbl` e'lon qilinmagan process json ustunni shu orqali topadi (issue #63).
+    // Faqat json aniq tiklanadi (sym/bool SQLite'da TEXT/INTEGER bo'lib matnan
+    // farqlanmaydi). Jadval topilmasa bo'sh ro'yxat.
+    fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String>;
+
     // Tranzaksiya ochish — connection'ni egallagan `'static` obyekt qaytaradi.
     fn begin(&self) -> Result<Box<dyn DbTx>, String>;
 }
@@ -78,6 +84,9 @@ pub trait DbTx: Send {
     fn rollback_to(&self, name: &str) -> Result<(), String>; // ichki rollback
     fn commit(self: Box<Self>) -> Result<(), String>;
     fn rollback(self: Box<Self>) -> Result<(), String>;
+    // Tx connection'i orqali ustun tiplarini introspeksiya qiladi — uncommitted
+    // DDL ko'rinishi uchun global pool o'rniga shu ishlatiladi (issue #63).
+    fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String>;
 }
 
 // ==================== SQLite backend ====================
@@ -247,6 +256,13 @@ impl Db for SqliteDb {
         self.query(sql, params)
     }
 
+    fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String> {
+        let conn = self.pool.checkout()?;
+        let r = sqlite_column_types(&conn, table);
+        self.pool.checkin(conn);
+        r
+    }
+
     fn build_insert(&self, table: &str, cols: &[String]) -> String {
         let collist = cols
             .iter()
@@ -364,6 +380,37 @@ impl Db for SqliteDb {
     }
 }
 
+// SQLite jadval ustunlarini introspeksiya qiladi: pragma_table_info'dan e'lon
+// qilingan tipni olib Flux tip nomiga aylantiradi. Jadval bo'lmasa bo'sh ro'yxat.
+fn sqlite_column_types(conn: &Connection, table: &str) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT name, type FROM pragma_table_info(?1)")
+        .map_err(|e| sql_err("pragma_table_info", e))?;
+    let rows = stmt
+        .query_map([table], |row| {
+            let name: String = row.get(0)?;
+            let decl: String = row.get(1)?;
+            Ok((name, sqlite_decl_to_flux_type(&decl)))
+        })
+        .map_err(|e| sql_err("pragma_table_info", e))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| sql_err("pragma_table_info", e))?);
+    }
+    Ok(out)
+}
+
+// E'lon qilingan SQLite tipini Flux tip nomiga moslaydi. Hozir faqat json
+// ahamiyatli (sqlval_to_value uni map/list'ga dekod qiladi); qolgani matn bo'lib
+// qaytadi va maxsus konversiyaga tushmaydi.
+fn sqlite_decl_to_flux_type(decl: &str) -> String {
+    if decl.eq_ignore_ascii_case("json") {
+        "json".to_string()
+    } else {
+        decl.to_ascii_lowercase()
+    }
+}
+
 // SQLite identifikator quoting: "..." (ichidagi " -> "").
 fn q_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
@@ -376,7 +423,12 @@ fn sqlite_column_def(c: &ColDef) -> String {
         "serial" => "INTEGER",
         "int" | "money" | "now" | "bool" => "INTEGER",
         "flt" => "REAL",
-        // str/sym/json va noma'lum -> TEXT
+        // json -> e'lon qilingan tip "JSON". SQLite uni TEXT sifatida saqlaydi
+        // (json qiymat doim {}/[] — NUMERIC affinity uni matn qoldiradi), lekin
+        // e'lon tipi DB sxemasida qoladi: `tbl` e'lon qilinmagan process o'qiganda
+        // introspeksiya orqali ustun json ekanini tiklash uchun (issue #63).
+        "json" => "JSON",
+        // str/sym va noma'lum -> TEXT
         _ => "TEXT",
     };
     let mut def = format!("{} {}", q_ident(&c.name), sql_type);
@@ -458,6 +510,9 @@ impl DbTx for SqliteTx {
             .map_err(|e| format!("rollback: {e}"));
         self.give_back();
         r
+    }
+    fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String> {
+        sqlite_column_types(self.conn()?, table)
     }
 }
 
@@ -805,11 +860,17 @@ impl Interp {
             Value::Nil => SqlVal::Null,
             Value::Sym(s) => SqlVal::Text(s.clone()),
             Value::List(_) | Value::Map(_) => {
-                // Faqat json ustunga ruxsat (yoki schema noma'lum bo'lsa ham
-                // qulaylik uchun ruxsat berib enkod qilamiz).
-                if self.col_type(table, col).as_deref() == Some("json")
-                    || self.col_type(table, col).is_none()
-                {
+                // Yozishda faqat process-ichi tbl registry tekshiriladi.
+                // DB introspeksiyasi o'qish tomoni uchun (json dekod) — shu
+                // yerda ishlatilsa TEXT ustunlarga eski schema-less yozish
+                // buziladi (tbl yo'q process TEXT ustuniga yozolmay qoladi).
+                let tbl_type = self
+                    .schema
+                    .read()
+                    .get(table)
+                    .and_then(|cols| cols.get(col))
+                    .map(|c| c.type_name.clone());
+                if tbl_type.as_deref() == Some("json") || tbl_type.is_none() {
                     SqlVal::Text(json_encode(v))
                 } else {
                     return Err(Flow::err(format!(
@@ -836,13 +897,47 @@ impl Interp {
         Value::Map(m)
     }
 
-    // schema registry'dan ustun tipini oladi.
+    // Ustun tipini oladi. Birlamchi manba — joriy process'da `tbl` bilan e'lon
+    // qilingan schema registry. U bo'lmasa (masalan ikki-process setup'da
+    // o'qigich tbl e'lon qilmaydi) DB sxemasidan introspeksiya bilan tiklaymiz —
+    // shunda json ustun process chegarasidan qat'i nazar bir xil map qaytaradi.
     fn col_type(&self, table: &str, col: &str) -> Option<String> {
-        self.schema
-            .read()
-            .get(table)
-            .and_then(|cols| cols.get(col))
-            .map(|c| c.type_name.clone())
+        if let Some(cols) = self.schema.read().get(table)
+            && let Some(c) = cols.get(col)
+        {
+            return Some(c.type_name.clone());
+        }
+        self.db_col_type(table, col)
+    }
+
+    // DB sxemasini introspeksiya qilib ustun tipini topadi (jadval bo'yicha
+    // cache'lanadi — har qator uchun qayta so'rov bo'lmaydi). DB allaqachon ochiq:
+    // bu metod faqat natija qatorini Value'ga aylantirish paytida chaqiriladi.
+    //
+    // Tranzaksiya ichida bo'lsa, uncommitted DDL ko'rinishi uchun tx connection
+    // ishlatiladi — global pool connection bu DDL ni ko'ra olmaydi (issue #63).
+    fn db_col_type(&self, table: &str, col: &str) -> Option<String> {
+        if let Some(entry) = self.db_schema.read().get(table) {
+            return entry.get(col).cloned();
+        }
+        let raw = CURRENT_TX.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|tx| tx.column_types(table).ok())
+        });
+        let cols: BTreeMap<String, String> = match raw {
+            Some(v) => v.into_iter().collect(),
+            None => self
+                .db()
+                .ok()?
+                .column_types(table)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        };
+        let result = cols.get(col).cloned();
+        self.db_schema.write().insert(table.to_string(), cols);
+        result
     }
 }
 
