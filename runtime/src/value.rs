@@ -107,10 +107,22 @@ impl Value {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y))
             }
             (Value::Map(a), Value::Map(b)) => maps_equal(a, b),
-            // ctx oddiy map kabi taqqoslanadi (snapshot orqali).
-            (Value::Ctx(a), Value::Ctx(b)) => maps_equal(&a.lock().unwrap(), &b.lock().unwrap()),
+            // ctx oddiy map kabi taqqoslanadi (snapshot orqali). MUHIM: ikki lock'ni
+            // bir vaqtda USHLAMAYMIZ — `req == req` (yoki klon) da a va b bir xil
+            // Arc<Mutex> bo'lishi mumkin; ikkinchi lock o'sha non-reentrant mutex'ni
+            // qayta olib deadlock qilardi. Avval bir xil Arc'ni ptr_eq bilan
+            // qisqa-tutamiz, aks holda har birini ALOHIDA snapshot qilib taqqoslaymiz.
+            (Value::Ctx(a), Value::Ctx(b)) => {
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                let sa = a.lock().unwrap().clone();
+                let sb = b.lock().unwrap().clone();
+                maps_equal(&sa, &sb)
+            }
             (Value::Ctx(a), Value::Map(b)) | (Value::Map(b), Value::Ctx(a)) => {
-                maps_equal(&a.lock().unwrap(), b)
+                let sa = a.lock().unwrap().clone();
+                maps_equal(&sa, b)
             }
             _ => false,
         }

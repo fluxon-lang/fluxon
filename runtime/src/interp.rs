@@ -169,14 +169,13 @@ pub struct Interp {
     // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi,
     // `http.serve` o'qiydi. Arc<Mutex> — server thread'lari bilan ulashiladi.
     pub routes: Arc<Mutex<Vec<crate::http_mod::Route>>>,
-    // HTTP middleware (issue #67). `http.use` global'larni (barcha route'larga),
-    // `http.before "/api/*"` esa prefiks bo'yicha qo'shadi. Route handler'dan
-    // OLDIN ro'yxat tartibida ishlaydi; biri `fail`/`rep` qaytarsa zanjir to'xtaydi.
-    // `routes` kabi top-level to'ldiradi, server thread'lari o'qiydi (Arc<Mutex>).
-    pub global_mw: Arc<Mutex<Vec<Value>>>,
-    // (prefiks-shabloni, handler): `http.before` to'ldiradi. Shablon `"/api/*"`
-    // (prefiks mos) yoki aniq yo'l. Match http_mod::prefix_matches'da.
-    pub prefix_mw: Arc<Mutex<Vec<(String, Value)>>>,
+    // HTTP middleware (issue #67). `http.use` (barcha route'ga) va `http.before`
+    // (yo'l prefiks bo'yicha) ikkalasi SHU BITTA ro'yxatga ketma-ket qo'shiladi —
+    // shunda zanjir DEKLARATSIYA TARTIBIDA ishlaydi (use/before aralashganda ham,
+    // masalan before req.ctx yozsa, undan keyin e'lon qilingan use logger ctx'ni
+    // ko'radi). Route handler'dan OLDIN ishlaydi; biri `fail`/`rep` qaytarsa zanjir
+    // to'xtaydi. `routes` kabi top-level to'ldiradi, server thread'lari o'qiydi.
+    pub middlewares: Arc<Mutex<Vec<crate::http_mod::Middleware>>>,
     // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
     // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
     // qayta tiklaydi. `new_arc` o'rnatadi.
@@ -250,8 +249,7 @@ impl Interp {
         Interp {
             global,
             routes: Arc::new(Mutex::new(Vec::new())),
-            global_mw: Arc::new(Mutex::new(Vec::new())),
-            prefix_mw: Arc::new(Mutex::new(Vec::new())),
+            middlewares: Arc::new(Mutex::new(Vec::new())),
             this: OnceLock::new(),
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),

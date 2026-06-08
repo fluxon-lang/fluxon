@@ -176,3 +176,91 @@ async fn before_prefiks_himoyalanmagan_yulni_otkazadi() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// Middleware `fail` o'rniga `rep` bilan rad etsa ham zanjir to'xtashi kerak
+// (Codex P1). `rep` muvaffaqiyatli {__resp:...} map qaytaradi (Flow emas), shuning
+// uchun handle_request uni alohida aniqlaydi. Bu ishlamasa, handler baribir
+// ishlab o'z javobini yuborardi (auth chetlab o'tilardi).
+const REP_GUARD_SCRIPT: &str = r#"
+http.use \req ->
+  if req.path == "/secret"
+    rep 403 {error: "taqiqlangan"}
+
+http.on :get "/secret" \req ->
+  rep 200 {leaked: true}
+
+http.serve PORT
+"#;
+
+#[tokio::test]
+async fn middleware_rep_zanjirni_toxtatadi() {
+    let port = 8404;
+    let script = REP_GUARD_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server(port, &script);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    // Middleware rep 403 qaytaradi — handler (rep 200 leaked) ISHLAMASLIGI kerak.
+    let resp = http_request(port, "GET", "/secret", None, "").await;
+    assert!(
+        resp.contains("403"),
+        "middleware rep 403 kutilgan: {}",
+        resp
+    );
+    assert!(
+        resp.contains("taqiqlangan"),
+        "middleware javobi kutilgan: {}",
+        resp
+    );
+    assert!(
+        !resp.contains("leaked"),
+        "handler ISHLAMASLIGI kerak edi (rep zanjirni to'xtatmadi): {}",
+        resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Middleware'lar DEKLARATSIYA TARTIBIDA ishlaydi — use va before aralashganda ham
+// (Codex P2). Bu yerda before AVVAL req.ctx ga yozadi, keyin e'lon qilingan use
+// uni o'qib /api/check javobiga qo'shadi. Agar barcha use'lar before'dan oldin
+// ketsa (tartib buzilsa), use bo'sh ctx ko'rardi.
+const ORDER_SCRIPT: &str = r#"
+http.before "/api/*" \req ->
+  req.ctx <- {step: "before"}
+
+http.use \req ->
+  c = req.ctx
+  req.ctx <- {step: c.step seen_by_use: true}
+
+http.on :get "/api/check" \req ->
+  ctx = req.ctx
+  rep 200 {step: ctx.step seen: ctx.seen_by_use}
+
+http.serve PORT
+"#;
+
+#[tokio::test]
+async fn middleware_deklaratsiya_tartibi_saqlanadi() {
+    let port = 8405;
+    let script = ORDER_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server(port, &script);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    // before (avval) ctx yozadi -> use (keyin) uni o'qiydi -> handler ikkalasini ko'radi.
+    let resp = http_request(port, "GET", "/api/check", None, "").await;
+    assert!(resp.contains("200"), "200 kutilgan: {}", resp);
+    assert!(
+        resp.contains("\"step\":\"before\""),
+        "before ctx use'dan oldin yozishi kerak: {}",
+        resp
+    );
+    assert!(
+        resp.contains("\"seen\":true"),
+        "use before'dan keyin ishlab ctx'ni ko'rishi kerak: {}",
+        resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
