@@ -166,26 +166,30 @@ impl Parser {
 
     // Ident bilan boshlangan: bind (=), assign (<-), yoki chaqiruv ifodasi.
     fn parse_ident_stmt(&mut self) -> ParseResult<Stmt> {
-        // bir token oldinga qarab `name =` yoki `name <-` ni aniqlaymiz.
-        if let Tok::Ident(name) = self.peek().clone() {
-            match self.peek2() {
-                Tok::Eq => {
-                    self.advance(); // name
-                    self.advance(); // =
-                    let value = self.parse_expr()?;
-                    return Ok(Stmt::Bind { name, value });
-                }
-                Tok::Assign => {
-                    self.advance(); // name
-                    self.advance(); // <-
-                    let value = self.parse_expr()?;
-                    return Ok(Stmt::Assign { name, value });
-                }
-                _ => {}
-            }
+        // `name = ...` — bind faqat oddiy ident'ga ruxsat etiladi (spec: `=`
+        // immutable yangi nom). Buni `peek2` orqali oldindan aniqlaymiz, shunda
+        // `name` chaqiruv argumentiga (`f name`) aralashmaydi.
+        if let Tok::Ident(name) = self.peek().clone()
+            && matches!(self.peek2(), Tok::Eq)
+        {
+            self.advance(); // name
+            self.advance(); // =
+            let value = self.parse_expr()?;
+            return Ok(Stmt::Bind { name, value });
         }
-        let e = self.parse_expr()?;
-        Ok(Stmt::Expr(e))
+        // Aks holda chap tomonni ifoda sifatida o'qiymiz. `<-` kelsa, bu
+        // assign (`x <- v` yoki `req.ctx <- v`); aks holda oddiy ifoda statement.
+        // `<-` statement-level token (operator emas), shuning uchun parse_expr
+        // undan oldin to'xtaydi — chap ifoda to'liq olinadi.
+        let lhs = self.parse_expr()?;
+        if self.eat(&Tok::Assign) {
+            let value = self.parse_expr()?;
+            return Ok(Stmt::Assign {
+                target: Box::new(lhs),
+                value,
+            });
+        }
+        Ok(Stmt::Expr(lhs))
     }
 
     fn parse_fn(&mut self, exported: bool) -> ParseResult<Stmt> {

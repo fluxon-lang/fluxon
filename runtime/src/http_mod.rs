@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -42,6 +42,15 @@ pub struct Route {
     pub method: String, // lowercase: "get", "post", ...
     pub pattern: Vec<Seg>,
     pub handler: Value, // Value::Fn (closure)
+}
+
+// Middleware (issue #67). `scope` = None — global (`http.use`, barcha yo'lga);
+// Some(shablon) — prefiks bo'yicha (`http.before "/api/*"`). Ro'yxatda
+// deklaratsiya tartibida saqlanadi (use/before aralashsa ham tartib aniq).
+#[derive(Clone)]
+pub struct Middleware {
+    pub scope: Option<String>,
+    pub handler: Value,
 }
 
 // "/notes/:id" -> [Lit("notes"), Param("id")]. Bo'sh segmentlar tashlanadi.
@@ -99,6 +108,19 @@ fn match_route(
     None
 }
 
+// http.before shabloni so'rov yo'liga mosmi? (issue #67)
+// "/api/*" -> "/api" yoki "/api/..." bilan boshlanuvchi yo'llar (segment chegarasi).
+// "*"siz shablon -> aniq mos. "/apix" "/api/*" ga MOS EMAS (segment ajratiladi).
+fn prefix_matches(pat: &str, path: &str) -> bool {
+    if let Some(prefix) = pat.strip_suffix("/*") {
+        // "/api/*" → "/api" ning o'zi yoki "/api/" bilan boshlanuvchilar.
+        path == prefix || path.starts_with(&format!("{}/", prefix))
+    } else {
+        // Shablonsiz — aniq yo'l mosligi.
+        pat == path
+    }
+}
+
 // "a=1&b=2" -> {a:"1" b:"2"}. URL-dekod minimal (faqat '+' -> bo'shliq).
 fn parse_query(q: &str) -> Value {
     let mut m = BTreeMap::new();
@@ -117,7 +139,11 @@ fn parse_query(q: &str) -> Value {
 
 // --- request -> Value::Map ---
 
-// req = {method, path, query:{}, headers:{}, params:{}, body:(JSON map/str)}
+// req = {method, path, query:{}, headers:{}, params:{}, body:(JSON map/str), ctx}
+// ctx — shared request-scoped store (issue #68): middleware `req.ctx <- {...}`
+// yozadi, handler `req.ctx` o'qiydi. ctx'ni caller (`handle_request`) qo'shadi
+// (`with_ctx`), chunki u har so'rovga yangi Arc<Mutex> yaratadi — middleware va
+// handler bir xil cell'ni ko'rishi uchun.
 fn build_req(
     method: String,
     path: String,
@@ -155,6 +181,18 @@ fn build_req(
     Value::Map(m)
 }
 
+// req map'iga shared ctx cell'ni (`req.ctx`) qo'shadi (issue #68). build_req'dan
+// alohida — har so'rovga yangi cell yaratiladi (caller'da), bu funksiya uni
+// req'ning "ctx" kalitiga joylaydi.
+fn with_ctx(req: Value, ctx: Arc<Mutex<BTreeMap<String, Value>>>) -> Value {
+    if let Value::Map(mut m) = req {
+        m.insert("ctx".to_string(), Value::Ctx(ctx));
+        Value::Map(m)
+    } else {
+        req
+    }
+}
+
 // --- Value/Flow -> hyper::Response ---
 
 fn json_response(status: u16, body: String) -> Response<Full<Bytes>> {
@@ -173,11 +211,17 @@ fn text_response(status: u16, body: String) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
+// Qiymat `rep`-javobmi? `rep status body` -> {__resp:true ...} map (builtins.rs).
+// Middleware shu javobni qaytarsa zanjir to'xtaydi (P1: rep auth rad etishi).
+fn is_resp(v: &Value) -> bool {
+    matches!(v, Value::Map(m) if matches!(m.get("__resp"), Some(Value::Bool(true))))
+}
+
 // Handler muvaffaqiyatli qaytargan qiymatni javobga aylantiradi.
 // `rep` -> {__resp:true status body}. Aks holda 200 + qiymat.
 fn value_to_response(v: Value) -> Response<Full<Bytes>> {
-    if let Value::Map(m) = &v
-        && matches!(m.get("__resp"), Some(Value::Bool(true)))
+    if is_resp(&v)
+        && let Value::Map(m) = &v
     {
         let status = match m.get("status") {
             Some(Value::Int(n)) => *n as u16,
@@ -236,6 +280,8 @@ impl Interp {
     pub fn http_dispatch(self: &Arc<Self>, func: &str, args: Vec<Value>) -> Result<Value, Flow> {
         match func {
             "on" => self.http_on(args),
+            "use" => self.http_use(args),
+            "before" => self.http_before(args),
             "serve" => self.http_serve(args),
             "get" => http_client("GET", args, false),
             "post" => http_client("POST", args, true),
@@ -269,6 +315,46 @@ impl Interp {
         self.routes.lock().unwrap().push(Route {
             method,
             pattern: parse_pattern(&path),
+            handler,
+        });
+        Ok(Value::Nil)
+    }
+
+    // http.use \req -> ...  — barcha route'larga global middleware (issue #67).
+    // Bir nechta chaqiruv zanjir hosil qiladi (deklaratsiya tartibida ishlaydi).
+    fn http_use(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        let handler = match args.first() {
+            Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
+            _ => return Err(Flow::err("http.use: argument handler (fn) bo'lishi kerak")),
+        };
+        self.middlewares.lock().unwrap().push(Middleware {
+            scope: None,
+            handler,
+        });
+        Ok(Value::Nil)
+    }
+
+    // http.before "/api/*" \req -> ...  — yo'l prefiks bo'yicha middleware (#67).
+    // Shablon "/api/*" → /api bilan boshlanuvchi yo'llar; "*"siz → aniq mos.
+    fn http_before(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        let pat = match args.first() {
+            Some(Value::Str(s)) => s.clone(),
+            _ => {
+                return Err(Flow::err(
+                    "http.before: 1-argument yo'l (str) bo'lishi kerak",
+                ));
+            }
+        };
+        let handler = match args.get(1) {
+            Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
+            _ => {
+                return Err(Flow::err(
+                    "http.before: 2-argument handler (fn) bo'lishi kerak",
+                ));
+            }
+        };
+        self.middlewares.lock().unwrap().push(Middleware {
+            scope: Some(pat),
             handler,
         });
         Ok(Value::Nil)
@@ -379,13 +465,53 @@ async fn handle_request(
         Err(_) => Bytes::new(),
     };
 
-    let request_value = build_req(method, path, query, headers, params, body_bytes, is_json);
+    // Bu so'rovga mos middleware zanjirini yig'amiz (issue #67): avval global
+    // (http.use), keyin yo'l prefiks bo'yicha (http.before). Ro'yxat tartibi
+    // saqlanadi. Lock'larni shu yerda erta olib qo'yamiz (handler'lar Value
+    // klonlari — Arc, arzon).
+    let chain: Vec<Value> = {
+        interp
+            .middlewares
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|mw| match &mw.scope {
+                None => true,                            // http.use — barcha yo'lga
+                Some(pat) => prefix_matches(pat, &path), // http.before — prefiks mos
+            })
+            .map(|mw| mw.handler.clone())
+            .collect()
+    };
+
+    // Request-scoped ctx cell: har so'rovga yangi. req klonlari Arc'ni ulashadi,
+    // shuning uchun middleware yozgan ctx'ni handler bir xil cell'da ko'radi (#68).
+    let ctx = Arc::new(Mutex::new(BTreeMap::new()));
+    let request_value = with_ctx(
+        build_req(method, path, query, headers, params, body_bytes, is_json),
+        ctx,
+    );
     let handler = route.handler;
 
     // Sinxron interp ishini blocking thread'da bajaramiz — tokio worker'ini
     // bloklamaydi, har request alohida thread'da -> haqiqiy parallel.
-    let result =
-        tokio::task::spawn_blocking(move || interp.apply(handler, vec![request_value])).await;
+    let result = tokio::task::spawn_blocking(move || {
+        // Middleware zanjiri handler'dan OLDIN ishlaydi. Har biri req klonini
+        // oladi (ctx Arc ulashilgan). To'xtatish shartlari:
+        //   - `fail`/xato -> Err(flow), zanjir to'xtaydi.
+        //   - `rep` -> Ok({__resp:true ...}) MUVAFFAQIYATLI qaytadi (Flow emas),
+        //     shuning uchun bu javobni ALOHIDA aniqlab to'xtatamiz; aks holda
+        //     auth `rep 401` e'tiborsiz qolib, handler baribir ishlardi.
+        //   - boshqa Ok(_) (ctx yozish, log) -> zanjir davom etadi.
+        for mw in chain {
+            match interp.apply(mw, vec![request_value.clone()]) {
+                Ok(v) if is_resp(&v) => return Ok(v), // rep -> javob, zanjir to'xta
+                Ok(_) => {}                           // davom (ctx/log)
+                Err(flow) => return Err(flow),        // fail/xato -> to'xta
+            }
+        }
+        interp.apply(handler, vec![request_value])
+    })
+    .await;
 
     let resp = match result {
         Ok(Ok(v)) => value_to_response(v),
@@ -815,5 +941,129 @@ mod tests {
     fn buzilgan_json_xom_matn_qoladi() {
         // `{` bilan boshlanadi, lekin yaroqsiz JSON — string sifatida qoladi.
         assert!(matches!(body_of("{buzuq", false), Value::Str(_)));
+    }
+
+    // --- middleware prefiks mosligi (issue #67) ---
+
+    #[test]
+    fn prefix_yulduz_aniq_prefiks_mos() {
+        // "/api/*" → "/api" ning o'zi ham, ostidagilar ham mos.
+        assert!(prefix_matches("/api/*", "/api"));
+        assert!(prefix_matches("/api/*", "/api/users"));
+        assert!(prefix_matches("/api/*", "/api/v1/bookings"));
+    }
+
+    #[test]
+    fn prefix_yulduz_segment_chegarasi() {
+        // "/apix" "/api/*" ga MOS EMAS — prefiks segment chegarasida ajraladi
+        // (aks holda "/api" boshqa resurslarga sizib ketardi).
+        assert!(!prefix_matches("/api/*", "/apix"));
+        assert!(!prefix_matches("/api/*", "/ap"));
+        assert!(!prefix_matches("/api/*", "/"));
+    }
+
+    #[test]
+    fn prefix_yulduzsiz_aniq_mos() {
+        // "*"siz shablon — faqat aniq yo'l mosligi.
+        assert!(prefix_matches("/api/v1/users", "/api/v1/users"));
+        assert!(!prefix_matches("/api/v1/users", "/api/v1"));
+        assert!(!prefix_matches("/api/v1/users", "/api/v1/users/5"));
+    }
+
+    // --- req.ctx shared cell (issue #68) ---
+
+    #[test]
+    fn with_ctx_shared_cell_qoshadi() {
+        // with_ctx req map'iga "ctx" kalitini Value::Ctx sifatida qo'yadi.
+        let cell = Arc::new(Mutex::new(BTreeMap::new()));
+        let req = build_req(
+            "GET".into(),
+            "/".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Bytes::new(),
+            false,
+        );
+        let req = with_ctx(req, cell.clone());
+        let Value::Map(m) = &req else {
+            panic!("req Map bo'lishi kerak");
+        };
+        assert!(matches!(m.get("ctx"), Some(Value::Ctx(_))));
+    }
+
+    #[test]
+    fn ctx_cell_klon_orqali_ulashiladi() {
+        // req klonlanganda ctx Arc ulashiladi — tashqaridan cell'ga yozsak,
+        // klon orqali ham ko'rinadi (middleware->handler oqimi shu mexanizmga
+        // tayanadi).
+        let cell = Arc::new(Mutex::new(BTreeMap::new()));
+        let req = with_ctx(
+            build_req(
+                "GET".into(),
+                "/".into(),
+                String::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Bytes::new(),
+                false,
+            ),
+            cell.clone(),
+        );
+        let req_clone = req.clone();
+        // Tashqaridan cell'ga yozamiz (middleware `req.ctx <-` shuni qiladi).
+        cell.lock()
+            .unwrap()
+            .insert("tenant_id".to_string(), Value::Int(7));
+        // Klon orqali o'qiganda yangi qiymat ko'rinadi (Arc ulashilgani isboti).
+        let Value::Map(m) = &req_clone else {
+            panic!("Map");
+        };
+        let Some(Value::Ctx(c)) = m.get("ctx") else {
+            panic!("ctx cell");
+        };
+        // Value Debug derive qilmaydi — equals bilan tekshiramiz (assert_eq emas).
+        let got = c.lock().unwrap().get("tenant_id").cloned().unwrap();
+        assert!(got.equals(&Value::Int(7)), "ctx klon orqali yangilandi");
+    }
+
+    #[test]
+    fn ctx_self_equals_deadlock_qilmaydi() {
+        // `req == req` (yoki req klonini taqqoslash) — bir xil ctx Arc<Mutex>'ni
+        // ikki tomondan ko'radi. equals ikki lock'ni birga ushlamasligi kerak,
+        // aks holda non-reentrant mutex deadlock qiladi (Codex P2). Bu test
+        // o'sha yo'lni kechiradi: bloklanса hang qiladi, aks holda darrov o'tadi.
+        let cell = Arc::new(Mutex::new(BTreeMap::new()));
+        let req = with_ctx(
+            build_req(
+                "GET".into(),
+                "/".into(),
+                String::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Bytes::new(),
+                false,
+            ),
+            cell,
+        );
+        let req_clone = req.clone();
+        // Map equality ctx kalitiga yetadi -> (Ctx,Ctx) bir xil Arc -> ptr_eq.
+        assert!(
+            req.equals(&req_clone),
+            "req o'z kloniga teng, deadlock yo'q"
+        );
+        assert!(req.equals(&req), "req o'ziga teng, deadlock yo'q");
+    }
+
+    #[test]
+    fn is_resp_rep_javobni_taniydi() {
+        // rep -> {__resp:true ...}. Middleware shu javobni qaytarsa zanjir to'xtaydi.
+        let mut m = BTreeMap::new();
+        m.insert("__resp".to_string(), Value::Bool(true));
+        m.insert("status".to_string(), Value::Int(401));
+        assert!(is_resp(&Value::Map(m)));
+        // Oddiy map yoki nil — javob emas (middleware davom etadi).
+        assert!(!is_resp(&Value::Map(BTreeMap::new())));
+        assert!(!is_resp(&Value::Nil));
     }
 }

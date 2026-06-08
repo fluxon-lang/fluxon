@@ -881,6 +881,12 @@ impl Interp {
                     )));
                 }
             }
+            // ctx (req.ctx) — odatda get_field snapshot Map beradi, lekin ehtiyot
+            // uchun: oddiy map kabi json ustunga yoziladi (snapshot).
+            Value::Ctx(c) => {
+                let snap = Value::Map(c.lock().unwrap().clone());
+                return self.value_to_sqlval(table, col, &snap);
+            }
             Value::Fn(_) | Value::Native(_) => {
                 return Err(Flow::err("db: funksiyani DB'ga yozib bo'lmaydi"));
             }
@@ -1016,6 +1022,8 @@ fn param_to_sqlval(v: &Value) -> Result<SqlVal, Flow> {
         Value::Nil => SqlVal::Null,
         Value::Sym(s) => SqlVal::Text(s.clone()), // symbol -> matn (filter mosligi)
         Value::List(_) | Value::Map(_) => SqlVal::Text(json_encode(v)),
+        // ctx — oddiy map kabi JSON matn (snapshot). json_encode buni hal qiladi.
+        Value::Ctx(_) => SqlVal::Text(json_encode(v)),
         Value::Fn(_) | Value::Native(_) => {
             return Err(Flow::err(
                 "db: funksiyani parametr sifatida uzatib bo'lmaydi",

@@ -153,10 +153,12 @@ pub enum Stmt {
         name: String,
         value: Expr,
     },
-    // target <- expr  (mutable bind yoki qayta tayinlash; target oddiy ident
-    // yoki member/index bo'lishi mumkin emas — faqat ident)
+    // target <- expr  (mutable bind yoki qayta tayinlash). target oddiy ident
+    // (`x <- v`) yoki member field (`req.ctx <- v`, issue #68) bo'lishi mumkin.
+    // Field-target faqat `req.ctx` kabi shared ctx cell'ga yozish uchun ishlatiladi
+    // (interp::assign_field) — oddiy Map immutable bo'lib qoladi.
     Assign {
-        name: String,
+        target: Box<Expr>,
         value: Expr,
     },
 

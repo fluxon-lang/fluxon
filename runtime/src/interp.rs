@@ -169,6 +169,13 @@ pub struct Interp {
     // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi,
     // `http.serve` o'qiydi. Arc<Mutex> — server thread'lari bilan ulashiladi.
     pub routes: Arc<Mutex<Vec<crate::http_mod::Route>>>,
+    // HTTP middleware (issue #67). `http.use` (barcha route'ga) va `http.before`
+    // (yo'l prefiks bo'yicha) ikkalasi SHU BITTA ro'yxatga ketma-ket qo'shiladi —
+    // shunda zanjir DEKLARATSIYA TARTIBIDA ishlaydi (use/before aralashganda ham,
+    // masalan before req.ctx yozsa, undan keyin e'lon qilingan use logger ctx'ni
+    // ko'radi). Route handler'dan OLDIN ishlaydi; biri `fail`/`rep` qaytarsa zanjir
+    // to'xtaydi. `routes` kabi top-level to'ldiradi, server thread'lari o'qiydi.
+    pub middlewares: Arc<Mutex<Vec<crate::http_mod::Middleware>>>,
     // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
     // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
     // qayta tiklaydi. `new_arc` o'rnatadi.
@@ -242,6 +249,7 @@ impl Interp {
         Interp {
             global,
             routes: Arc::new(Mutex::new(Vec::new())),
+            middlewares: Arc::new(Mutex::new(Vec::new())),
             this: OnceLock::new(),
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),
@@ -569,9 +577,22 @@ impl Interp {
                 self.bind(name, v, env)?;
                 Ok(Value::Nil)
             }
-            Stmt::Assign { name, value } => {
+            Stmt::Assign { target, value } => {
                 let v = self.eval(value, env)?;
-                self.assign(name, v, env)?;
+                match target.as_ref() {
+                    // `x <- v` — oddiy o'zgaruvchi qayta tayinlash (eski yo'l).
+                    Expr::Ident(name) => self.assign(name, v, env)?,
+                    // `req.ctx <- v` — shared ctx cell'ga yozish (issue #68).
+                    Expr::Field { target: obj, name } => {
+                        let obj_val = self.eval(obj, env)?;
+                        self.assign_field(&obj_val, name, v)?;
+                    }
+                    _ => {
+                        return Err(Flow::err(
+                            "'<-' chap tomoni o'zgaruvchi yoki '.maydon' bo'lishi kerak",
+                        ));
+                    }
+                }
                 Ok(Value::Nil)
             }
             Stmt::ExpBind { name, value } => {
@@ -704,6 +725,39 @@ impl Interp {
         // yangi mutable o'zgaruvchi
         env.write().define(name, v, true);
         Ok(())
+    }
+
+    // `obj.field <- v` — member tayinlash. Hozircha FAQAT shared ctx cell'ga
+    // yozish qo'llanadi (`req.ctx <- {...}`, issue #68). `obj` = `req` (Map),
+    // `field` = "ctx" → req map'ining "ctx" kaliti `Value::Ctx(Arc<Mutex>)`
+    // saqlaydi. `obj` (Map) klonlanadi, lekin ichidagi `Value::Ctx` Arc ulashiladi,
+    // shuning uchun klon orqali ham asl Mutex cell'ga yozamiz — middleware yozgan
+    // ctx'ni handler bir xil cell'da ko'radi. Oddiy Map immutable bo'lib qoladi:
+    // `Value::Ctx` bo'lmagan maydonga yozish rad etiladi.
+    fn assign_field(&self, obj: &Value, field: &str, v: Value) -> Result<(), Flow> {
+        if let Value::Map(m) = obj
+            && let Some(Value::Ctx(cell)) = m.get(field)
+        {
+            // ctx butunlay almashtiriladi (yangi map yoziladi). Yozilayotgan
+            // qiymat map (yoki boshqa ctx snapshot'i) bo'lishi kerak.
+            let new_map = match v {
+                Value::Map(nm) => nm,
+                Value::Ctx(c) => c.lock().unwrap().clone(),
+                other => {
+                    return Err(Flow::err(format!(
+                        "req.{} <- map kutadi, {} berildi",
+                        field,
+                        other.type_name()
+                    )));
+                }
+            };
+            *cell.lock().unwrap() = new_map;
+            return Ok(());
+        }
+        Err(Flow::err(format!(
+            "'.{}' ga '<-' bilan tayinlab bo'lmaydi (faqat req.ctx kabi kontekst maydoni o'zgartiriladi)",
+            field
+        )))
     }
 
     // `=` bind: o'zgaruvchini JORIY FUNKSIYA ICHIDAGI scope zanjirida qidiradi.
@@ -1379,6 +1433,11 @@ impl Interp {
             Value::Map(m) => {
                 // Avval haqiqiy kalit; bo'lmasa argumentsiz metod (keys/vals/len).
                 if let Some(v) = m.get(name) {
+                    // ctx cell'ni o'qisa — snapshot Map qaytaramiz (handler oddiy
+                    // map ko'rsin, ichki Ctx tipini emas).
+                    if let Value::Ctx(cell) = v {
+                        return Ok(Value::Map(cell.lock().unwrap().clone()));
+                    }
                     return Ok(v.clone());
                 }
                 if matches!(name, "keys" | "vals" | "len") {
@@ -1407,8 +1466,13 @@ impl Interp {
                     Ok(xs[idx as usize].clone())
                 }
             }
-            (Value::Map(m), Value::Str(key)) => Ok(m.get(key).cloned().unwrap_or(Value::Nil)),
-            (Value::Map(m), Value::Sym(key)) => Ok(m.get(key).cloned().unwrap_or(Value::Nil)),
+            // ctx kalitini o'qisa get_field bilan izchil — snapshot Map qaytaramiz.
+            (Value::Map(m), Value::Str(key)) | (Value::Map(m), Value::Sym(key)) => {
+                match m.get(key) {
+                    Some(Value::Ctx(cell)) => Ok(Value::Map(cell.lock().unwrap().clone())),
+                    other => Ok(other.cloned().unwrap_or(Value::Nil)),
+                }
+            }
             (Value::Nil, _) => Ok(Value::Nil),
             (t, k) => Err(Flow::err(format!(
                 "{}[{}] indekslash qo'llab-quvvatlanmaydi",
