@@ -860,11 +860,17 @@ impl Interp {
             Value::Nil => SqlVal::Null,
             Value::Sym(s) => SqlVal::Text(s.clone()),
             Value::List(_) | Value::Map(_) => {
-                // Faqat json ustunga ruxsat (yoki schema noma'lum bo'lsa ham
-                // qulaylik uchun ruxsat berib enkod qilamiz).
-                if self.col_type(table, col).as_deref() == Some("json")
-                    || self.col_type(table, col).is_none()
-                {
+                // Yozishda faqat process-ichi tbl registry tekshiriladi.
+                // DB introspeksiyasi o'qish tomoni uchun (json dekod) — shu
+                // yerda ishlatilsa TEXT ustunlarga eski schema-less yozish
+                // buziladi (tbl yo'q process TEXT ustuniga yozolmay qoladi).
+                let tbl_type = self
+                    .schema
+                    .read()
+                    .get(table)
+                    .and_then(|cols| cols.get(col))
+                    .map(|c| c.type_name.clone());
+                if tbl_type.as_deref() == Some("json") || tbl_type.is_none() {
                     SqlVal::Text(json_encode(v))
                 } else {
                     return Err(Flow::err(format!(

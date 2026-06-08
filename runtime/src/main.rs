@@ -801,6 +801,51 @@ row = db.one "select * from t where k=$1" [:a]
     }
 
     #[test]
+    fn db_json_schema_less_write_to_text_col() {
+        // Regression: tbl e'lon QILINMAGAN process TEXT ustuniga map/list yoza olsin.
+        // Ilgari DB introspeksiyasi TEXT ustunni Some("text") qaytarardi va write path
+        // "json ustun emas" xatosi berardi — endi yozish tomoni faqat tbl registry'dan
+        // foydalanadi, shuning uchun tbl yo'q process uchun schema-less yozish ishlaydi.
+        //
+        // Scenario: birinchi process `str` (TEXT) ustun yaratadi; ikkinchi process
+        // tbl YO'Q holda map yozadi — bu ilgari "json ustun emas" xatosi berardi.
+        let path = std::env::temp_dir().join("flux_schemaless_write_test.db");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
+        }
+
+        // Birinchi process: str (TEXT) ustun bilan jadval yaratadi.
+        run_source(
+            r#"
+use db
+tbl t3
+  id   serial pk
+  body str
+"#,
+        )
+        .unwrap_or_else(|e| panic!("jadval yaratish: {}", e));
+
+        // Ikkinchi process: tbl YO'Q — TEXT ustuniga map yozishi kerak (schema-less).
+        run_source(
+            r#"
+use db
+db.ins "t3" {body:{x:42 y:[1 2]}}
+row = db.one "select body from t3 limit 1"
+row.body | (fail "body bo'sh bo'lmasligi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("schema-less yozish: {}", e));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
     fn db_tx_nested_savepoint() {
         // Ichki tx (SAVEPOINT). Ichki blok ret qiymat qaytaradi, tashqi commit.
         with_db_test("tx_nested", || {
