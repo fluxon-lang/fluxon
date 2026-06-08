@@ -539,7 +539,32 @@ fn parse_ts(s: &str) -> Option<i64> {
     let h = num(11, 13)?;
     let mi = num(14, 16)?;
     let se = num(17, 19)?;
+    // Diapazonlarni tekshiramiz — days_from_civil overflow'ni jimgina
+    // "tuzatadi" (mavjud bo'lmagan 02-31 -> 03-03), shuning uchun bu yerda
+    // rad etamiz: booking oqimida noto'g'ri sana sukutsiz qabul qilinmasin.
+    // se 60 — kabisa sekund (ISO ruxsat beradi) — qabul qilamiz.
+    if !(1..=12).contains(&mo)
+        || !(1..=days_in_month(y, mo)).contains(&d)
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=60).contains(&se)
+    {
+        return None;
+    }
     Some(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se)
+}
+
+// Berilgan yil/oy uchun kunlar soni (kabisa yilni hisobga oladi).
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 0, // noto'g'ri oy — chaqiruvchi mo'ni allaqachon tekshiradi
+    }
 }
 
 // Ixtiyoriy ISO-8601 matnni unix sekundga (UTC) o'giradi. parse_ts ustiga
@@ -1168,6 +1193,28 @@ mod time_tests {
     fn time_parse_rejects_garbage() {
         let r = time_module("parse", vec![Value::Str("salom".into())]);
         assert!(r.is_err(), "noto'g'ri matn xato berishi kerak");
+    }
+
+    #[test]
+    fn parse_ts_rejects_impossible_dates() {
+        // Mavjud bo'lmagan sana/vaqt jimgina "tuzatilmasin" — rad etilsin
+        // (days_from_civil overflow'ni normalizatsiya qiladi, biz oldini olamiz).
+        assert_eq!(parse_ts("2026-02-31T10:00:00Z"), None); // fevralda 31 yo'q
+        assert_eq!(parse_ts("2026-02-29 00:00:00"), None); // 2026 kabisa emas
+        assert_eq!(parse_ts("2026-13-01 00:00:00"), None); // 13-oy yo'q
+        assert_eq!(parse_ts("2026-00-10 00:00:00"), None); // 0-oy yo'q
+        assert_eq!(parse_ts("2026-06-00 00:00:00"), None); // 0-kun yo'q
+        assert_eq!(parse_ts("2026-06-10 24:00:00"), None); // 24-soat yo'q
+        assert_eq!(parse_ts("2026-06-10 10:60:00"), None); // 60-daqiqa yo'q
+        // Haqiqiy chekka holatlar QABUL qilinadi:
+        assert!(parse_ts("2024-02-29 00:00:00").is_some()); // 2024 kabisa
+        assert!(parse_ts("2026-12-31 23:59:60").is_some()); // kabisa sekund (60)
+    }
+
+    #[test]
+    fn time_parse_rejects_impossible_date() {
+        let r = time_module("parse", vec![Value::Str("2026-02-31T10:00:00Z".into())]);
+        assert!(r.is_err(), "02-31 mavjud emas — xato berishi kerak");
     }
 
     #[test]
