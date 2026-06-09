@@ -50,7 +50,35 @@ pub struct Route {
 // bir marta yaratiladi, har request shu BITTA holatni ulashadi (Middleware klonida
 // Arc nusxalanadi — pointer bir xil), shu sababli parallel request'lar atomik
 // sanaydi (issue #79: thread-safe). Holat in-memory — bitta instance uchun (docs).
-type LimitState = Arc<Mutex<HashMap<String, (u64, u32)>>>;
+//
+// Xotira chegarasi: kalit funksiyasi foydalanuvchi nazoratidagi qiymatga
+// (`req.headers.x_api_key`) asoslansa, har yangi qiymat HashMap'ga kirib qoladi.
+// Public endpoint'da mijoz har so'rovda yangi kalit yuborib holatni cheksiz
+// o'stira oladi. Buni oldini olish uchun `LimitBucket` har `SWEEP_EVERY`
+// operatsiyada bir marta ESKI OYNADAGI kalitlarni tozalaydi (amortizatsiyalangan
+// O(1): tozalash sikli kamdan-kam ishlaydi). Eski oyna kaliti baribir keyingi
+// so'rovda count=0 dan qayta boshlanardi — shuning uchun o'chirish xavfsiz.
+//
+// pub: `pub enum MwKind` (Middleware orqali) LimitState turini oshkor qiladi.
+pub struct LimitBucket {
+    counts: HashMap<String, (u64, u32)>,
+    // Oxirgi tozalashdan beri operatsiyalar soni (sweep'ni amortizatsiya qiladi).
+    ops: u32,
+}
+
+impl LimitBucket {
+    fn new() -> Self {
+        LimitBucket {
+            counts: HashMap::new(),
+            ops: 0,
+        }
+    }
+}
+
+// Necha operatsiyada bir marta eski oyna kalitlarini tozalaymiz.
+const SWEEP_EVERY: u32 = 1024;
+
+pub type LimitState = Arc<Mutex<LimitBucket>>;
 
 // Middleware turi: oddiy fn (use/before) yoki rate-limiter (http.limit). Limit
 // ham SHU ro'yxatga qo'shiladi (alohida emas) — shunda u boshqa middleware bilan
@@ -171,8 +199,19 @@ fn check_and_count(state: &LimitState, key: &str, limit: u32, window_secs: u64) 
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let window_id = now / window_secs;
-    let mut map = state.lock().unwrap();
-    let entry = map.entry(key.to_string()).or_insert((window_id, 0));
+    let mut bucket = state.lock().unwrap();
+    // Davriy tozalash: eski oyna (window_id'i joriyidan kichik) kalitlarini
+    // olib tashlaymiz, shunda foydalanuvchi nazoratidagi kalitlar xotirani
+    // cheksiz o'stirmaydi. Faqat SWEEP_EVERY operatsiyada bir marta — O(1) amortized.
+    bucket.ops = bucket.ops.saturating_add(1);
+    if bucket.ops >= SWEEP_EVERY {
+        bucket.ops = 0;
+        bucket.counts.retain(|_, (wid, _)| *wid >= window_id);
+    }
+    let entry = bucket
+        .counts
+        .entry(key.to_string())
+        .or_insert((window_id, 0));
     // Yangi oynaga o'tdik — hisobni nolga tushiramiz.
     if entry.0 != window_id {
         *entry = (window_id, 0);
@@ -596,7 +635,7 @@ impl Interp {
             kind: MwKind::Limit {
                 limit,
                 window_secs,
-                state: Arc::new(Mutex::new(HashMap::new())),
+                state: Arc::new(Mutex::new(LimitBucket::new())),
             },
         });
         Ok(Value::Nil)
@@ -1452,7 +1491,7 @@ mod tests {
     #[test]
     fn limit_oyna_ichida_sanaydi_va_429_beradi() {
         // limit=3 — dastlabki 3 so'rov o'tadi (None), 4-si bloklanadi (Some).
-        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
@@ -1466,7 +1505,7 @@ mod tests {
     #[test]
     fn limit_kalitlar_alohida_sanaladi() {
         // Har kalit (tenant/key) o'z hisobgichiga ega — biri tugasa boshqasiga ta'sir yo'q.
-        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         assert!(check_and_count(&state, "a", 1, 3600).is_none()); // a: 1-chi o'tadi
         assert!(check_and_count(&state, "a", 1, 3600).is_some()); // a: 2-chi bloklanadi
         assert!(check_and_count(&state, "b", 1, 3600).is_none()); // b: alohida bucket, o'tadi
@@ -1475,7 +1514,7 @@ mod tests {
     #[test]
     fn limit_yangi_oynada_tiklanadi() {
         // window_secs=1 — bir soniya o'tgach yangi oyna, hisob nolga tushadi.
-        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         assert!(check_and_count(&state, "k", 1, 1).is_none());
         assert!(check_and_count(&state, "k", 1, 1).is_some()); // shu oynada tugadi
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -1486,11 +1525,34 @@ mod tests {
     }
 
     #[test]
+    fn limit_eski_oyna_kalitlari_tozalanadi() {
+        // Xotira cheksiz o'smasligi uchun (Codex review P2): foydalanuvchi
+        // nazoratidagi kalitlar yig'ilib qolmasin — eski oyna kalitlari sweep'da
+        // o'chadi. window_secs=1: "old"ni yozamiz, oyna o'tkazamiz, keyin
+        // SWEEP_EVERY operatsiya bilan sweep'ni ishga tushiramiz.
+        let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
+        check_and_count(&state, "old", 1000, 1);
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // keyingi oyna
+        for _ in 0..SWEEP_EVERY {
+            check_and_count(&state, "new", 1_000_000, 1);
+        }
+        let bucket = state.lock().unwrap();
+        assert!(
+            !bucket.counts.contains_key("old"),
+            "eski oyna kaliti tozalanishi kerak"
+        );
+        assert!(
+            bucket.counts.contains_key("new"),
+            "joriy oyna kaliti qolishi kerak"
+        );
+    }
+
+    #[test]
     fn limit_parallel_atomik_sanaydi() {
         // Acceptance: parallel request'lar ostida to'g'ri sanaydi (race yo'q).
         // 16 thread x 50 urinish = 800; faqat limit=100 tasi o'tishi SHART.
         use std::sync::atomic::{AtomicU32, Ordering};
-        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         let allowed = Arc::new(AtomicU32::new(0));
         let mut handles = vec![];
         for _ in 0..16 {
