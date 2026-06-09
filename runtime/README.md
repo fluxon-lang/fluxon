@@ -1,8 +1,9 @@
 # Flux Runtime
 
-Flux tilining interpretatori (Rust, tree-walking). **Til yadrosi** to'liq
-ishlaydi, va birinchi battery — **`http`** (server + klient) — qo'shildi.
-Qolgan batteries (`db`, `ai`, `ws`, `cron`, `queue`) hali yo'q.
+Flux tilining interpretatori (Rust, tree-walking). **Til yadrosi** va
+`docs/flux-agent.md` da spetsifikatsiyalangan **barcha batareyalar** to'liq
+ishlaydi: `http` (server + klient), `db`, `ai`, `auth`, `ws`, `cron`,
+`queue`, `reg`.
 
 ## Qurish va ishga tushirish
 
@@ -34,11 +35,13 @@ Til yadrosining to'liq qismi:
 - **String interpolatsiya:** `"$x"`, `"${expr}"`
 - **List metodlari:** `len push has filter map reduce slice join`
 - **Map metodlari:** `len has keys vals set del` + spread `{...m}` + dinamik kalit `{[k]:v}`
-- **Modullar:** `str` (len up low slice split has int str), `math` (floor ceil abs round), `rand` (int str), `json` (enc dec)
+- **Yadro modullari:** `str` (len up low slice split has int str), `math` (floor ceil abs round), `rand` (int str), `json` (enc dec), `time`, `env`, `io`, `fs`, `sh`
+- **Batareyalar:** `http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg` — `use <nom>` bilan ulanadi
 - **`log`** — stderr'ga chiqarish
 - **Xatolar:** `fail [status] "..."`, `!` (propagate o'tkazgich)
 
-`tbl` parse qilinadi, lekin hali e'tiborsiz qoldiriladi (`db` battery uchun).
+`tbl` schema `db` battery tomonidan o'qiladi — `CREATE TABLE IF NOT EXISTS`
+auto-migration va ustun tip konversiyasi uchun ishlatiladi.
 
 ### `http` battery (server + klient)
 
@@ -83,8 +86,16 @@ src/
   parser.rs   — tokenlar -> AST (precedence climbing + qavssiz chaqirish)
   value.rs    — runtime qiymatlar
   interp.rs   — AST'ni walk qilib bajaruvchi (scope, control flow, chaqiruv)
-  builtins.rs — yadro funksiyalari (modullar + qiymat metodlari + `rep`)
-  http_mod.rs — `http` battery: server (on/serve), routing, req/rep, klient
+  builtins.rs — yadro modullari (str/math/rand/json/time/io/fs/sh) + metodlar + `rep`
+  http_mod.rs — `http` battery: server (on/serve), routing, req/rep, middleware, klient
+  db_mod.rs   — `db` battery: SQLite, pool, tx, schema auto-migration
+  ai_mod.rs   — `ai` battery: LLM (Anthropic Messages API)
+  auth_mod.rs — `auth` battery: JWT HS256 + parol hash (argon2id)
+  ws_mod.rs   — `ws` battery: websocket server, room/data
+  cron_mod.rs — `cron` battery: rejalashtirilgan vazifalar
+  queue_mod.rs— `queue` battery: fon ishlari navbati
+  reg_mod.rs  — `reg` battery: tool registry
+  serve_mod.rs— deferred serverlarni boshqarish (http/ws/cron birga)
   main.rs     — CLI + integratsiya testlari
 ```
 
@@ -97,10 +108,14 @@ mumkin.
 cargo test
 ```
 
-7 ta integratsiya testi `src/main.rs` ichida (fib, list metodlari, map, mutable
-each, match, str/modullar, pipe/coalesce).
+Hozir ~197 ta test bor: modul ichidagi Rust unit testlari (`builtins.rs`,
+`interp.rs`, `db_mod.rs` va h.k.) + `src/main.rs::mod tests` dagi integratsiya
+testlari (`.fx` kodini run qilib natijani tekshirish). Bundan tashqari
+`tests-fx/` da Flux'ning o'zida yozilgan e2e testlar (`run_all.sh`).
 
 ## Keyingi qadam
 
-Keyingi battery — **`db`** (haqiqiy SQLite/Postgres, `tbl` schema'ni o'qish,
-`db.q/one/ins/up/del/put`, `db.tx`). Keyin `ai`, `ws`, `cron`, `queue`.
+Spec'dagi barcha batareyalar (`http`, `db`, `ai`, `auth`, `ws`, `cron`,
+`queue`, `reg`) implementatsiya qilingan. Keyingi ishlar — mavjud
+batareyalarni chuqurlashtirish (masalan `db` uchun postgres/mysql backend) va
+yangi til imkoniyatlari. Naqsh uchun → [`ARCHITECTURE.md`](../ARCHITECTURE.md).

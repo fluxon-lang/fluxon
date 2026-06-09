@@ -112,11 +112,13 @@ exists (Rust, tree-walking interpreter) — it can run `.fx` files.
 
 - Language core: types, bindings (`=`/`<-`), `fn`/lambda/closure, `if`/`each`/
   `match`, operators, string interpolation, `fail`/`!`/`??`/`|>`.
-- Core modules: `str`, `math`, `rand`, `json`, `time`, `env`.
-- Batteries: **`http`** (server + client), **`db`** (SQLite, transactions,
-  schema, auto-migration).
+- Core modules: `str`, `math`, `rand`, `json`, `time`, `env`, `io`, `fs`, `sh`.
+- Batteries (all of them): **`http`** (server + client + middleware), **`db`**
+  (SQLite, transactions, schema, auto-migration), **`ai`** (LLM), **`auth`**
+  (JWT + password hashing), **`ws`** (websocket), **`cron`**, **`queue`**,
+  **`reg`** (tool registry).
 
-**Not yet (in the spec):** `ai`, `reg`, `ws`, `cron`, `queue`.
+Every battery specified in `docs/flux-agent.md` is implemented.
 
 Run it:
 

@@ -33,7 +33,7 @@ git clone <repo-url>
 cd flux-lang/runtime          # MUHIM: hamma cargo buyrug'i shu yerda
 
 cargo build                   # qurish
-cargo test                    # testlar (hozir 26 ta)
+cargo test                    # testlar (hozir 197 ta)
 cargo run -- run examples/demo.fx   # bir .fx faylni ishga tushirish
 ```
 
@@ -112,8 +112,10 @@ namunani `db_mod.rs` dan ko'ring.
 
 ## Nimadan boshlash
 
-- **Yangi battery** (`ai`, `reg`, `ws`, `cron`, `queue`) — spec'da bor, hali
-  yo'q. Retsept: [`ARCHITECTURE.md`](ARCHITECTURE.md) §5. `http`/`db` namuna.
+- **Mavjud battery'ni chuqurlashtirish** — spec'dagi barcha batareyalar
+  (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) implementatsiya
+  qilingan; ularni kengaytirish yoki yangi til imkoniyati qo'shish.
+  Retsept: [`ARCHITECTURE.md`](ARCHITECTURE.md) §5. `http`/`db` namuna.
 - **Misollar/hujjat** yaxshilash.
 - **Bug fix** — avval qayta ishlab chiqaradigan test yozing.
 
