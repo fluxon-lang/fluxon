@@ -1,0 +1,79 @@
+{
+  "reasoning": "This is a static evaluation: each variant was given a DIFFERENT db-read spec and a haiku agent wrote one backend against it. I read all five specs (specs/flux-agent.*.md) and judged each output against the syntax IT was actually given, focusing on the hard signals: IN-filter, time-range, GROUP-BY analytics, order+paging, and the race-safe booking tx — and how often it escaped to raw db.q.\n\nSpec summary per variant: v0 = raw SQL only (explicitly \"no list param, use OR\"); v1 = db.find with nested-map operators {ge:..}, list→IN, db.agg helper; v2 = db.find with col__op suffix keys, db.agg with sum__col::out; v3 = db.find with a WHERE-DSL string + :named params, db.agg \"where\" {params} {spec}; v4 = pipe builder db.from |> db.eq |> db.cmp |> db.order |> db.all, db.count/db.sum/db.group |> db.agg.\n\nThe decisive correctness discriminator is how each design handled the analytics that the structured helper could NOT express (conditional CASE-WHEN sums, JOINs, date()). ALL FIVE fell back to raw db.q for endpoints 8/9/10 — that's expected and fine; the spec sanctions it. The real differences:\n\n(a) Whether the agent used raw-SQL named/symbol params that don't exist in the escape hatch. v2 wrote `:done` and `status in (:confirmed,:done)` INSIDE raw db.q strings — but db.q is positional `$1` only, so those are not bound params; that is a genuine defect repeated in 3 endpoints. v3 used `:named` params with `db.one`, but its own spec says db.one is the positional `$1` escape hatch — also a mismatch in 6 calls of the overview endpoint.\n\n(b) Whether the agent used the declarative agg helper it was given for /stats/overview (the one analytics endpoint expressible without JOIN/CASE). v2 did (db.agg ×6, idiomatic). v4 chose raw db.q with CASE WHEN (justified: builder has no conditional agg, and it got ONE round-trip instead of 6). v1 loaded ALL rows with limit:999999 and counted in a Flux loop — works but is the worst pattern (defeats the DB, O(n) transfer). v0/v3 did 6 separate db.one count queries.\n\n(c) IN-filter + time-range + paging on GET /bookings: v4 builder and v1 nested-map are the cleanest and unambiguous. v0 hand-built `$N` placeholder strings with a json.dec symbol hack — correct but the most error-prone and token-heavy. v2/v3 correct via suffix / DSL-string.\n\n(d) Race-safe tx: all wrapped the read-check-insert in db.tx and returned 409 on overlap — all correct. v4 expressed the overlap purely in builder stages (most readable); v2 fetched candidates and looped in Flux (correct, slightly heavier).\n\nOverall: v4-builder is the strongest. It expressed every filter, IN, time-range, ordering and paging in first-class syntax with zero ambiguity, kept raw db.q strictly to JOIN/CASE/date analytics where it correctly used positional $1, and read top-to-bottom cleanly. Its only soft spots are verbose manual symbol mapping for the status list and an assumption that db.up returns the row. v1-nested-map is a close second on readability but mis-architected overview. v2-suffix is compact and used db.agg well but has the recurring `:sym` inside raw SQL bug. v0 is the most universally correct (raw SQL can express anything) but the most tokens and the most fragile dynamic-SQL string building. v3 has the most defects (named params in the positional escape hatch, PRD endpoint-path deviation).",
+  "per_variant": [
+    {
+      "name": "v0-baseline",
+      "correctness": 7.5,
+      "token_economy": 3,
+      "readability": 4.5,
+      "escape_hatch_use": "Everything is the escape hatch by design — every read/analytics endpoint is raw db.q/db.one. No structured layer existed, so there is nothing to fall back FROM.",
+      "notable": [
+        "Spec forbade list params, so for status IN it hand-built a `status in ($N,$N)` placeholder string with a loop tracking param index — correct but the single most error-prone construct in any variant.",
+        "Used a `json.dec (\"\\\":\" + s + \"\\\"\")` hack to turn the query-string status into a symbol; works but is a fragile idiom an AI could easily get wrong.",
+        "Mixes `len params` and `params.len` / `statuses.len` forms inconsistently — a sign the surface is ambiguous.",
+        "Analytics (by-resource/daily/top-customers) are clean correct raw SQL with proper JOIN/GROUP BY/HAVING and positional $1 — raw SQL's strength.",
+        "/stats/overview does 6 separate db.one round-trips; correct but chatty.",
+        "Highest token count of all variants because of manual WHERE assembly."
+      ]
+    },
+    {
+      "name": "v1-nested-map",
+      "correctness": 7,
+      "token_economy": 7.5,
+      "readability": 8,
+      "escape_hatch_use": "Fell back to raw db.q only for the 3 JOIN/date analytics endpoints (by-resource, daily, top-customers) — appropriate. Everything else used db.find / db.get.",
+      "notable": [
+        "IN-filter (`status:[...]`), time-range (`start_at:{ge:..,lt:..}`), order/limit/offset second map — all expressed idiomatically and correctly.",
+        "Worst /stats/overview pattern of the field: `db.find ... {limit:999999}` then counts every status in a Flux `each` loop — transfers the whole table and defeats the DB; should have used db.agg which its spec provided.",
+        "Time-range used the same column twice via one nested operator map — clean and unambiguous.",
+        "Relies on `filter.set :key val` map mutation; readable but assumes mutable-map semantics.",
+        "avg_guests computed by integer division in Flux rather than SQL AVG."
+      ]
+    },
+    {
+      "name": "v2-suffix",
+      "correctness": 6,
+      "token_economy": 8,
+      "readability": 7.5,
+      "escape_hatch_use": "Used db.agg (declarative) for the entire /stats/overview — the only variant to use the agg helper for overview. Raw db.q only for the 3 JOIN/date endpoints.",
+      "notable": [
+        "Real recurring BUG: wrote `:done` and `status in (:confirmed, :done)` INSIDE raw db.q strings, but db.q is positional $1 only — `:sym` is not a bound param there, so by-resource/daily/top-customers filters are wrong/literal.",
+        "Best use of the declarative aggregator: six tidy `db.agg \"bookings\" {filter} {count::c}` calls for overview, including `avg__guests::avg_guests` and a list-IN filter — exactly the intended idiom.",
+        "`col__ge` suffix keys are compact and the agent used them correctly for the booking time-range and min_capacity.",
+        "Booking overlap done by db.find candidates + Flux overlap loop — correct and race-safe in tx, slightly heavier than a pushed-down predicate.",
+        "Status query→symbol via json.dec hack again; suffix syntax didn't remove that pain."
+      ]
+    },
+    {
+      "name": "v3-string-dsl",
+      "correctness": 5.5,
+      "token_economy": 6.5,
+      "readability": 6.5,
+      "escape_hatch_use": "Raw db.q for the 3 JOIN/date endpoints (correct, positional $1). BUT also used db.one with :named params for all of /stats/overview, where db.one is the positional escape hatch — a mismatch.",
+      "notable": [
+        "Defect: /stats/overview uses `db.one \"... where tenant_id = :tid\" {tid:..}` — its own spec says db.one is positional `$1`; named params belong to db.find/db.get only. Six calls likely fail.",
+        "Deviates from the PRD: prefixes every route with `/api/` (`/api/resources`, `/api/stats/...`) — endpoints no longer match the PRD contract.",
+        "The DSL string was undercut by dynamic filters: it builds a `where_parts` list and `.join \" and \"` — back to string concatenation, though values stay parameterized via the map.",
+        "Status IN handled well: `\"status in :st\"` with `st:[...]` — the DSL `in :param` form is natural.",
+        "uniq() constraints added to schema (nice), and math.floor for avg_guests."
+      ]
+    },
+    {
+      "name": "v4-builder",
+      "correctness": 8.5,
+      "token_economy": 7,
+      "readability": 8.5,
+      "escape_hatch_use": "Disciplined: raw db.q ONLY where the builder genuinely can't go — conditional CASE-WHEN aggregation (overview), JOINs (by-resource), and date() grouping (daily/top-customers). All used correct positional $1. No raw SQL for any plain read/filter.",
+      "notable": [
+        "Every filter, IN, time-range, ordering and paging expressed in first-class builder stages with zero ambiguity: db.eq {status:[...]} for IN, db.cmp :start_at :ge t for ranges, db.order/db.limit/db.offset for paging.",
+        "Cleanest race-safe booking: overlap check is pure builder (db.eq{status IN} |> db.cmp :start_at :lt end |> db.cmp :end_at :gt start |> db.first) inside db.tx, returning 409 — correct interval logic.",
+        "Smartest overview: one raw db.q with SUM(CASE WHEN...) for all status counts + revenue + avg_guests in a SINGLE round-trip (vs 6 in v0/v3), then a builder query for active_resources. Justified escape since builder has no conditional agg.",
+        "Weak spots: verbose manual if/elif mapping of comma-status strings to symbols (the one place the builder didn't help); assumes db.up returns the updated row in PATCH (spec shows db.up returns nothing).",
+        "Adds a resource-existence 404 on POST /bookings — beyond PRD but sensible.",
+        "Pipe `|>` chains read top-to-bottom like a sentence — best one-read comprehension of the field."
+      ]
+    }
+  ],
+  "winner": "v4-builder",
+  "recommendation": "Adopt the v4 pipe-builder as the primary read/aggregate surface, but fix the two things it couldn't express and steal v2's declarative-agg ergonomics. Concretely for Flux db.*:\n\n1) READS: ship the builder — db.from \\\"t\\\" |> db.eq {col:val, col:[a b]→IN} |> db.cmp :col :op val |> db.order :col [:desc] |> db.limit n |> db.offset n |> (db.all | db.first). This produced the most correct, most readable code with the fewest ambiguity slips, and it kept agents out of raw SQL for ordinary filters. Keep db.eq's list→IN rule (every variant that had it got IN right; v0 which lacked it hand-rolled placeholder strings — the worst outcome).\n\n2) AGGREGATION: make the agg path expressible WITHOUT raw SQL for the common cases, because raw-SQL fallback is exactly where defects appeared (v2/v3 leaked `:sym`/`:named` params into the positional escape hatch). Add two things: (a) conditional aggregates so /stats/overview needs no raw SQL — e.g. db.count_if {status::confirmed} :confirmed and db.sum_if :total_cents {status::done} :revenue (or a `where`-scoped CASE built into db.count/db.sum). v4 was forced to raw db.q ONLY because no conditional agg existed; (b) keep a simple db.group :col |> db.count/db.sum/db.avg |> db.agg for single-table grouping (v2's db.agg overview was the cleanest analytics code in the field).\n\n3) Provide a first-class symbol-list parser so agents stop using the `json.dec(\\\"\\\\\\\":\\\"+s+\\\"\\\\\\\"\\\")` hack that appeared in v0/v2/v3 and the verbose if/elif chain in v4. Add str.sym (string→symbol); then `?status=pending,confirmed` becomes `(str.split q.status \\\",\\\").map str.sym` feeding db.eq {status: syms}. This single helper removes the ugliest recurring token-waster across ALL variants.\n\n4) Keep db.q/db.one as the ONLY escape hatch and make it loudly positional-$1-only (JOINs/date() still need it). To prevent the v2/v3 class of bug, reject or warn on `:name` tokens inside db.q strings.\n\nNet: v4 builder for filters/paging + v2-style declarative agg + conditional aggregates + str.sym. That hybrid would let an AI write all of /bookings and /stats/overview with zero raw SQL and reserve db.q strictly for multi-table JOINs and date() grouping — the only places every single variant legitimately needed it."
+}

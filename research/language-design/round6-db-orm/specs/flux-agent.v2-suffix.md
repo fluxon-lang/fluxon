@@ -156,53 +156,41 @@ db.del "cart_items" {id:iid}                          # {where}
 db.put "memory" {val:v} {agent:a key:k}               # UPSERT (atomic)
 ```
 
-Reads — a query builder, piped with `|>`. `db.from "t"` starts; `db.all` → list,
-`db.first` → one row or nil. NO raw SQL for ordinary filters:
+Reads are declarative — a flat filter map, no raw SQL:
 ```flux
-rows = db.from "bookings" |> db.eq {tenant_id:tid} |> db.all
-one  = db.from "bookings" |> db.eq {id:bid tenant_id:tid} |> db.first
+rows = db.find "bookings" {tenant_id:tid}             # → list of maps (all matching)
+one  = db.get  "bookings" {id:bid tenant_id:tid}      # → first match, or nil
 ```
-Stages (each takes the query, returns the query — chain freely):
+A map key = a column; multiple keys are AND-ed. A **list value → `IN (...)`**:
 ```flux
-db.eq {col:val ...}        # equality, AND-ed. A LIST value → IN (...)
-db.cmp :col :ge t          # one comparison: op ∈ :gt :ge :lt :le :ne :like
-db.order :col   ·   db.order :col :desc
-db.limit n   ·   db.offset n
+db.find "bookings" {tenant_id:tid status:[:pending :confirmed]}  # status IN (..)
 ```
+Operators — a **suffix on the key**, `col__op` (ops: `gt ge lt le ne like`):
 ```flux
-db.from "bookings"
-  |> db.eq {tenant_id:tid status:[:pending :confirmed]}   # status IN (..)
-  |> db.cmp :start_at :ge t0  |> db.cmp :start_at :lt t1
-  |> db.order :start_at |> db.limit 50 |> db.offset 0
-  |> db.all
+db.find "bookings" {tenant_id:tid start_at__ge:t0 start_at__lt:t1}  # >= t0 AND < t1
+db.find "resources" {tenant_id:tid capacity__ge:4 name__like:"%lab%"}
 ```
-Aggregation — set output columns, then `db.agg` (grouped → list) or `db.agg_row`
-(one summary row):
+A bare key (no `__`) means `=`. Order / limit / paging — an **optional second map**:
 ```flux
-db.from "bookings" |> db.eq {tenant_id:tid status:[:done :confirmed]}
-  |> db.group :resource_id |> db.count :n |> db.sum :total_cents :rev
-  |> db.order :rev :desc |> db.agg          # → [{resource_id:5 n:12 rev:48000} ...]
+db.find "bookings" {tenant_id:tid} {order::start_at limit:50 offset:0}
+db.find "bookings" {tenant_id:tid} {order::created desc:true limit:20}
 ```
-Agg stages: `db.count :out` · `db.sum/avg/min/max :col :out` · `db.group :col`.
-Conditional aggregates (status-filtered counts/sums in ONE query — for overviews):
-```flux
-db.from "bookings" |> db.eq {tenant_id:tid}
-  |> db.count_if {status::confirmed} :confirmed
-  |> db.sum_if :total_cents {status::done} :revenue
-  |> db.agg_row     # → {confirmed:7 revenue:91000}
-```
-A list-of-symbols filter from a query string (`?status=a,b`):
-`(str.split q.status ",").map \s -> str.sym s` → `db.eq {status:syms}`.
+`order` = a symbol (column), `desc:true` = descending, `limit`/`offset` = ints.
 
-`db.q`/`db.one` stay as the escape hatch for what the builder can't express —
-multi-table JOINs and raw expressions like `date()`. POSITIONAL `$1` ONLY
-(never `:name` inside these):
+Aggregation — `db.agg "table" {filter} {spec}`. Spec keys name the output:
 ```flux
-rows = db.q "select * from t where owner=$1" [oid]   # → list of maps
-one  = db.one "select * from users where id=$1" [id] # → map or nil
+db.agg "bookings" {tenant_id:tid status:[:done :confirmed]}
+  {group::resource_id count::n sum__total_cents::revenue order::revenue desc:true}
+# → [{resource_id:5 n:12 revenue:48000} ...]
+```
+Spec keys: `count::out`, `sum__col::out` / `avg__col::out` / `min__col::out` /
+`max__col::out`, `group::col` (or list), plus `order`/`desc`/`limit`. No `group`
+→ one summary row. For a raw expression (`date(created)`) use `db.q`.
+
+`db.q "raw SQL" [params]` / `db.one` stay available as an escape hatch:
+```flux
 db.q "select date(created) day, count(*) n from bookings where tenant_id=$1 group by day order by day" [tid]
 ```
-No params: `db.q "select * from links"`.
 
 Transaction — atomic, rollback on `fail`/`!`, returns a value:
 ```flux
@@ -212,13 +200,8 @@ res = db.tx \->
     db.up "products" {stock:it.stock - it.qty} {id:it.id}
   ret ord
 ```
-`db.tx` auto-serializable + retry → "read-check-update" is race-safe (no lock
-needed). Idempotency: `uniq` column + ins inside tx (duplicate → rollback):
-```flux
-old = db.one "select * from txns where ikey=$1" [key]
-old ?? (ret old)
-db.tx \-> db.ins "txns" {ikey:key ...}   # duplicate → uniq error → rollback
-```
+`db.tx` auto-serializable + retry → "read-check-update" is race-safe. Idempotency:
+`uniq` column + ins inside tx (duplicate → rollback).
 
 Schema = `tbl`:
 ```flux
@@ -231,14 +214,7 @@ tbl products
 Types: serial int flt str bool json now sym money (`int` 64-bit). Modifiers:
 `pk uniq null ref:tbl.col`. Multi-column: `uniq(agent, key)`.
 `json` column: auto map/list on read, auto-encode on write.
-`sym` column: text in DB, symbol in Flux (auto-converts):
-```flux
-db.ins "tickets" {status::new}
-t = db.from "tickets" |> db.eq {id:id} |> db.first
-match t.status
-  :new -> ...
-db.from "t" |> db.eq {status::new} |> db.all    # filter: symbol value, no SQL
-```
+`sym` column: text in DB, symbol in Flux (`{status::pending}` filters fine).
 
 ### ai (LLM — first-class, key auto-detected)
 ```flux
@@ -322,26 +298,13 @@ math.floor x · math.ceil x · math.abs x · rand.int a b · rand.str n
 List length `l.len` (member), string length `str.len s` (module).
 
 ### time
-All times — UTC text `"YYYY-MM-DD HH:MM:SS"` (same as SQLite `CURRENT_TIMESTAMP`).
 ```flux
 time.now · time.ago 24 :hr · time.in 60 :min (:sec :min :hr :day) · time.fmt t "..."
-time.sleep 1 · time.sleep 0.5   # waits secs (flt too) — polling/retry backoff
-time.parse "2026-06-10T10:00:00Z"   # arbitrary ISO text -> canonical UTC timestamp ("Z"/"±HH:MM")
-time.add t 30 :min · time.sub t 5 :min   # offset from ANY time (not now): end_at = start_at + dur
-time.diff a b                       # (a - b) in seconds (int); / 60 -> minutes
-db.from "t" |> db.cmp :created :gt (time.ago 24 :hr) |> db.count :c |> db.agg_row
-```
-**Duration/interval recipes** (interval arithmetic EXISTS — `time.add`/`diff` are here):
-```flux
-end_at = time.add start_at dur :min          # duration: start + dur minutes
-mins   = (time.diff end_at start_at) / 60     # gap between two times -> minutes
-overlap = a.start < b.end & a.end > b.start   # do two intervals overlap? (bool)
-buf_start = time.sub start_at 15 :min         # buffer: 15 min before start
-```
-**IANA timezone / DST** — `time.parse`/`time.fmt` take an optional zone arg (NOT a fixed offset):
-```flux
-utc = time.parse "2026-07-15 09:00:00" "Asia/Tashkent"  # local wall-clock -> UTC (DST-aware)
-loc = time.fmt utc "HH:mm" "America/New_York"            # UTC instant -> zone wall-clock
+time.sleep 1 · time.sleep 0.5   # secs kutadi (flt ham) — polling/retry backoff
+time.parse "2026-06-10T10:00:00Z"   # ixtiyoriy ISO matn -> kanonik UTC timestamp ("Z"/"±HH:MM")
+time.add t 30 :min · time.sub t 5 :min   # IXTIYORIY vaqtdan offset (now emas): end_at = start_at + dur
+time.diff a b                       # (a - b) sekundda (int); / 60 -> daqiqa
+db.one "select count(*) c from t where created > $1" [time.ago 24 :hr]
 ```
 
 ### json / env / log
@@ -449,6 +412,6 @@ tbl notes
 http.on :post "/notes" \req ->
   rep 201 (db.ins "notes" {text:req.body.text})
 http.on :get "/notes" \req ->
-  rep 200 (db.from "notes" |> db.order :ts :desc |> db.all)
+  rep 200 (db.q "select * from notes order by ts desc")
 http.serve 8080
 ```
