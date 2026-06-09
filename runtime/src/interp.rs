@@ -387,7 +387,21 @@ impl Interp {
                 }
             }
 
-            // 3. DROP COLUMN: DB'da bor, registry'da yo'q. BACKUP (jadval bo'yicha
+            // 3. ESKIRGAN INDEX DROP — ustun DROP'idan OLDIN. Sabab: index'lanган
+            //    ustun olib tashlansa, eski `idx_<tbl>_<col>` hali DB'da turadi va
+            //    ba'zi SQLite holatlarida `DROP COLUMN` "error in index ... after
+            //    drop column: no such column" bilan rad etiladi -> deploy migrate
+            //    qila olmaydi. Shu sabab avval kerak BO'LMAGAN Flux index'larini
+            //    tashlaymiz, keyin ustunni xavfsiz drop qilamiz.
+            let want_names: HashSet<String> = meta.indexes.iter().map(index_name).collect();
+            for info in db.flux_indexes(table).map_err(Flow::err)? {
+                if !want_names.contains(&info.name) {
+                    db.exec(&build_drop_index(&info.name), &[])
+                        .map_err(Flow::err)?;
+                }
+            }
+
+            // 4. DROP COLUMN: DB'da bor, registry'da yo'q. BACKUP (jadval bo'yicha
             //    bir marta) -> DROP COLUMN (yo'q bo'lsa jim pass).
             let mut backed_up = false;
             for dbcol in &db_cols {
@@ -400,20 +414,14 @@ impl Interp {
                 }
             }
 
-            // 4. Index diff: kerakli (want) vs mavjud Flux indekslar (have).
-            let want_names: HashSet<String> = meta.indexes.iter().map(index_name).collect();
+            // 5. YANGI INDEX CREATE — ustun DROP'idan KEYIN (yangi ustunlar
+            //    allaqachon mavjud). IF NOT EXISTS idempotent.
             for idx in &meta.indexes {
                 db.exec(&build_create_index(idx), &[]).map_err(Flow::err)?;
             }
-            for info in db.flux_indexes(table).map_err(Flow::err)? {
-                if !want_names.contains(&info.name) {
-                    db.exec(&build_drop_index(&info.name), &[])
-                        .map_err(Flow::err)?;
-                }
-            }
         }
 
-        // 5. DROP TABLE: `_flux_schema` da bor, registry'da yo'q (source'dan
+        // 6. DROP TABLE: `_flux_schema` da bor, registry'da yo'q (source'dan
         //    tbl olib tashlangan). BACKUP -> DROP -> reyestrdan o'chir.
         //
         // MUHIM: registry BUTUNLAY bo'sh bo'lsa (hech qanday `tbl` e'lon

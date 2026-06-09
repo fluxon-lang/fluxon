@@ -1107,6 +1107,52 @@ kept = db.q "select name from sqlite_master where type='index' and name='uniq_bo
     }
 
     #[test]
+    fn migrate_drop_indexed_column() {
+        // REGRESSIYA (code review): index'lanган ustun olib tashlanganda eskirgan
+        // index ustun DROP'idan OLDIN tashlanishi kerak — aks holda ba'zi SQLite
+        // holatlarida DROP COLUMN "error in index ... no such column" bilan rad
+        // etiladi va deploy migrate qila olmaydi. Single va kompozit index ikkalasi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_dropidxcol.db");
+
+        // Deploy 1: index'li `status` ustun + kompozit index(a status).
+        run_source(
+            r#"
+use db
+tbl t
+  id     serial pk
+  a      int
+  status sym index
+  index(a status)
+db.ins "t" {a:1 status::x}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1: {}", e));
+
+        // Deploy 2: `status` ustuni olib tashlangan. Eski idx_t_status va
+        // idx_t_a_status hali DB'da — migration yiqilmasligi (eskirgan index avval
+        // tashlanadi), keyin DROP COLUMN ishlashi kerak.
+        run_source(
+            r#"
+use db
+tbl t
+  id serial pk
+  a  int
+gone = db.q "select name from sqlite_master where type='index' and name='idx_t_status'"
+(gone.len == 0) | (fail "idx_t_status DROP bo'lishi kerak")
+comp = db.q "select name from sqlite_master where type='index' and name='idx_t_a_status'"
+(comp.len == 0) | (fail "idx_t_a_status (status'ga bog'liq) DROP bo'lishi kerak")
+# status ustuni haqiqatan yo'qolgan
+cols = db.q "select name from pragma_table_info('t') where name='status'"
+(cols.len == 0) | (fail "status ustuni DROP bo'lishi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 drop indexed column: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
     fn migrate_pipe_modifier_creates_unique_index() {
         // `email str index|uniq` -> bitta UNIQUE index yaratiladi (uniq subsume
         // qiladi), duplicate insert xato beradi.
