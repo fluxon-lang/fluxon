@@ -1175,10 +1175,36 @@ impl Interp {
                 return Ok(l);
             }
             BinOp::Pipe => {
-                // x |> f  ==  f x
+                // x |> f      ==  f x       (f — funksiya qiymati yoki lambda)
+                // x |> f a b  ==  f a b x   (rhs chaqiruv bo'lsa, x OXIRGI argument)
+                //
+                // Ikkinchi shakl pipe'ni qisman-chaqiruvga aylantiradi: `db.from "t"
+                // |> db.eq {...}` da `db.eq {...}` rhs Call bo'lib keladi, biz uni
+                // darhol baholamay, lhs'ni args oxiriga qo'shib `eval_call` qilamiz.
+                // Shu sabab db.*/str.* kabi modul dispatch'lari ham tabiiy ishlaydi
+                // (eval_call ularni maxsus yo'naltiradi). Mavjud `x |> str.up` endi
+                // ishlaydi — avval u rhs'ni argumentsiz chaqirib xato berardi.
                 let l = self.eval(lhs, env)?;
-                let f = self.eval(rhs, env)?;
-                return self.apply(f, vec![l]);
+                match rhs {
+                    // `x |> f a b` => `f a b x`: lhs args oxiriga qo'shiladi.
+                    Expr::Call { callee, args } => {
+                        let mut argv = self.eval_args(args, env)?;
+                        argv.push(l);
+                        return self.apply_callee(callee, argv, env);
+                    }
+                    // `x |> str.up` / `x |> db.all` => argumentsiz modul/metod
+                    // chaqiruvi, lhs yagona argument. Field'ni qiymat sifatida
+                    // baholab bo'lmaydi (modul funksiyasi qiymat emas), shuning
+                    // uchun to'g'ridan-to'g'ri apply_callee.
+                    Expr::Field { .. } => {
+                        return self.apply_callee(rhs, vec![l], env);
+                    }
+                    // rhs oddiy funksiya qiymati/lambda/ident: f x.
+                    _ => {
+                        let f = self.eval(rhs, env)?;
+                        return self.apply(f, vec![l]);
+                    }
+                }
             }
             _ => {}
         }
@@ -1217,6 +1243,14 @@ impl Interp {
 
     // ---------------- chaqiruv ----------------
     fn eval_call(&self, callee: &Expr, args: &[Expr], env: &Env) -> EvalResult {
+        let argv = self.eval_args(args, env)?;
+        self.apply_callee(callee, argv, env)
+    }
+
+    // Argumentlar ALLAQACHON baholangan holatda callee'ni chaqiradi. eval_call va
+    // pipe (`x |> f a` => `f a x`) shu yagona nuqtaga keladi — dispatch mantig'i
+    // bir joyda. `argv` chaqiruv argumentlari (pipe holatida lhs oxiriga qo'shilgan).
+    fn apply_callee(&self, callee: &Expr, argv: Vec<Value>, env: &Env) -> EvalResult {
         // Metod chaqiruvi: target.method arg...  -> Field bo'lib keladi.
         if let Expr::Field { target, name } = callee {
             // Ikki-bosqichli modul namespace'i: ws.room.* / ws.data.* —
@@ -1230,7 +1264,6 @@ impl Interp {
                 && let Expr::Ident(root) = inner.as_ref()
                 && root == "ws"
             {
-                let argv = self.eval_args(args, env)?;
                 return match sub.as_str() {
                     "room" => self.arc_self().ws_room_dispatch(name, argv),
                     "data" => self.arc_self().ws_data_dispatch(name, argv),
@@ -1243,41 +1276,35 @@ impl Interp {
                 // http — state'li va Interp'ga (handler apply uchun) muhtoj,
                 // shuning uchun call_module emas, http_dispatch'ga yo'naltiramiz.
                 if modname == "http" {
-                    let argv = self.eval_args(args, env)?;
                     return self.arc_self().http_dispatch(name, argv);
                 }
                 // db — http kabi state'li (connection + tx konteksti); Interp'ga
                 // muhtoj. db.tx argumenti lambda bo'lib keladi (Value::Fn).
                 if modname == "db" {
-                    let argv = self.eval_args(args, env)?;
                     return self.arc_self().db_dispatch(name, argv);
                 }
                 // ws — http kabi state'li (jonli ulanishlar, handler apply uchun
                 // Interp kerak). ws.room.*/ws.data.* esa ikki-bosqichli Field
                 // bo'lib keladi — quyiroqda (Field target ichida) ushlanadi.
                 if modname == "ws" {
-                    let argv = self.eval_args(args, env)?;
                     return self.arc_self().ws_dispatch(name, argv);
                 }
                 // reg — state'li (funksiya registri); `reg.add`/`reg.call` argument
                 // sifatida funksiya/argumentlar oladi. `reg.names` argumentsiz —
                 // Field shoxida (quyiroqda) ushlanadi.
                 if modname == "reg" {
-                    let argv = self.eval_args(args, env)?;
                     return self.reg_dispatch(name, argv);
                 }
                 // cron — state'li (rejalashtirilgan vazifalar). `cron.on` ifoda + handler
                 // oladi, `cron.run` argumentsiz bloklaydi. Ifoda parser'da tirnoqsiz
                 // 5-maydonli str sifatida keladi (quyida parser maxsus ushlaydi).
                 if modname == "cron" {
-                    let argv = self.eval_args(args, env)?;
                     return self.arc_self().cron_dispatch(name, argv);
                 }
                 // queue — state'li (fon navbati). `queue.push` nom+payload oladi,
                 // `queue.on` nom+handler oladi. Worker handler'ni apply qiladi —
                 // shuning uchun Interp'ga muhtoj (call_module emas).
                 if modname == "queue" {
-                    let argv = self.eval_args(args, env)?;
                     return self.arc_self().queue_dispatch(name, argv);
                 }
                 // ai — LLM primitiv (Anthropic). `$AI_KEY`ni env_lookup orqali
@@ -1285,7 +1312,6 @@ impl Interp {
                 // har chaqiruv mustaqil https POST. `ai` o'zgaruvchi sifatida
                 // e'lon qilingan bo'lsa, modul emas — o'zgaruvchi sifatida ko'riladi.
                 if modname == "ai" && self.lookup(modname, env).is_err() {
-                    let argv = self.eval_args(args, env)?;
                     return self.ai_dispatch(name, argv);
                 }
                 // auth — autentifikatsiya primitivlari (JWT + parol hash). `ai`
@@ -1293,11 +1319,9 @@ impl Interp {
                 // Interp'ga muhtoj (call_module emas). `auth` o'zgaruvchi sifatida
                 // e'lon qilingan bo'lsa, modul emas — o'zgaruvchi ustun.
                 if modname == "auth" && self.lookup(modname, env).is_err() {
-                    let argv = self.eval_args(args, env)?;
                     return self.auth_dispatch(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
-                    let argv = self.eval_args(args, env)?;
                     return crate::builtins::call_module(modname, name, argv);
                 }
             }
@@ -1308,10 +1332,8 @@ impl Interp {
                 && let Some(v @ (Value::Fn(_) | Value::Native(_))) = m.get(name)
             {
                 let f = v.clone();
-                let argv = self.eval_args(args, env)?;
                 return self.apply(f, argv);
             }
-            let argv = self.eval_args(args, env)?;
             // Yuqori tartibli list metodlari (lambda chaqiradi) — bu yerda,
             // chunki builtins Interp'ga kira olmaydi.
             if let Value::List(xs) = &recv {
@@ -1325,7 +1347,6 @@ impl Interp {
             return crate::builtins::call_method(&recv, name, argv);
         }
         let f = self.eval(callee, env)?;
-        let argv = self.eval_args(args, env)?;
         self.apply(f, argv)
     }
 

@@ -60,6 +60,13 @@ impl<'a> Lexer<'a> {
                     self.advance_newline();
                     self.pending_space = true;
                     if self.paren_depth == 0 {
+                        // Davomiy qator: keyingi qator `|>` bilan boshlansa, bu
+                        // oldingi ifoda davomi (pipe zanjiri) — Newline ham,
+                        // INDENT ham chiqarmaymiz, token oqimi uzluksiz qoladi.
+                        // Builder zanjirlari ko'p qatorga yoziladi (issue #78).
+                        if self.next_line_starts_with_pipe() {
+                            continue;
+                        }
                         self.push(Tok::Newline);
                         self.handle_line_start()?;
                     }
@@ -127,6 +134,40 @@ impl<'a> Lexer<'a> {
             let _ = start;
             self.emit_indentation(width)?;
             return Ok(());
+        }
+    }
+
+    // Joriy pozitsiyadan (newline'dan keyin) oldinga qarab — bo'shliq, bo'sh
+    // qator va izohlarni o'tkazib — keyingi mazmunli qator `|>` bilan
+    // boshlanadimi? Pozitsiyani O'ZGARTIRMAYDI (faqat indeks bilan ko'rib chiqadi).
+    // Davomiy pipe qatorini aniqlash uchun (issue #78 builder zanjiri).
+    fn next_line_starts_with_pipe(&self) -> bool {
+        let mut i = self.pos;
+        loop {
+            // joriy qatordagi boshlang'ich bo'shliqlar
+            while i < self.src.len() && (self.src[i] == b' ' || self.src[i] == b'\t') {
+                i += 1;
+            }
+            if i >= self.src.len() {
+                return false;
+            }
+            match self.src[i] {
+                // bo'sh qator — keyingisiga o'tamiz
+                b'\n' => {
+                    i += 1;
+                    continue;
+                }
+                // izoh qatori — qator oxirigacha o'tkazamiz, keyin keyingisiga
+                b'#' => {
+                    while i < self.src.len() && self.src[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                // mazmunli qator boshi: `|>` bo'lsa davomiy
+                b'|' => return self.src.get(i + 1) == Some(&b'>'),
+                _ => return false,
+            }
         }
     }
 
