@@ -961,6 +961,10 @@ impl Interp {
                         }
                         parts.push(format!("{} IN ({})", q_ident(col), places.join(",")));
                     }
+                    // nil → IS NULL (SQL'da `= NULL` hech qachon mos kelmaydi).
+                    Value::Nil => {
+                        parts.push(format!("{} IS NULL", q_ident(col)));
+                    }
                     _ => {
                         binds.push(self.value_to_sqlval(table, col, v)?);
                         parts.push(format!("{} = ${}", q_ident(col), binds.len()));
@@ -1030,7 +1034,10 @@ impl Interp {
                     let cond = self.filter_to_case_cond(table, f, binds)?;
                     if kind == "count" {
                         // COUNT(*) FILTER ekvivalenti: SUM(CASE WHEN cond THEN 1 ELSE 0 END).
-                        format!("SUM(CASE WHEN {} THEN 1 ELSE 0 END)", cond)
+                        // COALESCE — bo'sh natijada SUM NULL beradi, lekin count_if
+                        // COUNT semantikasidek 0 qaytarishi kerak (bo'sh tenant
+                        // dashboard'i nil emas 0 ko'rsatsin).
+                        format!("COALESCE(SUM(CASE WHEN {} THEN 1 ELSE 0 END), 0)", cond)
                     } else {
                         format!(
                             "{}(CASE WHEN {} THEN {} END)",
@@ -1074,6 +1081,10 @@ impl Interp {
                         places.push(format!("${}", binds.len()));
                     }
                     conds.push(format!("{} IN ({})", q_ident(col), places.join(",")));
+                }
+                // nil → IS NULL.
+                Value::Nil => {
+                    conds.push(format!("{} IS NULL", q_ident(col)));
                 }
                 _ => {
                     binds.push(self.value_to_sqlval(table, col, v)?);

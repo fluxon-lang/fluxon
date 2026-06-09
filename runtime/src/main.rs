@@ -846,6 +846,11 @@ none = db.from "bookings" |> db.eq {tenant_id:99} |> db.first
 # bo'sh IN list → hech narsa
 empty = db.from "bookings" |> db.eq {status:[]} |> db.all
 (empty.len == 0) | (fail "bo'sh IN 0 qator kutilgan")
+
+# nil qiymat → IS NULL ( = NULL hech qachon mos kelmaydi). resource_id null qator.
+db.ins "bookings" {tenant_id:1 resource_id:nil status::pending start_at:"2026-06-09"}
+nulls = db.from "bookings" |> db.eq {tenant_id:1 resource_id:nil} |> db.all
+(nulls.len == 1) | (fail "nil → IS NULL 1 qator kutilgan, ${nulls.len}")
 "#);
         });
     }
@@ -878,6 +883,10 @@ ov = db.from "bookings" |> db.eq {tenant_id:1} |> db.count_if {status::confirmed
 (ov.confirmed == 1) | (fail "count_if confirmed 1, ${ov.confirmed}")
 (ov.pending == 1) | (fail "count_if pending 1, ${ov.pending}")
 (ov.revenue == 5000) | (fail "sum_if revenue 5000, ${ov.revenue}")
+
+# bo'sh tenant: count_if 0 qaytarishi kerak (nil emas — COUNT semantikasi)
+empty_ov = db.from "bookings" |> db.eq {tenant_id:99} |> db.count_if {status::done} :done |> db.agg_row
+(empty_ov.done == 0) | (fail "bo'sh count_if 0 kutilgan (nil emas), ${empty_ov.done}")
 "#);
         });
     }
