@@ -46,6 +46,20 @@ pub struct ColDef {
     pub modifiers: Vec<String>,
 }
 
+// Kerakli (tbl'da e'lon qilingan) index ta'rifi — CREATE INDEX generatsiya uchun.
+#[derive(Clone)]
+pub struct IndexDef {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
+// DB'dagi mavjud Flux index ma'lumoti — diff (drop) uchun. Unique holati nomga
+// kodlangan (`idx_` vs `uniq_` prefiks), shu sabab faqat nom yetarli.
+pub struct IndexInfo {
+    pub name: String,
+}
+
 // --- Db trait: dialekt-neytral backend interfeysi ---
 
 pub trait Db: Send + Sync {
@@ -68,6 +82,16 @@ pub trait Db: Send + Sync {
     // Faqat json aniq tiklanadi (sym/bool SQLite'da TEXT/INTEGER bo'lib matnan
     // farqlanmaydi). Jadval topilmasa bo'sh ro'yxat.
     fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String>;
+
+    // Flux boshqaradigan indekslar (jadval bo'yicha): nom + unique flag. Faqat
+    // `idx_`/`uniq_` prefiksli, foydalanuvchi-yaratgan (origin='c') indekslar —
+    // auto-migration ularni diff qiladi. `sqlite_autoindex_*`/UNIQUE-constraint/
+    // pk indekslariga TEGMAYDI.
+    fn flux_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String>;
+
+    // `_flux_schema` meta-jadvalidagi Flux yaratgan jadval nomlari. DROP TABLE
+    // faqat shu ro'yxatdagi jadvallarga (Flux yaratmagan jadval saqlanadi).
+    fn flux_tables(&self) -> Result<Vec<String>, String>;
 
     // Tranzaksiya ochish — connection'ni egallagan `'static` obyekt qaytaradi.
     fn begin(&self) -> Result<Box<dyn DbTx>, String>;
@@ -263,6 +287,32 @@ impl Db for SqliteDb {
         r
     }
 
+    fn flux_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String> {
+        let conn = self.pool.checkout()?;
+        let r = sqlite_flux_indexes(&conn, table);
+        self.pool.checkin(conn);
+        r
+    }
+
+    fn flux_tables(&self) -> Result<Vec<String>, String> {
+        let conn = self.pool.checkout()?;
+        let r = (|| {
+            let mut stmt = conn
+                .prepare("SELECT table_name FROM _flux_schema")
+                .map_err(|e| sql_err("_flux_schema o'qish", e))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| sql_err("_flux_schema o'qish", e))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| sql_err("_flux_schema o'qish", e))?);
+            }
+            Ok(out)
+        })();
+        self.pool.checkin(conn);
+        r
+    }
+
     fn build_insert(&self, table: &str, cols: &[String]) -> String {
         let collist = cols
             .iter()
@@ -400,6 +450,31 @@ fn sqlite_column_types(conn: &Connection, table: &str) -> Result<Vec<(String, St
     Ok(out)
 }
 
+// Flux boshqaradigan indekslarni o'qiydi: pragma_index_list'dan origin='c'
+// (CREATE INDEX) VA nom `idx_`/`uniq_` prefiksli bo'lganlarni. `sqlite_autoindex_*`
+// (origin='u'/'pk') va boshqa qo'lda yaratilgan indekslarga TEGMAYDI.
+fn sqlite_flux_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let mut stmt = conn
+        .prepare("SELECT name, origin FROM pragma_index_list(?1)")
+        .map_err(|e| sql_err("pragma_index_list", e))?;
+    let rows = stmt
+        .query_map([table], |row| {
+            let name: String = row.get(0)?;
+            let origin: String = row.get(1)?;
+            Ok((name, origin))
+        })
+        .map_err(|e| sql_err("pragma_index_list", e))?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (name, origin) = r.map_err(|e| sql_err("pragma_index_list", e))?;
+        // Faqat Flux yaratgan (CREATE INDEX) + bizning prefikslarimiz.
+        if origin == "c" && (name.starts_with("idx_") || name.starts_with("uniq_")) {
+            out.push(IndexInfo { name });
+        }
+    }
+    Ok(out)
+}
+
 // E'lon qilingan SQLite tipini Flux tip nomiga moslaydi. Hozir faqat json
 // ahamiyatli (sqlval_to_value uni map/list'ga dekod qiladi); qolgani matn bo'lib
 // qaytadi va maxsus konversiyaga tushmaydi.
@@ -412,7 +487,7 @@ fn sqlite_decl_to_flux_type(decl: &str) -> String {
 }
 
 // SQLite identifikator quoting: "..." (ichidagi " -> "").
-fn q_ident(s: &str) -> String {
+pub(crate) fn q_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
@@ -438,13 +513,109 @@ fn sqlite_column_def(c: &ColDef) -> String {
     } else if has("pk") {
         def.push_str(" PRIMARY KEY");
     }
-    if has("uniq") {
-        def.push_str(" UNIQUE");
-    }
+    // `uniq` endi inline UNIQUE EMAS — alohida CREATE UNIQUE INDEX orqali (so
+    // migration uni keyin drop/qo'sha oladi). `index` ham ustun DDL'da
+    // e'tiborsiz (alohida CREATE INDEX). Shu sabab bu yerda hech narsa qo'shilmaydi.
     if c.type_name == "now" {
         def.push_str(" DEFAULT CURRENT_TIMESTAMP");
     }
     def
+}
+
+// FNV-1a 32-bit hash — DETERMINISTIK (Rust versiyalari/platformalar orasida
+// barqaror, std DefaultHasher'dan farqli). Uzun index nomini qisqartirishda
+// to'qnashuvsiz suffiks uchun. Random EMAS — bir xil kirish → bir xil chiqish
+// (idempotent migration uchun shart).
+fn fnv1a(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+// Deterministik index nomi, DB identifikator limiti (PostgreSQL NAMEDATALEN=63
+// bayt — eng cheklovchi backend) bilan. Logik nom: `idx_<tbl>_<c1>_<c2>...`
+// (unique uchun `uniq_`). Limitga sig'sa — o'zini ishlatadi; sig'masa
+// `<prefiks-qisqa>_<fnv8>` (hash TO'LIQ logik nomdan — turli indekslar bir xil
+// qisqa prefiksga tushsa ham hash farqlaydi). CREATE va DROP shu funksiyani
+// chaqiradi — nom mosligi idempotentlik uchun shart.
+pub fn index_name(idx: &IndexDef) -> String {
+    let prefix = if idx.unique { "uniq" } else { "idx" };
+    let logical = format!("{}_{}_{}", prefix, idx.table, idx.columns.join("_"));
+    const LIMIT: usize = 63;
+    if logical.len() <= LIMIT {
+        return logical;
+    }
+    let hash = format!("{:08x}", fnv1a(&logical)); // 8 hex belgi
+    // prefiks + logik nomdan sig'gancha + "_<hash>" (jami <= LIMIT bayt).
+    let keep = LIMIT - (hash.len() + 1);
+    // Bayt chegarasini buzmaslik uchun char-bo'yicha kesamiz (ASCII identifikator
+    // kutiladi, lekin xavfsiz tomon).
+    let mut short = String::new();
+    for ch in logical.chars() {
+        if short.len() + ch.len_utf8() > keep {
+            break;
+        }
+        short.push(ch);
+    }
+    format!("{}_{}", short, hash)
+}
+
+// CREATE [UNIQUE] INDEX IF NOT EXISTS — idempotent.
+pub fn build_create_index(idx: &IndexDef) -> String {
+    let name = index_name(idx);
+    let uniq = if idx.unique { "UNIQUE " } else { "" };
+    let cols = idx
+        .columns
+        .iter()
+        .map(|c| q_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE {}INDEX IF NOT EXISTS {} ON {} ({})",
+        uniq,
+        q_ident(&name),
+        q_ident(&idx.table),
+        cols
+    )
+}
+
+// DROP INDEX IF EXISTS — idempotent.
+pub fn build_drop_index(name: &str) -> String {
+    format!("DROP INDEX IF EXISTS {}", q_ident(name))
+}
+
+// ALTER TABLE ... ADD COLUMN (SQLite'da IF NOT EXISTS yo'q — migration xatoni
+// "duplicate column" holatida yutadi).
+pub fn build_add_column(table: &str, c: &ColDef) -> String {
+    format!(
+        "ALTER TABLE {} ADD COLUMN {}",
+        q_ident(table),
+        sqlite_column_def(c)
+    )
+}
+
+// ALTER TABLE ... DROP COLUMN.
+pub fn build_drop_column(table: &str, col: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        q_ident(table),
+        q_ident(col)
+    )
+}
+
+// DROP'dan oldin jadvalni DB ichida nusxalash (xavfsizlik backup'i). `ts` —
+// migratsiya vaqti (backup nomini noyob qilish uchun; idempotent bo'lishi shart
+// emas — qayta-run yangi backup yaratadi, bu xavfsizlik uchun ataylab).
+pub fn build_backup(table: &str, ts: u64) -> String {
+    let bak = format!("_flux_bak_{table}_{ts}");
+    format!(
+        "CREATE TABLE {} AS SELECT * FROM {}",
+        q_ident(&bak),
+        q_ident(table)
+    )
 }
 
 // --- SqliteTx: aktiv tranzaksiya (connection'ni egallaydi) ---
@@ -1160,7 +1331,7 @@ impl Interp {
                     .schema
                     .read()
                     .get(table)
-                    .and_then(|cols| cols.get(col))
+                    .and_then(|t| t.columns.get(col))
                     .map(|c| c.type_name.clone());
                 if tbl_type.as_deref() == Some("json") || tbl_type.is_none() {
                     SqlVal::Text(json_encode(v))
@@ -1200,8 +1371,8 @@ impl Interp {
     // o'qigich tbl e'lon qilmaydi) DB sxemasidan introspeksiya bilan tiklaymiz —
     // shunda json ustun process chegarasidan qat'i nazar bir xil map qaytaradi.
     fn col_type(&self, table: &str, col: &str) -> Option<String> {
-        if let Some(cols) = self.schema.read().get(table)
-            && let Some(c) = cols.get(col)
+        if let Some(t) = self.schema.read().get(table)
+            && let Some(c) = t.columns.get(col)
         {
             return Some(c.type_name.clone());
         }
@@ -1616,5 +1787,76 @@ fn arg_int(v: Option<&Value>, who: &str) -> Result<i64, Flow> {
     match v {
         Some(Value::Int(n)) => Ok(*n),
         _ => Err(Flow::err(format!("{}: int argument kerak", who))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idx(table: &str, cols: &[&str], unique: bool) -> IndexDef {
+        IndexDef {
+            table: table.to_string(),
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            unique,
+        }
+    }
+
+    #[test]
+    fn index_name_short_passthrough() {
+        // Qisqa nom o'zgarmaydi — to'liq logik nom ishlatiladi.
+        assert_eq!(
+            index_name(&idx("bookings", &["status"], false)),
+            "idx_bookings_status"
+        );
+        assert_eq!(
+            index_name(&idx("bookings", &["resource_id", "start_at"], true)),
+            "uniq_bookings_resource_id_start_at"
+        );
+    }
+
+    #[test]
+    fn index_name_long_truncates_deterministically() {
+        // 63 baytdan oshadigan uzun nom -> qisqartirilgan + hash suffiks.
+        let long_table = "very_long_table_name_for_appointments_and_bookings";
+        let long = idx(
+            long_table,
+            &["resource_identifier", "starting_at_timestamp"],
+            false,
+        );
+        let n1 = index_name(&long);
+        let n2 = index_name(&long);
+        assert_eq!(n1, n2, "deterministik bo'lishi kerak");
+        assert!(
+            n1.len() <= 63,
+            "limitga sig'ishi kerak: {} ({})",
+            n1,
+            n1.len()
+        );
+        assert!(n1.starts_with("idx_"), "prefiks saqlanishi kerak: {}", n1);
+    }
+
+    #[test]
+    fn index_name_long_no_collision() {
+        // Bir xil qisqa prefiksga tushadigan ikki turli uzun index to'qnashmaydi
+        // (hash to'liq logik nomdan olinadi).
+        let t = "extremely_long_table_name_that_definitely_exceeds_the_limit_xx";
+        let a = index_name(&idx(t, &["column_alpha"], false));
+        let b = index_name(&idx(t, &["column_beta"], false));
+        assert_ne!(
+            a, b,
+            "turli ustunlar turli nom berishi kerak: {} vs {}",
+            a, b
+        );
+    }
+
+    #[test]
+    fn index_name_unique_vs_nonunique_differ() {
+        // uniq va index bir xil ustunlarda turli nom (prefiks) beradi.
+        let u = index_name(&idx("t", &["a"], true));
+        let i = index_name(&idx("t", &["a"], false));
+        assert_ne!(u, i);
+        assert!(u.starts_with("uniq_"));
+        assert!(i.starts_with("idx_"));
     }
 }

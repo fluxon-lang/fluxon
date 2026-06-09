@@ -196,6 +196,10 @@ pub enum Stmt {
     Tbl {
         name: String,
         columns: Vec<TblColumn>,
+        // index/uniq e'lonlari: single-ustun (`status sym index`) promotion
+        // qilingani ham, multi-ustun qavsli qator (`uniq(a b)`) ham shu yerga
+        // tushadi. Auto-migration shu ro'yxatdan CREATE/DROP INDEX hisoblaydi.
+        indexes: Vec<TblIndex>,
     },
 
     // exp NAME = expr  (eksport qilingan qiymat)
@@ -219,6 +223,14 @@ pub struct TblColumn {
     pub name: String,
     pub type_name: String,
     pub modifiers: Vec<String>,
+}
+
+// tbl ichidagi index/unikal e'loni. `columns` bir yoki ko'p ustun
+// (`index(a b)` → ikkita). `unique` — `uniq`/`uniq(...)` bo'lsa true.
+#[derive(Debug, Clone)]
+pub struct TblIndex {
+    pub columns: Vec<String>,
+    pub unique: bool,
 }
 
 pub type Program = Vec<Stmt>;

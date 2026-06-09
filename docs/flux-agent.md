@@ -223,13 +223,24 @@ db.tx \-> db.ins "txns" {ikey:key ...}   # duplicate → uniq error → rollback
 Schema = `tbl`:
 ```flux
 tbl products
-  id    serial pk
-  owner int ref:users.id
-  price money               # money = integer minor unit (cents), NOT float
-  ts    now
+  id     serial pk
+  owner  int ref:users.id
+  price  money              # money = integer minor unit (cents), NOT float
+  status sym index|uniq     # multiple modifiers on one column → pipe `|`
+  ts     now
+
+  index(owner status)       # multi-column index, space-separated (no commas)
+  uniq(owner price)         # multi-column unique
 ```
 Types: serial int flt str bool json now sym money (`int` 64-bit). Modifiers:
-`pk uniq null ref:tbl.col`. Multi-column: `uniq(agent, key)`.
+`pk uniq null index ref:tbl.col`. Multi-column: `index(a b)`, `uniq(a b)`.
+Index names are automatic (`idx_<tbl>_<cols>` / `uniq_<tbl>_<cols>`).
+
+`tbl` is the single source of truth — auto-migration diffs it against the DB:
+new column → `ADD COLUMN`, removed column → `DROP COLUMN` (backed up first),
+removed `tbl` → `DROP TABLE` (backed up; only Flux-managed tables), index added/
+removed → `CREATE/DROP INDEX`. Idempotent: re-deploying the same `tbl` is safe.
+Just write the latest `tbl` — no migration SQL needed.
 `json` column: auto map/list on read, auto-encode on write.
 `sym` column: text in DB, symbol in Flux (auto-converts):
 ```flux
