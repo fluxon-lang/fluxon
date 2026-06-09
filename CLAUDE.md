@@ -76,7 +76,7 @@ allaqachon mavjud — ularni namuna sifatida o'qing.
 ```sh
 cd runtime
 cargo build                          # qurish
-cargo test                           # barcha testlar (hozir 26 ta)
+cargo test                           # barcha testlar (hozir 197 ta)
 cargo run -- run examples/demo.fx    # bir .fx faylni ishga tushirish
 cargo fmt                            # formatlash
 cargo clippy --all-targets -- -D warnings   # lint (0 warning bo'lsin)
@@ -152,11 +152,12 @@ o'ylang va test bilan himoyalang:
 
 ---
 
-## 8. Spec'da bor, lekin hali yo'q (kelajak ishlar)
+## 8. Batareyalar holati (hammasi tayyor)
 
-`docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar endi
-runtime'da **implementatsiya qilingan** (`ai` ham — `ai.ask`/`ai.json`/`ai.run`,
-`$AI_KEY`, Anthropic Messages API orqali; `runtime/src/ai_mod.rs`).
+`docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar
+runtime'da **implementatsiya qilingan**: `http`, `db`, `ai`, `auth`, `ws`,
+`cron`, `queue`, `reg` (`ai` — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`,
+Anthropic Messages API orqali; `runtime/src/ai_mod.rs`).
 
 Yangi battery qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb
 oling — sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan

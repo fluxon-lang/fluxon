@@ -25,8 +25,8 @@ manba (.fx)
   → builtins.rs     yadro modullari (str/math/rand/json/time) + list/map metodlari
 ```
 
-Batareyalar (`http`, `db`) alohida modullarda (`http_mod.rs`, `db_mod.rs`) va
-`interp.rs` dagi dispatch nuqtasidan ulanadi.
+Batareyalar (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) alohida
+modullarda (`*_mod.rs`) va `interp.rs` dagi dispatch nuqtasidan ulanadi.
 
 CLI kirish: `runtime/src/main.rs` → `flux run fayl.fx`.
 
@@ -193,14 +193,27 @@ Ikki qatlam:
 - **Rust unit/integratsiya testlari** (`cargo test`) — modul ichidagi
   `#[cfg(test)]` + `main.rs::mod tests` (`.fx` kodini run qilib natija tekshirish,
   `run(src)` yordamchisi). DB testlari `DB_TEST_LOCK` bilan serializatsiya.
-- **`.fx` e2e testlari** (`runtime/tests-fx/`, PR #10 — master'ga kirmoqda) —
-  Flux'ning **o'zida** yozilgan, foydalanuvchi nuqtai-nazaridan tasdiqlovchi
-  testlar. `run_all.sh` bilan ishga tushadi. Yangi battery qo'shsangiz shu uslubda
-  `NN_*.fx` fayl qo'shing.
+- **`.fx` e2e testlari** (`runtime/tests-fx/`) — Flux'ning **o'zida** yozilgan,
+  foydalanuvchi nuqtai-nazaridan tasdiqlovchi testlar. `run_all.sh` bilan ishga
+  tushadi. Yangi battery qo'shsangiz shu uslubda `NN_*.fx` fayl qo'shing.
 
 ---
 
-## 7. Spec'da bor, hali yo'q
+## 7. Batareyalar holati
 
-`ai`, `reg`, `ws`, `cron`, `queue` — `docs/flux-agent.md` da spetsifikatsiyalangan,
-implementatsiya kutilmoqda. Tavsiya etilgan tartib va naqsh CLAUDE.md §8 da.
+`docs/flux-agent.md` da spetsifikatsiyalangan **barcha batareyalar**
+implementatsiya qilingan:
+
+| Battery | Modul | Izoh |
+|---------|-------|------|
+| `http` | `http_mod.rs` | server + klient + middleware |
+| `db` | `db_mod.rs` | SQLite, pool, tx, auto-migration (postgres/mysql stub) |
+| `ai` | `ai_mod.rs` | Anthropic Messages API |
+| `auth` | `auth_mod.rs` | JWT HS256 + parol hash (argon2id) |
+| `ws` | `ws_mod.rs` | websocket server, room/data |
+| `cron` | `cron_mod.rs` | rejalashtirilgan vazifalar |
+| `queue` | `queue_mod.rs` | fon ishlari navbati |
+| `reg` | `reg_mod.rs` | tool registry |
+
+Keyingi ishlar — mavjud batareyalarni chuqurlashtirish (masalan `db` uchun
+postgres/mysql backend) va yangi til imkoniyatlari. Yangi battery naqshi §5 da.

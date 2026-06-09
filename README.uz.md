@@ -110,11 +110,17 @@ tree-walking interpreter) mavjud — `.fx` fayllarni ishga tushira oladi.
 
 - Til yadrosi: tiplar, bindings (`=`/`<-`), `fn`/lambda/closure, `if`/`each`/
   `match`, operatorlar, string interpolatsiya, `fail`/`!`/`??`/`|>`.
-- Yadro modullari: `str`, `math`, `rand`, `json`, `time`, `env`.
-- Batareyalar: **`http`** (server + klient), **`db`** (SQLite, tranzaksiya,
-  schema, auto-migration).
+- Yadro modullari: `str`, `math`, `rand`, `json`, `time`, `env`, `io`, `fs`, `sh`.
+- Batareyalar (barchasi): **`http`** (server + klient + middleware), **`db`**
+  (SQLite, tranzaksiya, schema, auto-migration), **`ai`** (LLM), **`auth`**
+  (JWT + parol hash), **`ws`** (websocket), **`cron`**, **`queue`**, **`reg`**
+  (tool registry).
 
-**Hali yo'q (spec'da bor):** `ai`, `reg`, `ws`, `cron`, `queue`.
+`docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar mavjud. Bitta
+eslatma: `db` battery hozircha faqat **SQLite** backend bilan ishlaydi — spec
+uni Postgres deb sarlavhalagan bo'lsa-da, `postgres:`/`mysql:` `DATABASE_URL`
+sxemalari hali stub (xato qaytaradi). Flux `db.*` kodi backend-neytral, shuning
+uchun bu backendlar foydalanuvchi kodini o'zgartirmasdan qo'shiladi.
 
 Ishga tushirish:
 

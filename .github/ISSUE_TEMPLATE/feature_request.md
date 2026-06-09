@@ -15,8 +15,9 @@ assignees: ''
 - [ ] Ha — `docs/flux-agent.md` da spetsifikatsiyalangan (qaysi bo'lim: ...)
 - [ ] Yo'q — yangi dizayn (sintaksis taklifi pastda)
 
-> Eslatma: `ai`, `reg`, `ws`, `cron`, `queue` spec'da bor, hali yo'q —
-> ular implementatsiya kutmoqda.
+> Eslatma: spec'dagi barcha batareyalar (`http`, `db`, `ai`, `auth`, `ws`,
+> `cron`, `queue`, `reg`) allaqachon implementatsiya qilingan — bu taklif
+> mavjud xulq-atvorni kengaytiradimi yoki yangimi, aniqlashtiring.
 
 ## Taklif qilingan Flux sintaksisi
 
