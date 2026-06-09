@@ -151,6 +151,18 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "str" => Ok(Value::Str(arg(&args, 0, "str.str")?.to_text())),
+        // str.sym "pending" → :pending. Query-string statuslarini sym filtrga
+        // aylantirish uchun (db.eq {status:(str.split q "," |> ...).map str.sym}).
+        // Avval bu uchun json.dec("\":"+s+"\"") hack ishlatilardi (issue #78).
+        // Sym/str ham qabul qilinadi (idempotent); atrofdagi bo'sh joy kesiladi.
+        "sym" => match arg(&args, 0, "str.sym")? {
+            Value::Str(s) => Ok(Value::Sym(s.trim().to_string())),
+            Value::Sym(s) => Ok(Value::Sym(s.clone())),
+            other => Err(Flow::err(format!(
+                "str.sym: str kutilgan, {} berildi",
+                other.type_name()
+            ))),
+        },
         _ => Err(Flow::err(format!(
             "str modulida '{}' funksiyasi yo'q",
             func
