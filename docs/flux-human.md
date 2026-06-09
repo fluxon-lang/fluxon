@@ -636,16 +636,43 @@ db.tx \->
 **Schema declaration — `tbl`.** You declare tables in Flux itself:
 ```flux
 tbl products
-  id    serial pk
-  owner int ref:users.id
-  name  str
-  price flt
-  ts    now
+  id     serial pk
+  owner  int ref:users.id
+  name   str
+  price  money
+  status sym index|uniq      # multiple modifiers on one column → pipe `|`
+  ts     now
+
+  index(owner status)        # multi-column index (space-separated, no commas)
+  uniq(owner price)          # multi-column unique
 ```
 Type keywords: `serial int flt str bool json now sym money`. Modifiers: `pk`
-(primary key), `uniq`, `null`, `ref:table.column` (foreign key). Multi-column
-unique: in the table body, `uniq(agent, key)` (two columns unique together — for
-example each key only once per agent).
+(primary key), `uniq`, `index`, `null`, `ref:table.column` (foreign key).
+
+**Indexes and uniqueness.** For a single column, append a word modifier: `index`,
+`uniq`. To put **both** on one column the canonical form is `|` (pipe):
+`status sym index|uniq`. The spaced form (`index uniq`) is also accepted. For
+**multi-column**, use a separate parenthesized line: `index(a b)`, `uniq(a b)` —
+space-separated by default (no commas, to save tokens); a comma is also accepted:
+`index(a, b)`. **Index names are automatic** (`idx_<table>_<cols>` /
+`uniq_<...>`) — you never invent a name. A name that is too long (DB limit is 63
+bytes) is automatically shortened (with a deterministic hash suffix); your code
+never breaks.
+
+**Declarative migration — `tbl` is the single source of truth.** You only write
+the latest shape of the `tbl`; Flux diffs it against the current DB and runs the
+necessary DDL **itself**:
+- new column → `ADD COLUMN`;
+- column removed from `tbl` → `DROP COLUMN` (the table is first backed up to
+  `_flux_bak_*`);
+- a `tbl` removed entirely → `DROP TABLE` (with backup; **only Flux-managed**
+  tables — a manually created table is never touched);
+- index added/removed → `CREATE/DROP INDEX`.
+
+Migration is **idempotent** — re-deploying the same `tbl` is safe, nothing
+breaks. No migration SQL needed for schema changes. Type changes and renames are
+**not** automatic — do those manually with `db.q "ALTER TABLE ..."`, and Flux
+syncs the rest afterward.
 
 **A `json` column** — when read it **automatically becomes a map/list** (not a
 string, no need for `json.dec`); when written, a map/list is automatically

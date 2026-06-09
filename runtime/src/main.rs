@@ -903,6 +903,292 @@ syms = (str.split "pending,confirmed" ",").map \s -> str.sym s
 "#);
     }
 
+    // --- Issue #82: tbl deklarativ schema migration + index/uniq ---
+
+    // Migration testlari uchun yordamchi: fayl-backed temp DB tayyorlaydi (ikki
+    // ALOHIDA Interp = ikki deploy sikli; memory DB birinchi drop'da o'chadi).
+    // Yangilangan path qaytaradi; oxirida `cleanup_db` chaqirilsin.
+    #[cfg(test)]
+    fn setup_db(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        // SAFETY: chaqiruvchi DB_TEST_LOCK ushlaydi.
+        unsafe {
+            std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
+        }
+        path
+    }
+
+    #[cfg(test)]
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn migrate_add_column_idempotent() {
+        // tbl'ga yangi ustun qo'shilsa -> ADD COLUMN; eski qatorlar saqlanadi;
+        // qayta-deploy idempotent (yiqilmaydi).
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_addcol.db");
+
+        // Deploy 1: ikki ustunli jadval + bitta qator.
+        run_source("use db\ntbl t\n  id serial pk\n  a int\ndb.ins \"t\" {a:1}\n")
+            .unwrap_or_else(|e| panic!("deploy1: {}", e));
+
+        // Deploy 2: yangi ustun `b` qo'shilgan. ADD COLUMN bo'lishi, eski qator
+        // saqlanib (b NULL) qolishi kerak.
+        run_source(
+            r#"
+use db
+tbl t
+  id serial pk
+  a  int
+  b  str
+old = db.one "select * from t where a=1"
+(old != nil) | (fail "eski qator saqlanishi kerak")
+(old.b == nil) | (fail "yangi ustun b NULL bo'lishi kerak")
+db.ins "t" {a:2 b:"hi"}
+(db.one "select b from t where a=2").b == "hi" | (fail "yangi ustunga yozish")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 add column: {}", e));
+
+        // Deploy 3: aynan o'sha schema — idempotent, yiqilmaydi.
+        run_source("use db\ntbl t\n  id serial pk\n  a int\n  b str\n")
+            .unwrap_or_else(|e| panic!("deploy3 idempotent: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn migrate_drop_column_with_backup() {
+        // tbl'dan ustun olib tashlansa -> DROP COLUMN + _flux_bak_* backup jadval
+        // eski ma'lumot bilan qoladi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_dropcol.db");
+
+        run_source(
+            "use db\ntbl t\n  id serial pk\n  a int\n  b str\ndb.ins \"t\" {a:1 b:\"keep\"}\n",
+        )
+        .unwrap_or_else(|e| panic!("deploy1: {}", e));
+
+        // Deploy 2: `b` ustuni olib tashlangan -> DROP COLUMN. `b` so'rovi xato
+        // beradi (ustun yo'q), lekin backup jadvalda `b="keep"` saqlanadi.
+        run_source(
+            r#"
+use db
+tbl t
+  id serial pk
+  a  int
+# b ustuni endi yo'q -> DROP COLUMN
+baks = db.q "select name from sqlite_master where type='table' and name like '_flux_bak_t_%'"
+(baks.len >= 1) | (fail "backup jadval yaratilishi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 drop column: {}", e));
+
+        // Deploy 3: aynan o'sha (b'siz) schema — `b` allaqachon yo'q, DROP COLUMN
+        // yo'q ustunga uriniladi, lekin idempotent: jim pass, yiqilmaydi.
+        run_source("use db\ntbl t\n  id serial pk\n  a int\n")
+            .unwrap_or_else(|e| panic!("deploy3 drop idempotent: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn migrate_drop_table_only_flux_managed() {
+        // tbl source'dan butunlay olib tashlansa -> DROP TABLE + backup, lekin
+        // FAQAT Flux yaratgan jadval (_flux_schema'da). Flux yaratmagan jadval saqlanadi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_droptbl.db");
+
+        // Deploy 1: Flux `a` jadvalini yaratadi + qo'lda Flux-bo'lmagan `manual` jadval.
+        run_source(
+            r#"
+use db
+tbl a
+  id serial pk
+  n  int
+db.ins "a" {n:1}
+db.q "CREATE TABLE manual (x int)"
+db.q "INSERT INTO manual VALUES (42)"
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1: {}", e));
+
+        // Deploy 2: `a` tbl olib tashlangan (lekin boshqa tbl bor — registry bo'sh
+        // EMAS). `a` DROP bo'lishi, `manual` saqlanishi kerak.
+        run_source(
+            r#"
+use db
+tbl b
+  id serial pk
+gone = db.q "select name from sqlite_master where type='table' and name='a'"
+(gone.len == 0) | (fail "a jadvali DROP bo'lishi kerak")
+kept = db.q "select name from sqlite_master where type='table' and name='manual'"
+(kept.len == 1) | (fail "manual jadval saqlanishi kerak (Flux yaratmagan)")
+(db.one "select x from manual").x == 42 | (fail "manual ma'lumot saqlanishi kerak")
+baks = db.q "select name from sqlite_master where type='table' and name like '_flux_bak_a_%'"
+(baks.len >= 1) | (fail "a uchun backup yaratilishi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 drop table: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn migrate_index_create_and_drop() {
+        // Index e'loni -> CREATE INDEX; olib tashlansa -> DROP INDEX. uniq(a b) ->
+        // duplicate insert xato. sqlite_autoindex_* tegilmaydi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_index.db");
+
+        // Deploy 1: single index + multi unique.
+        run_source(
+            r#"
+use db
+tbl bookings
+  id          serial pk
+  resource_id int
+  status      sym index
+  start_at    str
+  uniq(resource_id start_at)
+idx = db.q "select name from sqlite_master where type='index' and name='idx_bookings_status'"
+(idx.len == 1) | (fail "idx_bookings_status yaratilishi kerak")
+uniq = db.q "select name from sqlite_master where type='index' and name='uniq_bookings_resource_id_start_at'"
+(uniq.len == 1) | (fail "uniq index yaratilishi kerak")
+db.ins "bookings" {resource_id:5 status::done start_at:"2026-06-01"}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1 index: {}", e));
+
+        // uniq buzilishi: bir xil (resource_id start_at) -> xato.
+        let dup = run_source(
+            r#"
+use db
+tbl bookings
+  id          serial pk
+  resource_id int
+  status      sym index
+  start_at    str
+  uniq(resource_id start_at)
+db.ins "bookings" {resource_id:5 status::pending start_at:"2026-06-01"}
+"#,
+        );
+        assert!(
+            dup.is_err(),
+            "uniq(resource_id start_at) duplicate insert xato berishi kerak"
+        );
+
+        // Deploy 2: status index olib tashlangan -> DROP INDEX. uniq qoladi.
+        run_source(
+            r#"
+use db
+tbl bookings
+  id          serial pk
+  resource_id int
+  status      sym
+  start_at    str
+  uniq(resource_id start_at)
+dropped = db.q "select name from sqlite_master where type='index' and name='idx_bookings_status'"
+(dropped.len == 0) | (fail "idx_bookings_status DROP bo'lishi kerak")
+kept = db.q "select name from sqlite_master where type='index' and name='uniq_bookings_resource_id_start_at'"
+(kept.len == 1) | (fail "uniq index saqlanishi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 drop index: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn migrate_drop_indexed_column() {
+        // REGRESSIYA (code review): index'lanган ustun olib tashlanganda eskirgan
+        // index ustun DROP'idan OLDIN tashlanishi kerak — aks holda ba'zi SQLite
+        // holatlarida DROP COLUMN "error in index ... no such column" bilan rad
+        // etiladi va deploy migrate qila olmaydi. Single va kompozit index ikkalasi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_dropidxcol.db");
+
+        // Deploy 1: index'li `status` ustun + kompozit index(a status).
+        run_source(
+            r#"
+use db
+tbl t
+  id     serial pk
+  a      int
+  status sym index
+  index(a status)
+db.ins "t" {a:1 status::x}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1: {}", e));
+
+        // Deploy 2: `status` ustuni olib tashlangan. Eski idx_t_status va
+        // idx_t_a_status hali DB'da — migration yiqilmasligi (eskirgan index avval
+        // tashlanadi), keyin DROP COLUMN ishlashi kerak.
+        run_source(
+            r#"
+use db
+tbl t
+  id serial pk
+  a  int
+gone = db.q "select name from sqlite_master where type='index' and name='idx_t_status'"
+(gone.len == 0) | (fail "idx_t_status DROP bo'lishi kerak")
+comp = db.q "select name from sqlite_master where type='index' and name='idx_t_a_status'"
+(comp.len == 0) | (fail "idx_t_a_status (status'ga bog'liq) DROP bo'lishi kerak")
+# status ustuni haqiqatan yo'qolgan
+cols = db.q "select name from pragma_table_info('t') where name='status'"
+(cols.len == 0) | (fail "status ustuni DROP bo'lishi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 drop indexed column: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn migrate_pipe_modifier_creates_unique_index() {
+        // `email str index|uniq` -> bitta UNIQUE index yaratiladi (uniq subsume
+        // qiladi), duplicate insert xato beradi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_mig_pipe.db");
+
+        run_source(
+            r#"
+use db
+tbl users
+  id    serial pk
+  email str index|uniq
+ui = db.q "select name from sqlite_master where type='index' and name='uniq_users_email'"
+(ui.len == 1) | (fail "uniq_users_email yaratilishi kerak")
+db.ins "users" {email:"a@x.uz"}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1 pipe: {}", e));
+
+        let dup = run_source(
+            r#"
+use db
+tbl users
+  id    serial pk
+  email str index|uniq
+db.ins "users" {email:"a@x.uz"}
+"#,
+        );
+        assert!(
+            dup.is_err(),
+            "index|uniq duplicate email xato berishi kerak"
+        );
+
+        cleanup_db(&path);
+    }
+
     #[test]
     fn db_tx_commit_returns_value() {
         with_db_test("tx_commit", || {

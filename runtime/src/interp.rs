@@ -188,10 +188,11 @@ pub struct Interp {
     // DB battery: lazy ochilgan backend (jarayonga bitta, `$DATABASE_URL` bilan
     // tanlanadi). Birinchi `db.*` chaqiruvida ochiladi + auto-migration.
     db: OnceLock<Arc<dyn crate::db_mod::Db>>,
-    // tbl schema registry: jadval -> (ustun -> meta). `Stmt::Tbl` to'ldiradi,
-    // db natijalarini post-process qilish (sym/json/bool) va auto-migration uchun.
+    // tbl schema registry: jadval -> meta (ustunlar + tartib + indekslar).
+    // `Stmt::Tbl` to'ldiradi, db natijalarini post-process qilish (sym/json/bool)
+    // va auto-migration (diff: ADD/DROP COLUMN, CREATE/DROP INDEX) uchun.
     // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
-    pub schema: Arc<RwLock<HashMap<String, BTreeMap<String, ColMeta>>>>,
+    pub schema: Arc<RwLock<HashMap<String, TableMeta>>>,
     // DB sxemasidan introspeksiya qilingan ustun tiplari cache'i (jadval -> ustun
     // -> flux-tip). `tbl` e'lon QILINMAGAN process (masalan ikki-process setup'da
     // o'qigich) `schema` bo'sh bo'lganda json ustunni shu cache orqali tiklaydi —
@@ -240,6 +241,15 @@ pub struct Interp {
 pub struct ColMeta {
     pub type_name: String,
     pub modifiers: Vec<String>,
+}
+
+// tbl jadval metasi — ustunlar (nom -> meta), e'lon tartibi (barqaror ADD COLUMN
+// uchun) va indekslar (CREATE/DROP INDEX diff uchun).
+#[derive(Clone, Default)]
+pub struct TableMeta {
+    pub columns: BTreeMap<String, ColMeta>,
+    pub col_order: Vec<String>,
+    pub indexes: Vec<crate::db_mod::IndexDef>,
 }
 
 impl Interp {
@@ -307,20 +317,134 @@ impl Interp {
         Ok(self.db.get().unwrap().clone())
     }
 
-    // schema registry'dagi har jadval uchun CREATE TABLE IF NOT EXISTS.
+    // Deklarativ auto-migration: `tbl` = DB schemasi uchun YAGONA MANBA. Joriy
+    // DB holatini introspeksiya qilib `tbl` registry bilan farqini (diff)
+    // hisoblaydi va kerakli DDL'ni bajaradi:
+    //   - yangi jadval -> CREATE TABLE
+    //   - yangi ustun  -> ADD COLUMN          (idempotent: bor bo'lsa jim pass)
+    //   - olib tashlangan ustun -> BACKUP + DROP COLUMN  (yo'q bo'lsa jim pass)
+    //   - index e'loni -> CREATE/DROP INDEX IF [NOT] EXISTS
+    //   - olib tashlangan jadval -> BACKUP + DROP TABLE   (faqat Flux yaratganlar)
+    //
+    // KRITIK: idempotent va user manual SQL bilan birga ishlaganda yiqilmaydi —
+    // "kerakli holatga keltir, allaqachon shunday bo'lsa tinch o't". DROP'lardan
+    // oldin jadval DB ichida `_flux_bak_*` ga nusxalanadi (agent xatosiga himoya).
     fn migrate(&self, db: &dyn crate::db_mod::Db) -> Result<(), Flow> {
+        use crate::db_mod::{
+            ColDef, SqlVal, build_add_column, build_backup, build_create_index, build_drop_column,
+            build_drop_index, index_name,
+        };
+
+        // 0. Flux boshqaradigan jadvallar reyestri (xavfsiz DROP uchun).
+        db.exec(
+            "CREATE TABLE IF NOT EXISTS _flux_schema (table_name TEXT PRIMARY KEY)",
+            &[],
+        )
+        .map_err(Flow::err)?;
+
+        // Backup nomi uchun migratsiya vaqti (unix secs). Faqat backup nomini
+        // noyob qilish uchun — index nomlaridan FARQLI, bu yerda determinizm
+        // shart emas.
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         let schema = self.schema.read();
-        for (table, cols) in schema.iter() {
-            let coldefs: Vec<crate::db_mod::ColDef> = cols
-                .iter()
-                .map(|(name, meta)| crate::db_mod::ColDef {
-                    name: name.clone(),
-                    type_name: meta.type_name.clone(),
-                    modifiers: meta.modifiers.clone(),
-                })
+
+        // 1. Har registry jadval uchun: CREATE + ustun/index diff.
+        for (table, meta) in schema.iter() {
+            // ColDef'lar e'lon tartibida (barqaror ADD COLUMN).
+            let coldef = |col: &str| -> ColDef {
+                let m = &meta.columns[col];
+                ColDef {
+                    name: col.to_string(),
+                    type_name: m.type_name.clone(),
+                    modifiers: m.modifiers.clone(),
+                }
+            };
+            let coldefs: Vec<ColDef> = meta.col_order.iter().map(|c| coldef(c)).collect();
+            db.exec(&db.build_create_table(table, &coldefs), &[])
+                .map_err(Flow::err)?;
+            db.exec(
+                "INSERT OR IGNORE INTO _flux_schema(table_name) VALUES (?1)",
+                &[SqlVal::Text(table.clone())],
+            )
+            .map_err(Flow::err)?;
+
+            // DB'dagi joriy ustunlar.
+            let db_cols: HashSet<String> = db
+                .column_types(table)
+                .map_err(Flow::err)?
+                .into_iter()
+                .map(|(n, _)| n)
                 .collect();
-            let sql = db.build_create_table(table, &coldefs);
-            db.exec(&sql, &[]).map_err(Flow::err)?;
+
+            // 2. ADD COLUMN: registry'da bor, DB'da yo'q.
+            for col in &meta.col_order {
+                if !db_cols.contains(col) {
+                    swallow_benign(db.exec(&build_add_column(table, &coldef(col)), &[]))?;
+                }
+            }
+
+            // 3. ESKIRGAN INDEX DROP — ustun DROP'idan OLDIN. Sabab: index'lanган
+            //    ustun olib tashlansa, eski `idx_<tbl>_<col>` hali DB'da turadi va
+            //    ba'zi SQLite holatlarida `DROP COLUMN` "error in index ... after
+            //    drop column: no such column" bilan rad etiladi -> deploy migrate
+            //    qila olmaydi. Shu sabab avval kerak BO'LMAGAN Flux index'larini
+            //    tashlaymiz, keyin ustunni xavfsiz drop qilamiz.
+            let want_names: HashSet<String> = meta.indexes.iter().map(index_name).collect();
+            for info in db.flux_indexes(table).map_err(Flow::err)? {
+                if !want_names.contains(&info.name) {
+                    db.exec(&build_drop_index(&info.name), &[])
+                        .map_err(Flow::err)?;
+                }
+            }
+
+            // 4. DROP COLUMN: DB'da bor, registry'da yo'q. BACKUP (jadval bo'yicha
+            //    bir marta) -> DROP COLUMN (yo'q bo'lsa jim pass).
+            let mut backed_up = false;
+            for dbcol in &db_cols {
+                if !meta.columns.contains_key(dbcol) {
+                    if !backed_up {
+                        db.exec(&build_backup(table, ts), &[]).map_err(Flow::err)?;
+                        backed_up = true;
+                    }
+                    swallow_benign(db.exec(&build_drop_column(table, dbcol), &[]))?;
+                }
+            }
+
+            // 5. YANGI INDEX CREATE — ustun DROP'idan KEYIN (yangi ustunlar
+            //    allaqachon mavjud). IF NOT EXISTS idempotent.
+            for idx in &meta.indexes {
+                db.exec(&build_create_index(idx), &[]).map_err(Flow::err)?;
+            }
+        }
+
+        // 6. DROP TABLE: `_flux_schema` da bor, registry'da yo'q (source'dan
+        //    tbl olib tashlangan). BACKUP -> DROP -> reyestrdan o'chir.
+        //
+        // MUHIM: registry BUTUNLAY bo'sh bo'lsa (hech qanday `tbl` e'lon
+        //    qilinmagan), DROP'ni o'tkazib yuboramiz — bunday process schema
+        //    dirijyori EMAS (faqat o'qiydi/yozadi, masalan ikki-process setup).
+        //    Aks holda u boshqa process yaratgan barcha jadvalni o'chirib yuborardi.
+        if schema.is_empty() {
+            return Ok(());
+        }
+        for table in db.flux_tables().map_err(Flow::err)? {
+            if !schema.contains_key(&table) {
+                db.exec(&build_backup(&table, ts), &[]).map_err(Flow::err)?;
+                db.exec(
+                    &format!("DROP TABLE IF EXISTS {}", crate::db_mod::q_ident(&table)),
+                    &[],
+                )
+                .map_err(Flow::err)?;
+                db.exec(
+                    "DELETE FROM _flux_schema WHERE table_name = ?1",
+                    &[SqlVal::Text(table)],
+                )
+                .map_err(Flow::err)?;
+            }
         }
         Ok(())
     }
@@ -371,7 +495,11 @@ impl Interp {
                     }));
                     self.global.write().define(name, f, false);
                 }
-                Stmt::Tbl { name, columns } => self.register_tbl(name, columns),
+                Stmt::Tbl {
+                    name,
+                    columns,
+                    indexes,
+                } => self.register_tbl(name, columns, indexes),
                 _ => {}
             }
         }
@@ -403,9 +531,10 @@ impl Interp {
         Ok(())
     }
 
-    // tbl e'lonini schema registry'ga yozadi (ustun -> tip+modifikatorlar).
-    fn register_tbl(&self, name: &str, columns: &[TblColumn]) {
+    // tbl e'lonini schema registry'ga yozadi (ustunlar + tartib + indekslar).
+    fn register_tbl(&self, name: &str, columns: &[TblColumn], indexes: &[TblIndex]) {
         let mut cols = BTreeMap::new();
+        let mut col_order = Vec::with_capacity(columns.len());
         for c in columns {
             cols.insert(
                 c.name.clone(),
@@ -414,8 +543,24 @@ impl Interp {
                     modifiers: c.modifiers.clone(),
                 },
             );
+            col_order.push(c.name.clone());
         }
-        self.schema.write().insert(name.to_string(), cols);
+        let idx_defs = indexes
+            .iter()
+            .map(|i| crate::db_mod::IndexDef {
+                table: name.to_string(),
+                columns: i.columns.clone(),
+                unique: i.unique,
+            })
+            .collect();
+        self.schema.write().insert(
+            name.to_string(),
+            TableMeta {
+                columns: cols,
+                col_order,
+                indexes: idx_defs,
+            },
+        );
     }
 
     // `use ./fayl` — foydalanuvchi modulini yuklab namespace `Value::Map` qaytaradi.
@@ -537,7 +682,11 @@ impl Interp {
                     }));
                     scope.write().define(name, f, false);
                 }
-                Stmt::Tbl { name, columns } => self.register_tbl(name, columns),
+                Stmt::Tbl {
+                    name,
+                    columns,
+                    indexes,
+                } => self.register_tbl(name, columns, indexes),
                 _ => {}
             }
         }
@@ -668,8 +817,12 @@ impl Interp {
                 Ok(Value::Nil)
             }
             // tbl — schema registry'ga yoziladi (sym/json konversiya + migration).
-            Stmt::Tbl { name, columns } => {
-                self.register_tbl(name, columns);
+            Stmt::Tbl {
+                name,
+                columns,
+                indexes,
+            } => {
+                self.register_tbl(name, columns, indexes);
                 Ok(Value::Nil)
             }
         }
@@ -1515,6 +1668,25 @@ impl Interp {
 // `use` yo'li foydalanuvchi faylimi yoki batareyami? Foydalanuvchi modullari
 // nisbiy yo'l bilan beriladi (`./tools`, `../lib/x`). Batareyalar oddiy nom
 // (`http`, `db`) — ular dispatch nom asosida ishlaydi, fayl yuklanmaydi.
+// ADD/DROP COLUMN xatosini "allaqachon bor/yo'q" holatida yutadi (SQLite'da bu
+// DDL'lar IF [NOT] EXISTS qo'llab-quvvatlamaydi). Idempotentlik uchun: ustun
+// allaqachon mavjud (user qo'shgan / rename'ning yangi tomoni) yoki allaqachon
+// yo'q (user o'chirgan / rename'ning eski tomoni) bo'lsa — migration yiqilmaydi.
+// Boshqa BARCHA xatolar (masalan, sintaksis, tip) ko'tariladi.
+fn swallow_benign(res: Result<usize, String>) -> Result<(), Flow> {
+    match res {
+        Ok(_) => Ok(()),
+        Err(msg) => {
+            let m = msg.to_lowercase();
+            if m.contains("duplicate column name") || m.contains("no such column") {
+                Ok(()) // allaqachon kerakli holatda — tinch o't
+            } else {
+                Err(Flow::err(msg))
+            }
+        }
+    }
+}
+
 fn is_user_module_path(path: &str) -> bool {
     path.starts_with("./") || path.starts_with("../") || path == "." || path == ".."
 }

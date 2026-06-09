@@ -6,12 +6,18 @@
 
 use db
 
-# tbl — schema e'loni. db ochilganda CREATE TABLE IF NOT EXISTS avtomat bajariladi.
+# tbl — schema e'loni va YAGONA MANBA. db ochilganda Flux `tbl` ni DB joriy
+# holati bilan solishtiradi (diff) va kerakli DDL'ni o'zi bajaradi: yangi
+# ustun → ADD COLUMN, olib tashlangan ustun → DROP COLUMN (backup bilan),
+# index qo'shilsa/olinsa → CREATE/DROP INDEX. Siz faqat oxirgi ko'rinishni
+# yozasiz — migration SQL yozish shart emas, qayta-deploy idempotent.
 tbl tickets
   id       serial pk
   category sym          # DB: matn, Flux: symbol
-  status   sym
+  status   sym index    # tez-tez filtrlanadi → index (auto nom: idx_tickets_status)
   meta     json         # DB: matn, Flux: map/list
+
+  index(category status)   # ko'p-ustunli index (bo'shliq bilan, vergulsiz)
 
 # --- ins: qo'shilgan qatorni qaytaradi (RETURNING *) ---
 t = db.ins "tickets" {category::billing status::new meta:{tries:0 src:"web"}}
@@ -42,8 +48,9 @@ log "jami ticketlar=${all.len}"
 
 # --- put: upsert (bor bo'lsa yangila, yo'q bo'lsa qo'sh) ---
 tbl counters
-  name str pk
-  hits int
+  name  str pk
+  label str uniq        # bir ustunli uniq → alohida UNIQUE INDEX (auto nom)
+  hits  int
 
 db.put "counters" {hits:1} {name:"home"}
 db.put "counters" {hits:5} {name:"home"}      # bor -> yangilanadi

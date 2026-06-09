@@ -338,21 +338,67 @@ impl Parser {
         self.expect(&Tok::Newline, "jadval tanasi")?;
         self.expect(&Tok::Indent, "jadval ustunlari (chekinish)")?;
         let mut columns = Vec::new();
+        let mut indexes: Vec<TblIndex> = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
-            // ustun:  nom tip mod1 mod2...
-            // yoki:   uniq(a, b)  — ko'p ustunli unikal (yadroda e'tiborsiz)
+            // Ko'p-ustunli index/uniq qatori:  index(a b)  /  uniq(a, b).
+            // Ustun qatoridan ajratish: `index`/`uniq` keyin DARHOL `(` kelsa.
+            // Oddiy ustunda 2-token tip-ident yoki Newline bo'ladi, hech qachon
+            // `(` emas — shu sabab xavfsiz. (Paren ichida lexer Newline emit
+            // qilmaydi, shu sabab `uniq(\n a\n b\n)` ko'p-qatorli ham ishlaydi.)
+            if let Tok::Ident(kw) = self.peek().clone()
+                && (kw == "index" || kw == "uniq")
+                && *self.peek2() == Tok::LParen
+            {
+                self.advance(); // index|uniq
+                self.advance(); // (
+                let mut cols = Vec::new();
+                while !self.check(&Tok::RParen) && !self.check(&Tok::Eof) {
+                    // Vergul ixtiyoriy (default bo'shliq bilan ajratiladi);
+                    // adashib `index(a, b)` yozgan agent uchun ham qabul.
+                    if self.eat(&Tok::Comma) {
+                        continue;
+                    }
+                    cols.push(self.expect_ident("indeks ustuni")?);
+                }
+                self.expect(&Tok::RParen, "indeks qavsi")?;
+                indexes.push(TblIndex {
+                    columns: cols,
+                    unique: kw == "uniq",
+                });
+                self.skip_newlines();
+                continue;
+            }
+
+            // ustun:  nom tip mod1 mod2...  (modifikatorlar bo'shliq YOKI `|` bilan)
             let col_name = self.expect_ident("ustun nomi")?;
             let mut modifiers = Vec::new();
             let mut type_name = String::new();
             if let Tok::Ident(_) = self.peek() {
                 type_name = self.expect_ident("ustun tipi")?;
             }
-            while let Tok::Ident(m) = self.peek().clone() {
-                self.advance();
-                modifiers.push(m);
+            // Modifikator loop: ident → push; keyingi `|` bo'lsa consume va davom
+            // (`index|uniq`). Bo'shliqli shakl (`index uniq`) ham shu loop bilan.
+            loop {
+                if let Tok::Ident(m) = self.peek().clone() {
+                    self.advance();
+                    modifiers.push(m);
+                } else if self.check(&Tok::Pipe) {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
-            // ref:tbl.col yoki uniq(...) kabilarni qator oxirigacha o'tkazib yuboramiz
+            // Single-ustun index/uniq modifikatorini TblIndex'ga ko'taramiz.
+            // `uniq` `index`'ni subsume qiladi — bitta unikal index (ikkita emas).
+            let has = |m: &str| modifiers.iter().any(|x| x == m);
+            if has("index") || has("uniq") {
+                indexes.push(TblIndex {
+                    columns: vec![col_name.clone()],
+                    unique: has("uniq"),
+                });
+            }
+            // ref:tbl.col kabilarni qator oxirigacha o'tkazib yuboramiz
             while !self.check(&Tok::Newline) && !self.check(&Tok::Dedent) && !self.check(&Tok::Eof)
             {
                 self.advance();
@@ -365,7 +411,11 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(&Tok::Dedent, "jadval oxiri")?;
-        Ok(Stmt::Tbl { name, columns })
+        Ok(Stmt::Tbl {
+            name,
+            columns,
+            indexes,
+        })
     }
 
     // --- ifodalar (precedence climbing) ---
@@ -1087,5 +1137,53 @@ mod tests {
             }
             other => panic!("List kutilgan, {:?} topildi", other),
         }
+    }
+
+    // tbl tanasidan index'larni ajratib oladi.
+    fn tbl_indexes(src: &str) -> Vec<TblIndex> {
+        let prog = parse(crate::lexer::lex(src).unwrap()).unwrap();
+        match &prog[0] {
+            Stmt::Tbl { indexes, .. } => indexes.clone(),
+            other => panic!("Tbl kutilgan, {:?} topildi", other),
+        }
+    }
+
+    #[test]
+    fn tbl_single_and_multi_index() {
+        // `b sym index` -> single index; `uniq(a b)` -> multi unique.
+        let idx = tbl_indexes("tbl t\n  a int\n  b sym index\n  uniq(a b)\n");
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx[0].columns, vec!["b"]);
+        assert!(!idx[0].unique);
+        assert_eq!(idx[1].columns, vec!["a", "b"]);
+        assert!(idx[1].unique);
+    }
+
+    #[test]
+    fn tbl_pipe_modifier_one_unique_index() {
+        // `c sym index|uniq` -> bitta unikal index (uniq index'ni subsume qiladi).
+        let idx = tbl_indexes("tbl t\n  c sym index|uniq\n");
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx[0].columns, vec!["c"]);
+        assert!(idx[0].unique);
+    }
+
+    #[test]
+    fn tbl_index_comma_optional() {
+        // `index(a, b)` vergulli forma `index(a b)` bilan bir xil natija.
+        let comma = tbl_indexes("tbl t\n  index(a, b)\n");
+        let space = tbl_indexes("tbl t\n  index(a b)\n");
+        assert_eq!(comma.len(), 1);
+        assert_eq!(comma[0].columns, vec!["a", "b"]);
+        assert!(!comma[0].unique);
+        assert_eq!(comma[0].columns, space[0].columns);
+    }
+
+    #[test]
+    fn tbl_spaced_modifier_still_works() {
+        // Bo'shliqli `index uniq` ham qabul qilinadi (kanonik shakl `|`).
+        let idx = tbl_indexes("tbl t\n  d sym index uniq\n");
+        assert_eq!(idx.len(), 1);
+        assert!(idx[0].unique);
     }
 }

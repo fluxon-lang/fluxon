@@ -635,16 +635,42 @@ db.tx \->
 **Schema e'loni — `tbl`.** Jadvallarni Flux'ning o'zida e'lon qilasiz:
 ```flux
 tbl products
-  id    serial pk
-  owner int ref:users.id
-  name  str
-  price flt
-  ts    now
+  id     serial pk
+  owner  int ref:users.id
+  name   str
+  price  money
+  status sym index|uniq      # bir ustunda ko'p modifikator → pipe `|`
+  ts     now
+
+  index(owner status)        # ko'p-ustunli index (bo'shliq bilan, vergulsiz)
+  uniq(owner price)          # ko'p-ustunli unikal
 ```
 Tip kalit so'zlari: `serial int flt str bool json now sym money`. Modifikatorlar:
-`pk` (primary key), `uniq`, `null`, `ref:jadval.ustun` (tashqi kalit).
-Ko'p ustunli unikal: jadval tanasida `uniq(agent, key)` (ikki ustun birga
-unikal — masalan har agent uchun har kalit faqat bir marta).
+`pk` (primary key), `uniq`, `index`, `null`, `ref:jadval.ustun` (tashqi kalit).
+
+**Index va unikal.** Bir ustun uchun ustun oxirida so'z-modifikator: `index`,
+`uniq`. Bir ustunda **ikkala** modifikator kerak bo'lsa kanonik shakl `|` (pipe):
+`status sym index|uniq`. Bo'shliqli shakl (`index uniq`) ham qabul qilinadi.
+**Ko'p-ustunli** uchun alohida qavsli qator: `index(a b)`, `uniq(a b)` — default
+bo'shliq bilan ajratiladi (vergulsiz, tejaymiz); vergul ixtiyoriy ham qabul:
+`index(a, b)`. **Index nomi avtomatik** (`idx_<jadval>_<ustunlar>` /
+`uniq_<...>`) — siz nom o'ylab topmaysiz. Juda uzun nom (DB limiti 63 bayt)
+avtomatik qisqartiriladi (deterministik hash suffiks bilan), kod yiqilmaydi.
+
+**Deklarativ migration — `tbl` = yagona manba.** Siz faqat `tbl` ning oxirgi
+ko'rinishini yozasiz; Flux DB joriy holati bilan farqini hisoblab kerakli DDL'ni
+**o'zi** bajaradi:
+- yangi ustun → `ADD COLUMN`;
+- `tbl`dan olib tashlangan ustun → `DROP COLUMN` (avval jadval `_flux_bak_*` ga
+  backup qilinadi);
+- `tbl` butunlay olib tashlansa → `DROP TABLE` (backup bilan; **faqat Flux
+  yaratgan** jadvallar — qo'lda yaratilgan jadvalga tegilmaydi);
+- index qo'shilsa/olinsa → `CREATE/DROP INDEX`.
+
+Migration **idempotent** — bir xil `tbl` ni qayta deploy qilish xavfsiz, hech
+narsa buzilmaydi. Schema o'zgarishi uchun SQL yozish shart emas. Tip o'zgartirish
+yoki rename avtomatik EMAS — buni qo'lda `db.q "ALTER TABLE ..."` bilan qilasiz,
+Flux undan keyin sinxronlaydi.
 
 **`json` ustun** — o'qiganda **avtomat map/list** bo'ladi (string emas,
 `json.dec` shart emas); yozganda map/list avtomat enkod qilinadi.
