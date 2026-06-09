@@ -125,6 +125,13 @@ http.serve 8080
 - Request-scoped context: `req.ctx <- {tenant_id:5 role:"admin"}` (middleware
   writes), `ctx = req.ctx` (handler reads). Lives for THIS request, shared between
   middleware and handler — compute auth once, not per handler. Per-request, isolated.
+- `req.ip` — client IP (TCP peer; behind a proxy this is the proxy's IP).
+- Rate limit: `http.limit N :sec|:min|:hr \req -> key` (declared like middleware,
+  runs in order; an optional leading path scopes it like `http.before`):
+  `http.limit 100 :min \req -> req.ctx.tenant_id` (per-tenant, all routes),
+  `http.limit "/api/*" 100 :min \req -> req.headers.x_api_key` (per-key, prefix).
+  Over the limit → auto `429` + `Retry-After` (seconds until window resets). Key fn
+  nil → falls back to `req.ip`. Fixed-window, in-memory (single instance only).
 ```flux
 http.before "/api/*" \req ->
   if !req.headers.authorization

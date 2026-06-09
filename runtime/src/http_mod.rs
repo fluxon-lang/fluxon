@@ -8,10 +8,11 @@
 // `rep status body` -> {__resp:true status body} map (builtins.rs::install).
 // `fail status "msg"` -> Flow::Fail -> JSON xato javob.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -44,13 +45,37 @@ pub struct Route {
     pub handler: Value, // Value::Fn (closure)
 }
 
+// Rate-limit holati: kalit -> (window_id, count). Fixed-window — `window_id =
+// now_sek / window_sek`. Arc<Mutex> shuning uchun limiter REGISTRATSIYA paytida
+// bir marta yaratiladi, har request shu BITTA holatni ulashadi (Middleware klonida
+// Arc nusxalanadi — pointer bir xil), shu sababli parallel request'lar atomik
+// sanaydi (issue #79: thread-safe). Holat in-memory — bitta instance uchun (docs).
+type LimitState = Arc<Mutex<HashMap<String, (u64, u32)>>>;
+
+// Middleware turi: oddiy fn (use/before) yoki rate-limiter (http.limit). Limit
+// ham SHU ro'yxatga qo'shiladi (alohida emas) — shunda u boshqa middleware bilan
+// DEKLARATSIYA TARTIBIDA ishlaydi: undan oldin e'lon qilingan auth `req.ctx`'ga
+// tenant_id yozsa, kalit funksiyasi `\req -> req.ctx.tenant_id` uni ko'radi (#79).
+#[derive(Clone)]
+pub enum MwKind {
+    // http.use / http.before — handler'ni chaqiradi; `fail`/`rep` zanjirni to'xtatadi.
+    Fn,
+    // http.limit — handler KALIT funksiyasi (req -> kalit). Limit oshsa 429.
+    Limit {
+        limit: u32,
+        window_secs: u64,
+        state: LimitState,
+    },
+}
+
 // Middleware (issue #67). `scope` = None — global (`http.use`, barcha yo'lga);
 // Some(shablon) — prefiks bo'yicha (`http.before "/api/*"`). Ro'yxatda
-// deklaratsiya tartibida saqlanadi (use/before aralashsa ham tartib aniq).
+// deklaratsiya tartibida saqlanadi (use/before/limit aralashsa ham tartib aniq).
 #[derive(Clone)]
 pub struct Middleware {
     pub scope: Option<String>,
     pub handler: Value,
+    pub kind: MwKind,
 }
 
 // "/notes/:id" -> [Lit("notes"), Param("id")]. Bo'sh segmentlar tashlanadi.
@@ -121,6 +146,82 @@ fn prefix_matches(pat: &str, path: &str) -> bool {
     }
 }
 
+// --- rate-limit (issue #79) ---
+
+// Oyna birligi symbol'ini soniyaga aylantiradi. Faqat :sec/:min/:hr — kam token,
+// AI eslab qoladigan canonical to'plam (yangi birlik kerak bo'lsa shu yerga).
+fn window_to_secs(unit: &str) -> Option<u64> {
+    match unit {
+        "sec" => Some(1),
+        "min" => Some(60),
+        "hr" => Some(3600),
+        _ => None,
+    }
+}
+
+// Fixed-window hisobgich: kalit uchun joriy oynadagi so'rovni sanaydi va oshirib
+// bo'lgach tekshiradi. Limit oshsa Some(retry_after_sek) (oyna tugashigacha),
+// aks holda None. Mutex bitta lock ostida read-modify-write qiladi — shuning
+// uchun parallel request'lar bir kalitni atomik sanaydi (race yo'q).
+fn check_and_count(state: &LimitState, key: &str, limit: u32, window_secs: u64) -> Option<u64> {
+    // Devor-soat vaqti (Instant emas): oyna chegarasi epoch'ga bog'langan, shunda
+    // Retry-After ham (window_id+1)*window_secs - now sifatida aniq chiqadi.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let window_id = now / window_secs;
+    let mut map = state.lock().unwrap();
+    let entry = map.entry(key.to_string()).or_insert((window_id, 0));
+    // Yangi oynaga o'tdik — hisobni nolga tushiramiz.
+    if entry.0 != window_id {
+        *entry = (window_id, 0);
+    }
+    entry.1 = entry.1.saturating_add(1);
+    if entry.1 > limit {
+        // Oyna (window_id+1)*window_secs epoch'da yangilanadi; now undan kichik,
+        // shuning uchun farq doim >= 1.
+        Some((window_id + 1) * window_secs - now)
+    } else {
+        None
+    }
+}
+
+// Kalit funksiyasi nil/bo'sh qaytarsa — mijoz IP'siga qaytamiz (kalitsiz so'rovni
+// ham cheklash uchun). "ip:" prefiksi tenant_id/api-key qiymati bilan tasodifan
+// to'qnashmaslik uchun (bitta limiter holatida ikkalasi bir HashMap'da yashaydi).
+fn client_fallback_key(req: &Value) -> String {
+    let ip = match req {
+        Value::Map(m) => match m.get("ip") {
+            Some(Value::Str(s)) if !s.is_empty() => s.clone(),
+            _ => "unknown".to_string(),
+        },
+        _ => "unknown".to_string(),
+    };
+    format!("ip:{}", ip)
+}
+
+// Limit oshganda qaytariladigan javob: `429` + `Retry-After` header (PRD format).
+// __resp map sifatida — handle_request uni boshqa rep javoblari kabi yuboradi.
+fn rate_limited_response(retry_after: u64) -> Value {
+    let mut body = BTreeMap::new();
+    body.insert(
+        "error".to_string(),
+        Value::Str("rate limit oshib ketdi".to_string()),
+    );
+    let mut headers = BTreeMap::new();
+    headers.insert(
+        "retry-after".to_string(),
+        Value::Str(retry_after.to_string()),
+    );
+    let mut m = BTreeMap::new();
+    m.insert("__resp".to_string(), Value::Bool(true));
+    m.insert("status".to_string(), Value::Int(429));
+    m.insert("body".to_string(), Value::Map(body));
+    m.insert("headers".to_string(), Value::Map(headers));
+    Value::Map(m)
+}
+
 // "a=1&b=2" -> {a:"1" b:"2"}. URL-dekod minimal (faqat '+' -> bo'shliq).
 fn parse_query(q: &str) -> Value {
     let mut m = BTreeMap::new();
@@ -144,12 +245,17 @@ fn parse_query(q: &str) -> Value {
 // yozadi, handler `req.ctx` o'qiydi. ctx'ni caller (`handle_request`) qo'shadi
 // (`with_ctx`), chunki u har so'rovga yangi Arc<Mutex> yaratadi — middleware va
 // handler bir xil cell'ni ko'rishi uchun.
+// req maydonlari ko'p (method/path/query/headers/params/ip/body) — bularni alohida
+// struct'ga yig'ish faqat bitta chaqiruv joyi uchun ortiqcha bo'lardi, shuning uchun
+// pozitsion argument qoldiramiz (too_many_arguments lintini bu yerda o'chiramiz).
+#[allow(clippy::too_many_arguments)]
 fn build_req(
     method: String,
     path: String,
     query: String,
     headers: BTreeMap<String, Value>,
     params: BTreeMap<String, Value>,
+    ip: String,
     body_bytes: Bytes,
     is_json: bool,
 ) -> Value {
@@ -177,6 +283,10 @@ fn build_req(
     m.insert("query".to_string(), parse_query(&query));
     m.insert("headers".to_string(), Value::Map(headers));
     m.insert("params".to_string(), Value::Map(params));
+    // req.ip — mijoz IP (TCP peer). rate-limit kalit funksiyasi nil qaytarsa
+    // shunga qaytamiz; foydalanuvchi ham `req.ip` o'qishi mumkin. Proksi orqasida
+    // bu proksi IP'si bo'ladi (X-Forwarded-For v1'da boshqarilmaydi — docs).
+    m.insert("ip".to_string(), Value::Str(ip));
     m.insert("body".to_string(), body);
     Value::Map(m)
 }
@@ -353,6 +463,7 @@ impl Interp {
             "on" => self.http_on(args),
             "use" => self.http_use(args),
             "before" => self.http_before(args),
+            "limit" => self.http_limit(args),
             "serve" => self.http_serve(args),
             "get" => http_client("GET", args, false),
             "post" => http_client("POST", args, true),
@@ -401,6 +512,7 @@ impl Interp {
         self.middlewares.lock().unwrap().push(Middleware {
             scope: None,
             handler,
+            kind: MwKind::Fn,
         });
         Ok(Value::Nil)
     }
@@ -427,6 +539,65 @@ impl Interp {
         self.middlewares.lock().unwrap().push(Middleware {
             scope: Some(pat),
             handler,
+            kind: MwKind::Fn,
+        });
+        Ok(Value::Nil)
+    }
+
+    // http.limit [path] N :sec|:min|:hr \req -> kalit  — deklarativ rate-limit (#79).
+    //
+    //   http.limit 100 :min \req -> req.ctx.tenant_id          # per-tenant, barcha yo'l
+    //   http.limit "/api/*" 100 :min \req -> req.headers.x_api_key  # per-key, prefiks
+    //
+    // Path (str) ixtiyoriy 1-argument — bo'lsa http.before kabi prefiks bo'yicha
+    // ulanadi, bo'lmasa http.use kabi global. Kalit funksiyasi har request uchun
+    // chaqirilib mijozni aniqlaydi; nil/bo'sh qaytarsa req.ip'ga qaytamiz. Limit
+    // oshsa avtomatik `429` + `Retry-After` (oyna tugashigacha soniya).
+    fn http_limit(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        // 1-argument str bo'lsa — path scope (http.before kabi). Aks holda global.
+        let (scope, i) = match args.first() {
+            Some(Value::Str(s)) => (Some(s.clone()), 1),
+            _ => (None, 0),
+        };
+        let limit = match args.get(i) {
+            Some(Value::Int(n)) if *n > 0 => *n as u32,
+            _ => {
+                return Err(Flow::err(
+                    "http.limit: limit musbat int bo'lishi kerak (masalan 100)",
+                ));
+            }
+        };
+        let window_secs = match args.get(i + 1) {
+            Some(Value::Sym(s)) | Some(Value::Str(s)) => match window_to_secs(s) {
+                Some(secs) => secs,
+                None => {
+                    return Err(Flow::err(
+                        "http.limit: oyna :sec, :min yoki :hr bo'lishi kerak",
+                    ));
+                }
+            },
+            _ => {
+                return Err(Flow::err(
+                    "http.limit: oyna birligi (:sec/:min/:hr) bo'lishi kerak",
+                ));
+            }
+        };
+        let keyfn = match args.get(i + 2) {
+            Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
+            _ => {
+                return Err(Flow::err(
+                    "http.limit: kalit funksiyasi (\\req -> ...) bo'lishi kerak",
+                ));
+            }
+        };
+        self.middlewares.lock().unwrap().push(Middleware {
+            scope,
+            handler: keyfn,
+            kind: MwKind::Limit {
+                limit,
+                window_secs,
+                state: Arc::new(Mutex::new(HashMap::new())),
+            },
         });
         Ok(Value::Nil)
     }
@@ -464,7 +635,7 @@ pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
     eprintln!("Flux HTTP server: http://localhost:{}", port);
 
     loop {
-        let (stream, _) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("http accept xatosi: {}", e);
@@ -473,10 +644,14 @@ pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
         };
         let io = TokioIo::new(stream);
         let interp = interp.clone();
+        // Mijoz IP (rate-limit fallback + req.ip). peer SocketAddr — IP'sini
+        // ulanish bo'yi bir marta olamiz (har request shu connection'da bir IP).
+        let client_ip = peer.ip().to_string();
         tokio::spawn(async move {
             let service = service_fn(move |req: Request<Incoming>| {
                 let interp = interp.clone();
-                async move { handle_request(interp, req).await }
+                let client_ip = client_ip.clone();
+                async move { handle_request(interp, req, client_ip).await }
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, service)
@@ -493,6 +668,7 @@ pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
 async fn handle_request(
     interp: Arc<Interp>,
     req: Request<Incoming>,
+    client_ip: String,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().as_str().to_lowercase();
     let uri = req.uri().clone();
@@ -540,17 +716,17 @@ async fn handle_request(
     // (http.use), keyin yo'l prefiks bo'yicha (http.before). Ro'yxat tartibi
     // saqlanadi. Lock'larni shu yerda erta olib qo'yamiz (handler'lar Value
     // klonlari — Arc, arzon).
-    let chain: Vec<Value> = {
+    let chain: Vec<Middleware> = {
         interp
             .middlewares
             .lock()
             .unwrap()
             .iter()
             .filter(|mw| match &mw.scope {
-                None => true,                            // http.use — barcha yo'lga
-                Some(pat) => prefix_matches(pat, &path), // http.before — prefiks mos
+                None => true,                            // http.use/limit — barcha yo'lga
+                Some(pat) => prefix_matches(pat, &path), // http.before/limit — prefiks mos
             })
-            .map(|mw| mw.handler.clone())
+            .cloned() // Middleware klonida Limit holati Arc — bir xil pointer ulashiladi
             .collect()
     };
 
@@ -558,7 +734,9 @@ async fn handle_request(
     // shuning uchun middleware yozgan ctx'ni handler bir xil cell'da ko'radi (#68).
     let ctx = Arc::new(Mutex::new(BTreeMap::new()));
     let request_value = with_ctx(
-        build_req(method, path, query, headers, params, body_bytes, is_json),
+        build_req(
+            method, path, query, headers, params, client_ip, body_bytes, is_json,
+        ),
         ctx,
     );
     let handler = route.handler;
@@ -574,10 +752,37 @@ async fn handle_request(
         //     auth `rep 401` e'tiborsiz qolib, handler baribir ishlardi.
         //   - boshqa Ok(_) (ctx yozish, log) -> zanjir davom etadi.
         for mw in chain {
-            match interp.apply(mw, vec![request_value.clone()]) {
-                Ok(v) if is_resp(&v) => return Ok(v), // rep -> javob, zanjir to'xta
-                Ok(_) => {}                           // davom (ctx/log)
-                Err(flow) => return Err(flow),        // fail/xato -> to'xta
+            match mw.kind {
+                // Oddiy middleware (use/before): handler'ni chaqiramiz.
+                MwKind::Fn => match interp.apply(mw.handler, vec![request_value.clone()]) {
+                    Ok(v) if is_resp(&v) => return Ok(v), // rep -> javob, zanjir to'xta
+                    Ok(_) => {}                           // davom (ctx/log)
+                    Err(flow) => return Err(flow),        // fail/xato -> to'xta
+                },
+                // Rate-limit (http.limit): kalit funksiyasini chaqirib mijozni
+                // aniqlaymiz, keyin hisobgichni tekshiramiz. Oshsa 429 -> zanjir to'xta.
+                MwKind::Limit {
+                    limit,
+                    window_secs,
+                    state,
+                } => {
+                    let key = match interp.apply(mw.handler, vec![request_value.clone()]) {
+                        // nil -> mijoz IP'siga qaytamiz (kalitsiz so'rovni ham cheklash).
+                        Ok(Value::Nil) => client_fallback_key(&request_value),
+                        Ok(v) => {
+                            let t = v.to_text();
+                            if t.is_empty() {
+                                client_fallback_key(&request_value)
+                            } else {
+                                t
+                            }
+                        }
+                        Err(flow) => return Err(flow), // kalit fn xato berdi -> to'xta
+                    };
+                    if let Some(retry) = check_and_count(&state, &key, limit, window_secs) {
+                        return Ok(rate_limited_response(retry));
+                    }
+                }
             }
         }
         interp.apply(handler, vec![request_value])
@@ -964,6 +1169,7 @@ mod tests {
             String::new(),
             BTreeMap::new(),
             BTreeMap::new(),
+            "127.0.0.1".into(),
             Bytes::from(bytes.to_string()),
             is_json,
         );
@@ -1053,6 +1259,7 @@ mod tests {
             String::new(),
             BTreeMap::new(),
             BTreeMap::new(),
+            "127.0.0.1".into(),
             Bytes::new(),
             false,
         );
@@ -1076,6 +1283,7 @@ mod tests {
                 String::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                "127.0.0.1".into(),
                 Bytes::new(),
                 false,
             ),
@@ -1112,6 +1320,7 @@ mod tests {
                 String::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                "127.0.0.1".into(),
                 Bytes::new(),
                 false,
             ),
@@ -1227,5 +1436,122 @@ mod tests {
         ));
         assert!(r.headers().get("x-bad").is_none());
         assert_eq!(r.headers().get("x-good").unwrap(), "yaxshi");
+    }
+
+    // --- rate-limit (issue #79) ---
+
+    #[test]
+    fn window_birligi_soniyaga_aylanadi() {
+        // Canonical to'plam: :sec/:min/:hr. Noma'lum birlik None.
+        assert_eq!(window_to_secs("sec"), Some(1));
+        assert_eq!(window_to_secs("min"), Some(60));
+        assert_eq!(window_to_secs("hr"), Some(3600));
+        assert_eq!(window_to_secs("day"), None);
+    }
+
+    #[test]
+    fn limit_oyna_ichida_sanaydi_va_429_beradi() {
+        // limit=3 — dastlabki 3 so'rov o'tadi (None), 4-si bloklanadi (Some).
+        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        assert!(check_and_count(&state, "t1", 3, 3600).is_none());
+        assert!(check_and_count(&state, "t1", 3, 3600).is_none());
+        assert!(check_and_count(&state, "t1", 3, 3600).is_none());
+        let retry = check_and_count(&state, "t1", 3, 3600);
+        assert!(retry.is_some(), "4-so'rov bloklanishi kerak");
+        // Retry-After oyna tugashigacha — [1, window_secs] oralig'ida.
+        let r = retry.unwrap();
+        assert!((1..=3600).contains(&r), "Retry-After mantiqiy: {}", r);
+    }
+
+    #[test]
+    fn limit_kalitlar_alohida_sanaladi() {
+        // Har kalit (tenant/key) o'z hisobgichiga ega — biri tugasa boshqasiga ta'sir yo'q.
+        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        assert!(check_and_count(&state, "a", 1, 3600).is_none()); // a: 1-chi o'tadi
+        assert!(check_and_count(&state, "a", 1, 3600).is_some()); // a: 2-chi bloklanadi
+        assert!(check_and_count(&state, "b", 1, 3600).is_none()); // b: alohida bucket, o'tadi
+    }
+
+    #[test]
+    fn limit_yangi_oynada_tiklanadi() {
+        // window_secs=1 — bir soniya o'tgach yangi oyna, hisob nolga tushadi.
+        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        assert!(check_and_count(&state, "k", 1, 1).is_none());
+        assert!(check_and_count(&state, "k", 1, 1).is_some()); // shu oynada tugadi
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(
+            check_and_count(&state, "k", 1, 1).is_none(),
+            "yangi oynada hisob tiklanishi kerak"
+        );
+    }
+
+    #[test]
+    fn limit_parallel_atomik_sanaydi() {
+        // Acceptance: parallel request'lar ostida to'g'ri sanaydi (race yo'q).
+        // 16 thread x 50 urinish = 800; faqat limit=100 tasi o'tishi SHART.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let state: LimitState = Arc::new(Mutex::new(HashMap::new()));
+        let allowed = Arc::new(AtomicU32::new(0));
+        let mut handles = vec![];
+        for _ in 0..16 {
+            let st = state.clone();
+            let al = allowed.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    if check_and_count(&st, "k", 100, 3600).is_none() {
+                        al.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            allowed.load(Ordering::SeqCst),
+            100,
+            "aniq limit=100 so'rov o'tishi kerak (atomik sanash)"
+        );
+    }
+
+    #[test]
+    fn fallback_kalit_ip_prefiksli() {
+        // Kalit nil bo'lganda req.ip ishlatiladi, "ip:" prefiksi bilan.
+        let req = with_ctx(
+            build_req(
+                "GET".into(),
+                "/".into(),
+                String::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                "203.0.113.7".into(),
+                Bytes::new(),
+                false,
+            ),
+            Arc::new(Mutex::new(BTreeMap::new())),
+        );
+        assert_eq!(client_fallback_key(&req), "ip:203.0.113.7");
+    }
+
+    #[test]
+    fn req_ip_maydoni_mavjud() {
+        // build_req req.ip ni qo'yadi — foydalanuvchi `req.ip` o'qiy oladi.
+        let req = build_req(
+            "GET".into(),
+            "/".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "10.0.0.1".into(),
+            Bytes::new(),
+            false,
+        );
+        let Value::Map(m) = &req else {
+            panic!("Map");
+        };
+        assert!(
+            matches!(m.get("ip"), Some(Value::Str(s)) if s == "10.0.0.1"),
+            "req.ip o'rnatilishi kerak"
+        );
     }
 }
