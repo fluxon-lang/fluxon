@@ -869,9 +869,17 @@ impl SqliteTx {
     fn conn(&self) -> Result<&Connection, String> {
         self.conn.as_ref().ok_or_else(|| "tx yopilgan".to_string())
     }
-    // commit/rollback'da connection'ni poolga qaytaradi.
+    // commit/rollback'da connection'ni poolga qaytaradi. COMMIT/ROLLBACK xato
+    // bo'lsa (deferred FK buzilishi, SQLITE_BUSY va h.k.) tranzaksiya ochiq
+    // qolishi mumkin — iflos connection poolga qaytsa keyingi checkout "cannot
+    // start a transaction within a transaction" oladi yoki tx'siz yozuvlar eski
+    // ochiq tranzaksiyaga oqib ketadi (issue #103). Shuning uchun avval ROLLBACK;
+    // u ham bo'lmasa connection poolga qaytarilmaydi (drop — yopiladi).
     fn give_back(&mut self) {
         if let Some(conn) = self.conn.take() {
+            if !conn.is_autocommit() && conn.execute_batch("ROLLBACK").is_err() {
+                return;
+            }
             self.pool.checkin(conn);
         }
     }
@@ -928,12 +936,10 @@ impl DbTx for SqliteTx {
 
 impl Drop for SqliteTx {
     fn drop(&mut self) {
-        // Agar commit/rollback chaqirilmagan bo'lsa (panik va h.k.) — rollback qilib
-        // connection'ni qaytaramiz, aks holda DB qulflanib qoladi.
-        if let Some(conn) = self.conn.take() {
-            let _ = conn.execute_batch("ROLLBACK");
-            self.pool.checkin(conn);
-        }
+        // Agar commit/rollback chaqirilmagan bo'lsa (panik va h.k.) — give_back
+        // ochiq tranzaksiyani ROLLBACK qilib connection'ni qaytaradi, aks holda
+        // DB qulflanib qoladi.
+        self.give_back();
     }
 }
 
@@ -962,6 +968,22 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     // Nested SAVEPOINT chuqurligi (unikal nom uchun).
     static TX_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+// tx_outer davomida panic yo'lida ham CURRENT_TX'ni tozalaydigan guard. Lambda
+// ichida Rust-darajali panic bo'lsa tx thread_local'da qolib ketardi; tokio
+// spawn_blocking thread'lari qayta ishlatilgani uchun KEYINGI request eski tx
+// ichida ishlab qolishi mumkin edi (issue #103). Guard tx'ni olib tashlaydi —
+// SqliteTx::Drop ROLLBACK qilib connection'ni poolga qaytaradi.
+struct TxClearGuard;
+impl Drop for TxClearGuard {
+    fn drop(&mut self) {
+        // take() borrow tashqarisida drop bo'lsin (SqliteTx::Drop RefCell'ga
+        // tegmaydi, lekin ehtiyot chorasi sifatida ajratamiz).
+        let tx = CURRENT_TX.with(|c| c.borrow_mut().take());
+        drop(tx);
+        TX_DEPTH.with(|d| d.set(0));
+    }
 }
 
 // Joriy tx bo'lsa unga yo'naltiradi, aks holda global Db'ga. f — tx/db ustida
@@ -1166,6 +1188,9 @@ impl Interp {
     fn tx_outer(self: &Arc<Self>, lambda: Value) -> Result<Value, Flow> {
         let tx = self.db()?.begin().map_err(Flow::err)?;
         CURRENT_TX.with(|c| *c.borrow_mut() = Some(tx));
+        // Lambda panic qilsa ham thread_local tozalanadi (normal yo'lda quyidagi
+        // take() dan keyin guard no-op bo'ladi).
+        let _guard = TxClearGuard;
 
         let result = self.apply(lambda, vec![]);
 
@@ -2315,5 +2340,110 @@ mod tests {
         );
         // Literal ichida ` from ` bo'lsa-yu, undan tashqarida FROM bo'lmasa — None.
         assert_eq!(extract_from_table("select '% from x %'"), None);
+    }
+
+    // Qatordan int qiymat oladi (SqlVal PartialEq emas — match orqali).
+    fn row_int(rows: &[Row], col: &str) -> i64 {
+        match rows[0].get(col) {
+            Some(SqlVal::Int(n)) => *n,
+            other => panic!("{col} int bo'lishi kerak edi: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit_failure_returns_clean_connection_to_pool() {
+        // Issue #103: COMMIT xato bo'lsa (deferred FK buzilishida tranzaksiya
+        // ochiq qoladi) connection poolga ROLLBACK qilinib qaytishi kerak —
+        // aks holda keyingi begin() "cannot start a transaction within a
+        // transaction" oladi.
+        let db = SqliteDb::open(":memory:").unwrap();
+        db.exec("CREATE TABLE p (id INTEGER PRIMARY KEY)", &[])
+            .unwrap();
+        db.exec(
+            "CREATE TABLE c (pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)",
+            &[],
+        )
+        .unwrap();
+
+        let tx = db.begin().unwrap();
+        // Deferred FK: buzilish COMMIT paytida aniqlanadi va COMMIT yiqiladi.
+        tx.exec("INSERT INTO c (pid) VALUES (999)", &[]).unwrap();
+        assert!(
+            tx.commit().is_err(),
+            "deferred FK buzilishi COMMIT xatosi berishi kerak"
+        );
+
+        // Connection poolga TOZA qaytgan: yangi tx ochiladi (iflos bo'lsa shu
+        // yerda "within a transaction" xatosi chiqardi)...
+        let tx2 = db
+            .begin()
+            .unwrap_or_else(|e| panic!("iflos connection poolga qaytgan: {e}"));
+        // ...va yetim yozuv rollback bo'lgan (eski ochiq tx'ga oqib ketmagan).
+        let rows = tx2.query("SELECT count(*) AS n FROM c", &[]).unwrap();
+        assert_eq!(
+            row_int(&rows, "n"),
+            0,
+            "yetim yozuv rollback bo'lishi kerak"
+        );
+        tx2.rollback().unwrap();
+    }
+
+    #[test]
+    fn global_query_works_while_tx_holds_connection() {
+        // Pool dizaynining asosiy va'dasi: tx connection'ni egallab turganda
+        // global (tx'siz) so'rov pooldan BOSHQA connection olib ishlayveradi va
+        // uncommitted yozuvni ko'rmaydi. WAL snapshot kerak — fayl DB ishlatamiz
+        // (shared-cache :memory: WAL'ni qo'llamaydi).
+        let path = std::env::temp_dir().join("flux_dbmod_pool_promise.db");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let db = SqliteDb::open(path.to_str().unwrap()).unwrap();
+        db.exec("CREATE TABLE t (id INTEGER)", &[]).unwrap();
+        db.exec("INSERT INTO t (id) VALUES (1)", &[]).unwrap();
+
+        let tx = db.begin().unwrap();
+        tx.exec("INSERT INTO t (id) VALUES (2)", &[]).unwrap();
+
+        // tx hali ochiq — global so'rov bloklanmaydi, eski snapshot'ni ko'radi.
+        let rows = db.query("SELECT count(*) AS n FROM t", &[]).unwrap();
+        assert_eq!(
+            row_int(&rows, "n"),
+            1,
+            "uncommitted yozuv ko'rinmasligi kerak"
+        );
+
+        tx.commit().unwrap();
+        let rows = db.query("SELECT count(*) AS n FROM t", &[]).unwrap();
+        assert_eq!(
+            row_int(&rows, "n"),
+            2,
+            "commit'dan keyin yozuv ko'rinishi kerak"
+        );
+    }
+
+    #[test]
+    fn tx_guard_clears_thread_local_on_panic() {
+        // Issue #103 (bog'liq): lambda ichida Rust-darajali panic bo'lsa guard
+        // CURRENT_TX'ni tozalashi kerak — spawn_blocking thread'i qayta
+        // ishlatilganda keyingi request eski tx ichida qolib ketmasin.
+        let db = SqliteDb::open(":memory:").unwrap();
+        db.exec("CREATE TABLE t (id INTEGER)", &[]).unwrap();
+
+        let tx = db.begin().unwrap();
+        CURRENT_TX.with(|c| *c.borrow_mut() = Some(tx));
+        let r = std::panic::catch_unwind(|| {
+            let _guard = TxClearGuard;
+            panic!("sun'iy panic");
+        });
+        assert!(r.is_err());
+        assert!(
+            CURRENT_TX.with(|c| c.borrow().is_none()),
+            "guard CURRENT_TX'ni tozalashi kerak"
+        );
+        // tx Drop orqali rollback bo'lib connection poolga qaytgan — yangi tx
+        // muammosiz ochiladi.
+        let tx2 = db.begin().unwrap();
+        tx2.rollback().unwrap();
     }
 }
