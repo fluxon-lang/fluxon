@@ -76,11 +76,14 @@ pub enum Tok {
 }
 
 // String literal interpolatsiya bo'laklari: "salom ${name}!" ->
-// [Lit("salom "), Expr("name"), Lit("!")]
+// [Lit("salom "), Expr("name", 1)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
     Lit(String),
-    Expr(String), // ifoda manba matni; parser uni qayta parse qiladi
+    // ifoda manba matni + manbada boshlangan qator raqami. Parser ifodani
+    // qayta lex+parse qiladi; qator raqami xato diagnostikasi asl qatorni
+    // ko'rsatishi uchun saqlanadi (1-qatorga yiqilib qolmasligi uchun).
+    Expr(String, usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]

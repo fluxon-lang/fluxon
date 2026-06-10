@@ -462,6 +462,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'$' => {
+                    let expr_line = self.line;
                     self.advance();
                     if self.peek_or(0) == b'{' {
                         // ${ ifoda }
@@ -469,33 +470,62 @@ impl<'a> Lexer<'a> {
                         if !buf.is_empty() {
                             parts.push(StrPart::Lit(std::mem::take(&mut buf)));
                         }
+                        // Chegarani topishda ichki string literallarni hisobga
+                        // olamiz — aks holda `${"a } b"}` dagi string ichidagi
+                        // `}` interpolatsiyani erta yopadi (issue #106).
                         let mut depth = 1;
+                        let mut in_str = false;
                         let estart = self.pos;
                         while !self.at_end() && depth > 0 {
-                            match self.peek() {
-                                b'{' => depth += 1,
-                                b'}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
+                            let c = self.peek();
+                            if in_str {
+                                match c {
+                                    // escape: `\` + keyingi belgi birga o'tadi,
+                                    // string ichidagi `\"` yopuvchi emas.
+                                    b'\\' => {
+                                        self.advance();
+                                        if self.peek_or(0) == b'\n' {
+                                            self.advance_newline();
+                                        } else if !self.at_end() {
+                                            self.advance();
+                                        }
+                                        continue;
                                     }
+                                    b'"' => in_str = false,
+                                    _ => {}
                                 }
-                                _ => {}
+                            } else {
+                                match c {
+                                    b'"' => in_str = true,
+                                    b'{' => depth += 1,
+                                    b'}' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
-                            self.advance();
+                            // Ko'p qatorli `${...}` da qator hisobini saqlaymiz.
+                            if c == b'\n' {
+                                self.advance_newline();
+                            } else {
+                                self.advance();
+                            }
                         }
                         let expr = std::str::from_utf8(&self.src[estart..self.pos])
                             .unwrap()
                             .to_string();
                         self.advance(); // yopuvchi }
-                        parts.push(StrPart::Expr(expr));
+                        parts.push(StrPart::Expr(expr, expr_line));
                     } else if self.is_ident_start(self.peek_or(0)) {
                         // $ident qisqartma
                         if !buf.is_empty() {
                             parts.push(StrPart::Lit(std::mem::take(&mut buf)));
                         }
                         let id = self.read_ident();
-                        parts.push(StrPart::Expr(id));
+                        parts.push(StrPart::Expr(id, expr_line));
                     } else {
                         buf.push('$');
                     }
@@ -587,4 +617,13 @@ fn utf8_len(b: u8) -> usize {
 
 pub fn lex(src: &str) -> LexResult<Vec<Token>> {
     Lexer::new(src).tokenize()
+}
+
+// Manbani berilgan qatordan boshlab lex qiladi. String interpolatsiya
+// ifodalarini qayta lex qilishda ishlatiladi — chiqarilgan tokenlar (va
+// ulardan kelib chiqadigan xatolar) asl qator raqamini saqlaydi.
+pub fn lex_at(src: &str, start_line: usize) -> LexResult<Vec<Token>> {
+    let mut lexer = Lexer::new(src);
+    lexer.line = start_line;
+    lexer.tokenize()
 }

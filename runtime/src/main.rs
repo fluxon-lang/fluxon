@@ -2080,4 +2080,56 @@ auth = {jwt:"shadowed"}
 log "auth.jwt = ${auth.jwt}"
 "#);
     }
+
+    // Issue #106: string interpolatsiya ichidagi parse xatosi asl qatorni
+    // ko'rsatishi kerak ("1-qatorda" ga yiqilib qolmasligi) va "interpolatsiya
+    // ichida:" prefiksi bilan kelishi kerak.
+    #[test]
+    fn interp_parse_xatosi_asl_qatorni_korsatadi() {
+        let err = run_source("log \"a\"\nlog \"b\"\nlog \"c\"\nlog \"d\"\nlog \"${x +}\"\n")
+            .expect_err("buzuq interpolatsiya ifodasi xato berishi kerak");
+        assert!(
+            err.contains("5-qatorda"),
+            "xato asl qatorni (5) ko'rsatishi kerak, topildi: {}",
+            err
+        );
+        assert!(
+            err.contains("interpolatsiya ichida"),
+            "parse xatosi ham 'interpolatsiya ichida' prefiksini olishi kerak, topildi: {}",
+            err
+        );
+    }
+
+    // Issue #106: lex xatosi ham asl qatorni saqlaydi. Ko'p qatorli ifoda
+    // ham qator hisobini buzmaydi — inner string 3-qatorda ochiladi.
+    #[test]
+    fn interp_lex_xatosi_asl_qatorni_korsatadi() {
+        let err = run_source("log \"a\"\nlog \"b\"\nlog \"v=${\"x\ny\"}\"\n")
+            .expect_err("ko'p qatorli inner string xato berishi kerak");
+        assert!(
+            err.contains("interpolatsiya ichida") && err.contains("3-qatorda"),
+            "lex xatosi asl qatorni (3) ko'rsatishi kerak, topildi: {}",
+            err
+        );
+    }
+
+    // Issue #106: ${...} chegarasi ichki string literallarni hisobga oladi —
+    // string ichidagi `}` interpolatsiyani erta yopmaydi.
+    #[test]
+    fn interp_ichki_string_qavsni_yopmaydi() {
+        run(r#"
+x = "v: ${"inner } brace"}"
+(x == "v: inner } brace") | (fail "ichki string qavs noto'g'ri ishlandi: ${x}")
+"#);
+    }
+
+    // Issue #106: ichki string ichidagi escape qilingan tirnoq (\") string'ni
+    // yopmaydi, undan keyingi `}` ham interpolatsiyani yopmaydi.
+    #[test]
+    fn interp_ichki_string_escape_tirnoq() {
+        run(r#"
+x = "x=${"a\"}b"}"
+(x == "x=a\"}b") | (fail "escape qilingan tirnoq noto'g'ri ishlandi: ${x}")
+"#);
+    }
 }

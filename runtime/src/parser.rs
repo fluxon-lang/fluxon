@@ -748,9 +748,11 @@ impl Parser {
         for p in parts {
             match p {
                 StrPart::Lit(s) => pieces.push(StrPiece::Lit(s)),
-                StrPart::Expr(src) => {
-                    // ifoda manbasini mustaqil tokenize + parse qilamiz
-                    let toks = crate::lexer::lex(&src)
+                StrPart::Expr(src, line) => {
+                    // ifoda manbasini mustaqil tokenize + parse qilamiz.
+                    // Asl qator raqamini sub-lexer'ga uzatamiz — aks holda
+                    // xato har doim "1-qatorda" deb chalg'itadi (issue #106).
+                    let toks = crate::lexer::lex_at(&src, line)
                         .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
                     let mut sub = Parser {
                         toks,
@@ -758,7 +760,9 @@ impl Parser {
                         no_app: false,
                     };
                     sub.skip_newlines();
-                    let e = sub.parse_expr()?;
+                    let e = sub
+                        .parse_expr()
+                        .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
                     pieces.push(StrPiece::Expr(e));
                 }
             }
