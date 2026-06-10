@@ -131,6 +131,41 @@ mod tests {
         run_source(src).unwrap_or_else(|e| panic!("xato: {}", e));
     }
 
+    // Issue #90: cheksiz rekursiya stack overflow ABORT o'rniga graceful
+    // runtime xato qaytarishi kerak (HTTP handler'da butun server o'lmasin).
+    #[test]
+    fn cheksiz_rekursiya_graceful_xato() {
+        let e = run_source("fn f n -> f (n + 1)\nf 0").unwrap_err();
+        assert!(
+            e.contains("rekursiya juda chuqur"),
+            "kutilmagan xato: {}",
+            e
+        );
+    }
+
+    // Issue #90: limit xatosidan keyin chuqurlik hisoblagichi to'liq qaytadi —
+    // xuddi shu thread'da keyingi bajarish toza boshlanadi (RAII guard).
+    #[test]
+    fn rekursiya_limitdan_keyin_tiklanish() {
+        assert!(run_source("fn f n -> f (n + 1)\nf 0").is_err());
+        run(r#"
+fn g x -> x + 1
+((g 1) == 2) | (fail "limitdan keyin chaqiriq buzildi")
+"#);
+    }
+
+    // Issue #90: ~2000 ichma-ich qavs parser'da stack overflow abort qilardi.
+    // Endi limit (256) dan oshganda aniq parse xatosi; 200 daraja esa ishlaydi.
+    #[test]
+    fn chuqur_qavs_parse_limiti() {
+        let deep = format!("x = {}1{}", "(".repeat(300), ")".repeat(300));
+        let e = check_source(&deep).unwrap_err();
+        assert!(e.contains("chuqur"), "kutilmagan xato: {}", e);
+
+        let ok = format!("x = {}1{}", "(".repeat(200), ")".repeat(200));
+        check_source(&ok).unwrap_or_else(|e| panic!("200 daraja o'tishi kerak: {}", e));
+    }
+
     #[test]
     fn fib_recursion() {
         run(r#"

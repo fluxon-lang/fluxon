@@ -164,6 +164,54 @@ impl Flow {
 pub type EvalResult = Result<Value, Flow>;
 type ExecResult = Result<Value, Flow>; // blok oxirgi ifoda qiymatini qaytaradi
 
+// Flux-darajadagi fn chaqiriqlar uchun maksimal chuqurlik. Native stack
+// `stacker::maybe_grow` bilan segmentlab o'sadi, shuning uchun haqiqiy chegara
+// shu hisoblagich: limitga yetganda abort emas, graceful Flow::err. 1000 —
+// Python'ning default rekursiya limiti bilan bir xil tartibda; real backend
+// kodi bundan chuqur rekursiya qilmaydi, cheksiz rekursiya esa tez ushlanadi.
+const MAX_CALL_DEPTH: usize = 1000;
+
+// stacker parametrlari: red zone — bir Flux chaqirig'i ichida (keyingi
+// tekshiruvgacha) ishlatilishi mumkin bo'lgan native stack'dan kattaroq bo'lishi
+// shart (debug build'da ~15KB/daraja o'lchangan). Segment hajmi — har ajratish
+// ~130 darajani sig'diradi, 1000 daraja uchun bir nechta segment yetadi.
+const STACK_RED_ZONE: usize = 128 * 1024;
+const STACK_GROW_SIZE: usize = 2 * 1024 * 1024;
+
+thread_local! {
+    // Joriy thread'dagi Flux chaqiriq chuqurligi. Thread-local: har HTTP request
+    // o'z spawn_blocking thread'ida — bir request'ning rekursiyasi boshqasini
+    // sanamaydi. Interp'ga maydon qo'shib bo'lmaydi (&self, Sync — Cell mumkin emas).
+    static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// RAII guard: enter'da hisoblagichni oshiradi, Drop'da kamaytiradi. Drop'siz
+// xato (`?`) yoki panic yo'lida hisoblagich oshib qolar va spawn_blocking
+// thread'i qayta ishlatilganda keyingi request'larni zaharlar edi.
+struct CallDepthGuard;
+
+impl CallDepthGuard {
+    fn enter(fname: &str) -> Result<CallDepthGuard, Flow> {
+        CALL_DEPTH.with(|d| {
+            let depth = d.get();
+            if depth >= MAX_CALL_DEPTH {
+                return Err(Flow::err(format!(
+                    "rekursiya juda chuqur: '{}' chaqirig'ida {} darajalik limitga yetildi",
+                    fname, MAX_CALL_DEPTH
+                )));
+            }
+            d.set(depth + 1);
+            Ok(CallDepthGuard)
+        })
+    }
+}
+
+impl Drop for CallDepthGuard {
+    fn drop(&mut self) {
+        CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 pub struct Interp {
     pub global: Env,
     // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi,
@@ -1615,26 +1663,38 @@ impl Interp {
                         args.len()
                     )));
                 }
-                // Params soni bilan oldindan o'lchamlangan child — bind paytida
-                // Vec qayta-allocate bo'lmaydi. Params mutable: tana ichida `<-`
-                // bilan o'zgartirilishi mumkin (avval ruxsat etilardi).
-                let call_env = Scope::child_with_capacity(fv.parent.clone(), fv.params.len());
-                {
-                    let mut s = call_env.write();
-                    for (p, a) in fv.params.iter().zip(args) {
-                        // `define` ishlatamiz (xom push emas): parser takror
-                        // param'ni rad etadi, lekin define defensive — agar nom
-                        // baribir takrorlansa write/read bitta slot'da qoladi
-                        // (define-oldindan / get-orqadan zidligi yuzaga kelmaydi).
-                        // Params kichik (0-4), O(n²) arzon. Mutable: tana `<-` qila oladi.
-                        s.define(p, a, true);
+                // Chuqurlik limiti: cheksiz rekursiya stack overflow'da butun
+                // process'ni ABORT qiladi (panic emas — spawn_blocking ham
+                // qutqarmaydi). Limit shu abort'dan ancha oldin graceful
+                // Flow::err qaytaradi. Guard RAII — xato/panic yo'lida ham
+                // hisoblagich to'g'ri kamayadi (issue #90).
+                let _depth = CallDepthGuard::enter(&fv.name)?;
+                // Native stack kam qolgan bo'lsa yangi segment ajratamiz (rustc
+                // yondashuvi): chuqur (lekin limit ichidagi) rekursiya 2MB'lik
+                // spawn_blocking/test thread'ida ham overflow qilmaydi — haqiqiy
+                // chegara faqat MAX_CALL_DEPTH bo'lib qoladi.
+                stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                    // Params soni bilan oldindan o'lchamlangan child — bind paytida
+                    // Vec qayta-allocate bo'lmaydi. Params mutable: tana ichida `<-`
+                    // bilan o'zgartirilishi mumkin (avval ruxsat etilardi).
+                    let call_env = Scope::child_with_capacity(fv.parent.clone(), fv.params.len());
+                    {
+                        let mut s = call_env.write();
+                        for (p, a) in fv.params.iter().zip(args) {
+                            // `define` ishlatamiz (xom push emas): parser takror
+                            // param'ni rad etadi, lekin define defensive — agar nom
+                            // baribir takrorlansa write/read bitta slot'da qoladi
+                            // (define-oldindan / get-orqadan zidligi yuzaga kelmaydi).
+                            // Params kichik (0-4), O(n²) arzon. Mutable: tana `<-` qila oladi.
+                            s.define(p, a, true);
+                        }
                     }
-                }
-                match self.exec_block(&fv.body, &call_env) {
-                    Ok(v) => Ok(v),                // oxirgi ifoda — qaytadi
-                    Err(Flow::Return(v)) => Ok(v), // erta ret
-                    Err(other) => Err(other),      // fail/err/skip/stop
-                }
+                    match self.exec_block(&fv.body, &call_env) {
+                        Ok(v) => Ok(v),                // oxirgi ifoda — qaytadi
+                        Err(Flow::Return(v)) => Ok(v), // erta ret
+                        Err(other) => Err(other),      // fail/err/skip/stop
+                    }
+                })
             }
             other => Err(Flow::err(format!(
                 "{} chaqirib bo'lmaydi (funksiya emas)",

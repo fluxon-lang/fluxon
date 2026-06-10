@@ -22,7 +22,23 @@ pub struct Parser {
     // application bosqichini o'chiradi, shunda `{a:f b:g}` da `f` `b`ni argument
     // sifatida yutmaydi. Chaqiruv kerak bo'lsa: `{a:(f x)}`.
     no_app: bool,
+    // Rekursiv descent chuqurligi (ichma-ich ifoda/blok). Limitsiz chuqur
+    // nesting (~2000 qavs) native stack'ni to'ldirib process'ni ABORT qiladi —
+    // limit undan oldin aniq parse xatosi qaytaradi (issue #90).
+    depth: usize,
 }
+
+// Ichma-ich ifoda/blok uchun maksimal chuqurlik. Real kod ~o'nlab darajadan
+// oshmaydi; 256 — xavfsiz zaxira bilan. Native stack `stacker::maybe_grow`
+// bilan segmentlab o'sadi (interp'dagi kabi), shuning uchun haqiqiy chegara
+// shu hisoblagich — 2MB'lik thread'da ham abort emas, aniq parse xatosi.
+const MAX_NEST_DEPTH: usize = 256;
+
+// stacker parametrlari: red zone bir nesting darajasi (parse_expr ->
+// parse_binary -> ... -> parse_primary zanjiri) ishlatadigan native stack'dan
+// kattaroq; segment hajmi bir necha yuz darajani sig'diradi.
+const STACK_RED_ZONE: usize = 64 * 1024;
+const STACK_GROW_SIZE: usize = 1024 * 1024;
 
 pub type ParseResult<T> = Result<T, String>;
 
@@ -31,6 +47,7 @@ pub fn parse(toks: Vec<Token>) -> ParseResult<Program> {
         toks,
         pos: 0,
         no_app: false,
+        depth: 0,
     };
     p.parse_program()
 }
@@ -102,9 +119,31 @@ impl Parser {
         Ok(stmts)
     }
 
+    // Chuqurlik hisobchisini oshiradi; limitdan oshsa aniq parse xatosi.
+    // Chaqiruvchi muvaffaqiyat/xatodan qat'i nazar `self.depth -= 1` qilishi
+    // shart (parse_expr/parse_block shunday o'raydi).
+    fn enter_depth(&mut self) -> ParseResult<()> {
+        if self.depth >= MAX_NEST_DEPTH {
+            return Err(format!(
+                "{}-qatorda ifoda/blok juda chuqur ichma-ich ({} darajadan oshdi) — soddalashtiring",
+                self.line(),
+                MAX_NEST_DEPTH
+            ));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
     // Indent...Dedent bilan o'ralgan blok. Chaqiruvchi avval Newline'ni yutib,
     // Indent kelishini ta'minlaydi.
     fn parse_block(&mut self) -> ParseResult<Vec<Stmt>> {
+        self.enter_depth()?;
+        let r = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.parse_block_inner());
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_block_inner(&mut self) -> ParseResult<Vec<Stmt>> {
         self.expect(&Tok::Indent, "blok (chekinish)")?;
         let mut stmts = Vec::new();
         self.skip_newlines();
@@ -432,8 +471,13 @@ impl Parser {
     }
 
     // --- ifodalar (precedence climbing) ---
+    // Har ichma-ich ifoda (qavs, list/map elementi, indeks, interpolatsiya)
+    // shu yerdan o'tadi — chuqurlik limiti uchun yagona nazorat nuqtasi.
     fn parse_expr(&mut self) -> ParseResult<Expr> {
-        self.parse_binary(0)
+        self.enter_depth()?;
+        let r = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.parse_binary(0));
+        self.depth -= 1;
+        r
     }
 
     // Range `..` ustuvorligi: arifmetikadan PAST, lekin pipe/taqqoslash/mantiqdan
@@ -781,6 +825,9 @@ impl Parser {
                         toks,
                         pos: 0,
                         no_app: false,
+                        // Tashqi chuqurlikni meros qilamiz — interpolatsiya orqali
+                        // limitni aylanib o'tib bo'lmasin.
+                        depth: self.depth,
                     };
                     sub.skip_newlines();
                     let e = sub
