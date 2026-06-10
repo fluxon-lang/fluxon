@@ -150,6 +150,9 @@ http.on :get "/api/me" \req ->
   → follows, `res.hops` (hop count). `max` default 10.
   Custom request header: `{headers:{"x-api-key":KEY "anthropic-version":"2023-06-01"}}`
   (symmetric with req/res.headers; a user value overrides the auto `content-type`).
+  Request timeout (default 30s): `http.get url {timeout: 5}` (seconds); a hung
+  upstream → error instead of blocking forever. `timeout: 0` disables (trusted only).
+  Server also enforces a 30s header-read timeout (slowloris guard).
 
 ### db (Postgres, $DATABASE_URL auto)
 ```flux

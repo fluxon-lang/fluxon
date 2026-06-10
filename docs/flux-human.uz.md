@@ -542,6 +542,16 @@ Header qiymati str bo'lmasa matnga aylantiriladi; `nil` qiymatli header
 tashlanadi. Foydalanuvchi `content-type` bersa, avtomatik `application/json`
 o'rniga o'sha ishlatiladi.
 
+**Timeout (default 30s).** Qotgan upstream so'rovni abadiy bloklamasligi uchun
+har bir klient so'rovi standart 30 soniya timeout bilan ishlaydi. Sozlash:
+```flux
+res = http.get url {timeout: 5}   # 5 soniyada javob bo'lmasa xato
+res = http.get url {timeout: 0}   # timeout'siz (faqat ishonchli upstream uchun)
+```
+Server tomonda ham header o'qish uchun 30s timeout bor (slowloris-uslubdagi sekin
+ulanishlardan himoya). LLM so'rovlari (`ai.ask`/`ai.json`/`ai.run`) default 120s
+timeout bilan ishlaydi — `$AI_TIMEOUT` (soniya) bilan sozlanadi.
+
 ### 9.2 `db` — ma'lumotlar bazasi (Postgres)
 
 Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi. Hech

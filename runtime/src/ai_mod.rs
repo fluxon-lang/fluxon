@@ -29,6 +29,7 @@
 // `env_lookup` orqali olish uchun Interp'ga muhtoj -> `ai_dispatch` `&self` metodi.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -50,6 +51,13 @@ const OPENAI_DEFAULT_MODEL: &str = "gpt-4o";
 // cheksiz emas. Foydalanuvchi `ai.ask`/`ai.json` semantikasini sodda saqlash
 // uchun hozircha sozlanmaydigan (kelajakda opts orqali ochilishi mumkin).
 const MAX_TOKENS: i64 = 4096;
+
+// LLM so'rovi standart timeout'i (issue #92). Timeout'siz qotgan LLM endpoint
+// butun skriptni (yoki HTTP handler ichida chaqirilsa, o'sha request thread'ini)
+// ABADIY bloklaydi. LLM javoblari sekin bo'lishi mumkin, shuning uchun klientdan
+// (30s) kattaroq: default 120s. `$AI_TIMEOUT` (soniya) bilan sozlanadi; 0 yoki
+// manfiy — timeout'siz.
+const DEFAULT_AI_TIMEOUT_SECS: u64 = 120;
 
 // Qo'llab-quvvatlanadigan LLM provayderlari. Battery O'ZI aniqlaydi (auto) —
 // Flux foydalanuvchisi hech narsa sozlamaydi: `.env`da standart provayder kaliti
@@ -93,6 +101,12 @@ impl Interp {
             Value::Str(s) if !s.is_empty() => Some(s),
             _ => None,
         }
+    }
+
+    // LLM so'rovi timeout'i: $AI_TIMEOUT (soniya) ?? default 120s. Issue #92:
+    // qotgan endpoint thread'ni abadiy bloklamasin.
+    fn ai_timeout(&self) -> Option<Duration> {
+        resolve_ai_timeout(self.ai_env("AI_TIMEOUT").as_deref())
     }
 
     // Provayder + kalit + modelni AVTOMATIK aniqlaydi. Hech narsa majburiy emas —
@@ -316,7 +330,7 @@ impl Interp {
         let body_str = json_encode(&Value::Map(body));
         let key = cfg.key.clone();
 
-        let (text, ms) = post_json(ANTHROPIC_URL, body_str, move |b| {
+        let (text, ms) = post_json(ANTHROPIC_URL, body_str, self.ai_timeout(), move |b| {
             b.header("x-api-key", key.as_str())
                 .header("anthropic-version", ANTHROPIC_VERSION)
         })?;
@@ -356,7 +370,7 @@ impl Interp {
         let body_str = json_encode(&Value::Map(body));
         let key = cfg.key.clone();
 
-        let (text, ms) = post_json(OPENAI_URL, body_str, move |b| {
+        let (text, ms) = post_json(OPENAI_URL, body_str, self.ai_timeout(), move |b| {
             b.header("authorization", format!("Bearer {}", key))
         })?;
         parse_openai(&text, &cfg.model, ms)
@@ -366,42 +380,63 @@ impl Interp {
 // Umumiy https POST (content-type: json). `add_headers` provayderga xos
 // autentifikatsiya/versiya header'larini qo'shadi. Javob matni + davomiyligini
 // (ms) qaytaradi; non-2xx -> aniq xato.
-fn post_json<F>(url: &str, body: String, add_headers: F) -> Result<(String, i64), Flow>
+fn post_json<F>(
+    url: &str,
+    body: String,
+    timeout: Option<Duration>,
+    add_headers: F,
+) -> Result<(String, i64), Flow>
 where
     F: FnOnce(hyper::http::request::Builder) -> hyper::http::request::Builder + Send + 'static,
 {
     let url = url.to_string();
     let started = std::time::Instant::now();
     let text = client_runtime().block_on(async move {
-        let builder = Request::builder()
-            .method("POST")
-            .uri(url)
-            .header("content-type", "application/json");
-        let builder = add_headers(builder);
-        let req = builder
-            .body(Full::new(Bytes::from(body)))
-            .map_err(|e| Flow::err(format!("ai: so'rov qurish: {}", e)))?;
+        // Butun POST (yuborish + javob o'qish) mantig'i — timeout uni qamraydi.
+        let work = async move {
+            let builder = Request::builder()
+                .method("POST")
+                .uri(url)
+                .header("content-type", "application/json");
+            let builder = add_headers(builder);
+            let req = builder
+                .body(Full::new(Bytes::from(body)))
+                .map_err(|e| Flow::err(format!("ai: so'rov qurish: {}", e)))?;
 
-        let resp = pooled_http_client()
-            .request(req)
-            .await
-            .map_err(|e| Flow::err(format!("ai: tarmoq xatosi: {}", e)))?;
-        let status = resp.status().as_u16();
-        let bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Flow::err(format!("ai: javob o'qish: {}", e)))?
-            .to_bytes();
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        if !(200..300).contains(&status) {
-            return Err(Flow::err(format!(
-                "ai: API xatosi (status {}): {}",
-                status,
-                truncate(&text, 300)
-            )));
+            let resp = pooled_http_client()
+                .request(req)
+                .await
+                .map_err(|e| Flow::err(format!("ai: tarmoq xatosi: {}", e)))?;
+            let status = resp.status().as_u16();
+            let bytes = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| Flow::err(format!("ai: javob o'qish: {}", e)))?
+                .to_bytes();
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            if !(200..300).contains(&status) {
+                return Err(Flow::err(format!(
+                    "ai: API xatosi (status {}): {}",
+                    status,
+                    truncate(&text, 300)
+                )));
+            }
+            Ok(text)
+        };
+
+        // Timeout o'rnatilgan bo'lsa unga o'raymiz; tugamasa aniq xato (qotgan LLM
+        // endpoint thread'ni abadiy bloklamasin — issue #92).
+        match timeout {
+            Some(dur) => match tokio::time::timeout(dur, work).await {
+                Ok(r) => r,
+                Err(_) => Err(Flow::err(format!(
+                    "ai: so'rov timeout ({} sek ichida javob yo'q)",
+                    dur.as_secs()
+                ))),
+            },
+            None => work.await,
         }
-        Ok(text)
     })?;
     let ms = started.elapsed().as_millis() as i64;
     Ok((text, ms))
@@ -972,9 +1007,36 @@ fn as_int(v: &Value) -> Option<i64> {
     }
 }
 
+// $AI_TIMEOUT (soniya str) -> Duration. Berilmagan/yaroqsiz -> default 120s; 0
+// yoki manfiy -> None (timeout'siz). Sof funksiya — env'siz test qilinadi (#92).
+fn resolve_ai_timeout(env: Option<&str>) -> Option<Duration> {
+    match env.and_then(|s| s.trim().parse::<i64>().ok()) {
+        Some(n) if n > 0 => Some(Duration::from_secs(n as u64)),
+        Some(_) => None, // 0 yoki manfiy — timeout'siz
+        None => Some(Duration::from_secs(DEFAULT_AI_TIMEOUT_SECS)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_timeout_resolve() {
+        // issue #92: default 120s, $AI_TIMEOUT bilan sozlanadi, 0/manfiy — timeout'siz.
+        assert_eq!(resolve_ai_timeout(None), Some(Duration::from_secs(120)));
+        assert_eq!(
+            resolve_ai_timeout(Some("30")),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(resolve_ai_timeout(Some("0")), None);
+        assert_eq!(resolve_ai_timeout(Some("-5")), None);
+        // Yaroqsiz qiymat — default'ga qaytadi (parse muvaffaqiyatsiz).
+        assert_eq!(
+            resolve_ai_timeout(Some("abc")),
+            Some(Duration::from_secs(120))
+        );
+    }
 
     #[test]
     fn strip_fence_works() {
