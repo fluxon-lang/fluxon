@@ -154,7 +154,9 @@ fn match_route(
                     // (masalan `/users/:name` -> `%D0%9A...`) — dekod qilamiz
                     // (issue #100). Path'da `+` literal, shuning uchun bo'shliqqa
                     // almashtirilmaydi (faqat query'da form-encoding qoidasi).
-                    params.insert(name.clone(), Value::Str(percent_decode(seg)));
+                    // `keep_path_seps=true`: `%2F`/`%5C` xom qoladi (segment
+                    // invarianti — qiymatga `/` kirmasin, codex revyu).
+                    params.insert(name.clone(), Value::Str(percent_decode(seg, true)));
                 }
             }
         }
@@ -272,7 +274,14 @@ fn rate_limited_response(retry_after: u64) -> Value {
 // satr oxiridagi `%`) literal `%` sifatida qoladi. Brauzer query va path'dagi
 // non-ASCII (kirill/o'zbekcha) qiymatlarni doim percent-encode qiladi — bu
 // funksiyasiz `req.query.q` xom `%D1%81...` holicha qolardi (issue #100).
-fn percent_decode(s: &str) -> String {
+//
+// `keep_path_seps` — `true` bo'lsa `%2F` (`/`) va `%5C` (`\`) DEKOD QILINMAYDI,
+// xom `%2F`/`%5C` holicha qoladi (path param uchun). Sabab: `:param` qiymati
+// bitta segmentdan keladi degan invariant — encoded slash dekod qilinsa qiymatga
+// `/` kirib, uni haqiqiy yo'l ajratuvchisidan farqlab bo'lmaydi, va param'ni ID
+// yoki xavfsiz yo'l komponenti deb ishlatadigan handler kutilmaganda ichki slash
+// oladi (codex revyu). Query qiymatlarida bu xavf yo'q — u yerda `false`.
+fn percent_decode(s: &str, keep_path_seps: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -281,7 +290,15 @@ fn percent_decode(s: &str) -> String {
             let hi = (bytes[i + 1] as char).to_digit(16);
             let lo = (bytes[i + 2] as char).to_digit(16);
             if let (Some(hi), Some(lo)) = (hi, lo) {
-                out.push((hi * 16 + lo) as u8);
+                let byte = (hi * 16 + lo) as u8;
+                // Path param'da slash/backslash'ni xom qoldiramiz (segment
+                // invariantini buzmaslik uchun) — uch baytni o'zgarmas o'tkazamiz.
+                if keep_path_seps && (byte == b'/' || byte == b'\\') {
+                    out.extend_from_slice(&bytes[i..i + 3]);
+                    i += 3;
+                    continue;
+                }
+                out.push(byte);
                 i += 3;
                 continue;
             }
@@ -305,8 +322,8 @@ fn parse_query(q: &str) -> Value {
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        let key = percent_decode(&k.replace('+', " "));
-        let val = percent_decode(&v.replace('+', " "));
+        let key = percent_decode(&k.replace('+', " "), false);
+        let val = percent_decode(&v.replace('+', " "), false);
         m.insert(key, Value::Str(val));
     }
     Value::Map(m)
@@ -1748,23 +1765,38 @@ mod tests {
     #[test]
     fn percent_dekod_utf8_kirill() {
         // `%D1%81...` -> "салом" (kirill UTF-8 baytlar to'g'ri yig'iladi).
-        assert_eq!(percent_decode("%D1%81%D0%B0%D0%BB%D0%BE%D0%BC"), "салом");
+        assert_eq!(
+            percent_decode("%D1%81%D0%B0%D0%BB%D0%BE%D0%BC", false),
+            "салом"
+        );
     }
 
     #[test]
     fn percent_dekod_oddiy_belgi() {
         // `%20` -> bo'shliq, `%2B` -> literal `+` (bo'shliqqa aylanmaydi).
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(percent_decode("a%2Bb"), "a+b");
+        assert_eq!(percent_decode("a%20b", false), "a b");
+        assert_eq!(percent_decode("a%2Bb", false), "a+b");
     }
 
     #[test]
     fn percent_dekod_yaroqsiz_qoldiradi() {
         // Yaroqsiz `%` ketma-ketligi (`%zz`) va satr oxiridagi `%` literal qoladi
         // (panic yo'q).
-        assert_eq!(percent_decode("%zz"), "%zz");
-        assert_eq!(percent_decode("100%"), "100%");
-        assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(percent_decode("%zz", false), "%zz");
+        assert_eq!(percent_decode("100%", false), "100%");
+        assert_eq!(percent_decode("a%2", false), "a%2");
+    }
+
+    #[test]
+    fn percent_dekod_slash_keep_path_seps() {
+        // keep_path_seps=true: `%2F`/`%5C` (har ikki registr) xom qoladi, lekin
+        // boshqa baytlar (`%61` -> 'a') odatdagidek dekodlanadi. false bo'lsa
+        // (query) ular `/`/`\` ga aylanadi.
+        assert_eq!(percent_decode("a%2Fb", true), "a%2Fb");
+        assert_eq!(percent_decode("a%2fb", true), "a%2fb");
+        assert_eq!(percent_decode("a%5Cb", true), "a%5Cb");
+        assert_eq!(percent_decode("%61%2F%61", true), "a%2Fa");
+        assert_eq!(percent_decode("a%2Fb", false), "a/b");
     }
 
     #[test]
@@ -1806,5 +1838,20 @@ mod tests {
         let (_r, params) = match_route(&routes, "get", "/users/%D0%90%D0%BB%D0%B8")
             .expect("marshrut mos kelishi kerak");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "Али"));
+    }
+
+    #[test]
+    fn path_param_encoded_slash_xom_qoladi() {
+        // "/users/a%2Fb" bitta segment sifatida ":name"ga mos keladi, lekin
+        // `%2F` dekod QILINMAYDI — param qiymatiga `/` kirmasin (segment
+        // invarianti; ID/yo'l komponenti deb ishlatuvchi handler ichki slash
+        // olmasin, codex revyu). Boshqa segmentdagi non-ASCII baribir dekodlanadi.
+        let routes = vec![Route {
+            method: "get".into(),
+            pattern: parse_pattern("/users/:name"),
+            handler: Value::Nil,
+        }];
+        let (_r, params) = match_route(&routes, "get", "/users/a%2Fb").expect("bir segment — mos");
+        assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "a%2Fb"));
     }
 }
