@@ -627,6 +627,25 @@ back = json.dec (json.enc {x:"salom 🙂 dünyo"})
     }
 
     #[test]
+    fn json_enc_valid_output() {
+        // issue #102: control belgilar escape bo'lsin, non-finite float -> null.
+        run(r#"
+# 1/0 = Infinity -> JSON'da "inf" emas, null bo'lishi kerak
+enc = json.enc (1.0 / 0.0)
+(enc == "null") | (fail "Infinity null bo'lmadi: ${enc}")
+# tab (control belgi) \t qisqa shaklda escape bo'lib round-trip qilinsin
+back = json.dec (json.enc "a\tb")
+(back == "a\tb") | (fail "control belgi round-trip buzildi: ${back}")
+"#);
+        // "1 garbage" -> dekoder xato berishi kerak (avval jim 1 qaytarardi)
+        assert!(run_source(r#"log (json.dec "1 garbage")"#).is_err());
+        // noto'g'ri null-o'xshash matn xato beradi
+        assert!(run_source(r#"log (json.dec "nqqq")"#).is_err());
+        // boshida '+' bo'lgan son xato beradi
+        assert!(run_source(r#"log (json.dec "+5")"#).is_err());
+    }
+
+    #[test]
     fn reg_add_call_has_names() {
         // reg battery: funksiyani nom bilan saqlash/chaqirish (dinamik dispatch).
         // closure args map oladi (agent tool naqshi); reg.has bool, reg.names list.
