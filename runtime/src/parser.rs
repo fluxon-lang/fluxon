@@ -420,7 +420,7 @@ impl Parser {
 
     // --- ifodalar (precedence climbing) ---
     fn parse_expr(&mut self) -> ParseResult<Expr> {
-        self.parse_binary(0)
+        self.parse_range()
     }
 
     // Operator ustuvorligi jadvali. Kichik raqam = past ustuvorlik.
@@ -446,7 +446,7 @@ impl Parser {
     }
 
     fn parse_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
-        let mut lhs = self.parse_range()?;
+        let mut lhs = self.parse_application()?;
         while let Some((op, prec)) = Self::bin_prec(self.peek()) {
             if prec < min_prec {
                 break;
@@ -463,12 +463,13 @@ impl Parser {
         Ok(lhs)
     }
 
-    // Range `a..b` — binary'dan yuqori, application'dan past.
+    // Range `a..b` — binary ifodadan PAST bog'lanadi, shuning uchun `1..n+1`
+    // = `1..(n+1)` bo'ladi (ko'pchilik tillardagidek, AI uchun tabiiy).
     fn parse_range(&mut self) -> ParseResult<Expr> {
-        let lhs = self.parse_application()?;
+        let lhs = self.parse_binary(0)?;
         if self.check(&Tok::DotDot) {
             self.advance();
-            let rhs = self.parse_application()?;
+            let rhs = self.parse_binary(0)?;
             return Ok(Expr::Range {
                 start: Box::new(lhs),
                 end: Box::new(rhs),

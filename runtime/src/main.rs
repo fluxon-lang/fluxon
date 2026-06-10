@@ -144,6 +144,28 @@ each i in 0..10
 "#);
     }
 
+    // Issue #99: `..` binary arifmetikadan PAST bog'lanadi, shuning uchun
+    // `1..n+1` = `1..(n+1)` bo'lib chiqadi (AI uchun tabiiy shakl). Avval
+    // `(1..n)+1` bo'lib runtime xato berardi.
+    #[test]
+    fn range_arifmetikadan_past_boglanadi() {
+        run(r#"
+n = 3
+# end tomon: +1 butun range'ga emas, faqat n'ga qo'llanadi.
+# `..` endi eng past bog'lanadi, shuning uchun taqqoslashda qavs kerak.
+((1..n+1) == [1 2 3 4]) | (fail "1..n+1 noto'g'ri")
+# end tomon: -1
+((0..n-1) == [0 1 2]) | (fail "0..n-1 noto'g'ri")
+# har ikki tomon arifmetika bilan
+((2*1..2+1) == [2 3]) | (fail "2*1..2+1 noto'g'ri")
+# each loop ichida ham xatosiz ishlaydi
+sum <- 0
+each i in 1..n+1
+  sum <- sum + i
+(sum == 10) | (fail "each 1..n+1 yig'indisi noto'g'ri: ${sum}")
+"#);
+    }
+
     // Inline if (ternary ekvivalenti): `if shart a else b` bir qiymat qaytaradi.
     // Issue #66 — ixcham shartli ifoda (leading-zero formatlash kabi joylar uchun).
     #[test]
