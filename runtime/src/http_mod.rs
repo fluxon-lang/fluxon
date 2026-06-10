@@ -344,10 +344,24 @@ fn with_ctx(req: Value, ctx: Arc<Mutex<BTreeMap<String, Value>>>) -> Value {
 
 // --- Value/Flow -> hyper::Response ---
 
-// Status kodni StatusCode'ga aylantiradi. Noto'g'ri kod (masalan `rep 1000 ...`,
-// yoki manfiy status `*n as u16` wrap natijasi) jim `200 OK` ga tushmasligi
-// kerak (issue #108): handler xato status qaytarmoqchi bo'lganda mijoz
-// muvaffaqiyat ko'rmasin. Buzuq statusni 500 ga aylantirib log yozamiz.
+// Flux `Int` statusni (rep/fail) yaroqli HTTP status u16'ga aylantiradi.
+// Tekshiruv ASL i64 ustida bo'lishi shart: `as u16` cast oldin wrap qiladi —
+// `rep 65736` u16'da 200 ga, ba'zi manfiy qiymatlar 3xx/4xx ga tushib jim
+// muvaffaqiyatga aldardi (issue #108). Diapazondan tashqari yoki HTTP bo'lmagan
+// kod → 500 + log, shunda mijoz handler xatosini muvaffaqiyat deb o'qimaydi.
+fn checked_status(n: i64) -> u16 {
+    match u16::try_from(n) {
+        Ok(s) if StatusCode::from_u16(s).is_ok() => s,
+        _ => {
+            eprintln!("Flux HTTP: noto'g'ri status kodi {} → 500", n);
+            500
+        }
+    }
+}
+
+// u16 status → StatusCode. Builder darajasidagi himoya to'ri: chaqiruvchilar
+// allaqachon yaroqli kod beradi (literal yoki `checked_status`), bu faqat
+// kutilmagan holatda panic o'rniga 500 qaytaradi.
 fn status_or_500(status: u16) -> StatusCode {
     StatusCode::from_u16(status).unwrap_or_else(|_| {
         eprintln!("Flux HTTP: noto'g'ri status kodi {} → 500", status);
@@ -384,7 +398,7 @@ fn value_to_response(v: Value) -> Response<Full<Bytes>> {
         && let Value::Map(m) = &v
     {
         let status = match m.get("status") {
-            Some(Value::Int(n)) => *n as u16,
+            Some(Value::Int(n)) => checked_status(*n),
             _ => 200,
         };
         let body = m.get("body").cloned().unwrap_or(Value::Nil);
@@ -494,7 +508,7 @@ fn body_value_to_response(status: u16, body: Value) -> Response<Full<Bytes>> {
 // fail/error -> JSON xato javob.
 fn flow_to_response(flow: Flow) -> Response<Full<Bytes>> {
     let (status, message) = match flow {
-        Flow::Fail { status, message } => (status.unwrap_or(400) as u16, message),
+        Flow::Fail { status, message } => (checked_status(status.unwrap_or(400)), message),
         Flow::Error(e) => (500, e),
         Flow::Return(v) => return value_to_response(v), // handler ichida `ret`
         Flow::Skip | Flow::Stop => (500, "handler skip/stop ishlatdi".to_string()),
@@ -1488,10 +1502,21 @@ mod tests {
 
     #[test]
     fn manfiy_status_500_ga_tushadi() {
-        // Manfiy status `*n as u16` bilan wrap bo'ladi (-1 → 65535) — bu ham
-        // yaroqsiz, 500 ga tushadi (issue #108), 200 ga emas.
+        // Manfiy status — yaroqsiz, 500 ga tushadi (issue #108), 200 ga emas.
         let r = value_to_response(resp_map(-1, Value::Nil, None));
         assert_eq!(r.status().as_u16(), 500);
+    }
+
+    #[test]
+    fn u16_wrap_status_500_ga_tushadi() {
+        // Code-review (PR #110): tekshiruv ASL i64 ustida bo'lmasa, `65736 as u16`
+        // 200 ga wrap bo'lib jim muvaffaqiyatga aldardi. Endi `checked_status`
+        // u16 cast'idan oldin diapazonni tekshiradi → 500.
+        let r = value_to_response(resp_map(65736, Value::Str("ok".into()), None));
+        assert_eq!(r.status().as_u16(), 500);
+        // 3xx diapazoniga wrap bo'ladigan manfiy qiymat ham (-65234 → 302) 500 ga.
+        let r2 = value_to_response(resp_map(-65234, Value::Nil, None));
+        assert_eq!(r2.status().as_u16(), 500);
     }
 
     #[test]
