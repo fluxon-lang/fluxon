@@ -722,7 +722,10 @@ impl Parser {
                         key: Box::new(key),
                     };
                 }
-                Tok::Bang => {
+                // `!` postfix Try BO'LADI faqat tutash bo'lsa (`db.one ...!`).
+                // Bo'shliq bilan kelsa (`log !x`) bu prefiks not boshlanishi —
+                // parse_application uni argument sifatida o'zi oladi.
+                Tok::Bang if !self.spaced() => {
                     self.advance();
                     e = Expr::Try(Box::new(e));
                 }
@@ -1086,6 +1089,11 @@ impl Parser {
                 | Tok::LBracket
                 | Tok::LBrace
                 | Tok::Backslash
+                // Prefiks not (`f !x`) — atom boshlay oladi. Postfix Try bilan
+                // to'qnashmaydi: u faqat tutash (`x!`) bo'lganda parse_postfix
+                // ichida yutiladi, bu yerga yetib kelgan `!` doim bo'shliqdan
+                // keyin, ya'ni prefiks.
+                | Tok::Bang
         )
     }
 }

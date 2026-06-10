@@ -131,6 +131,34 @@ mod tests {
         run_source(src).unwrap_or_else(|e| panic!("xato: {}", e));
     }
 
+    // Issue #93: `log !x` da `!` callee'ga postfix Try bo'lib yopishar edi —
+    // `Call(Try(log), [x])` — inkor jim yo'qolardi. Endi bo'shliqdan keyingi
+    // `!` prefiks not sifatida argument boshlaydi.
+    #[test]
+    fn chaqiruv_argumentida_prefiks_not() {
+        run(r#"
+x = false
+(!x) | (fail "qavsli prefiks not buzildi")
+fn id v -> v
+((id !x) == true) | (fail "chaqiruv argumentidagi !x inkor qilinmadi")
+y = true
+((id !y) == false) | (fail "chaqiruv argumentidagi !y inkor qilinmadi")
+fn second a b -> b
+((second x !y) == false) | (fail "ikkinchi argumentdagi prefiks not buzildi")
+"#);
+    }
+
+    // Issue #93 (regressiya himoyasi): tutash `!` avvalgidek postfix Try —
+    // qiymatga yopishadi va muvaffaqiyatda o'tkazgich bo'lib qoladi.
+    #[test]
+    fn tutash_bang_postfix_try_qoladi() {
+        run(r#"
+fn safe v -> v
+a = (safe 5)!
+(a == 5) | (fail "postfix try o'tkazgichi buzildi")
+"#);
+    }
+
     // Issue #90: cheksiz rekursiya stack overflow ABORT o'rniga graceful
     // runtime xato qaytarishi kerak (HTTP handler'da butun server o'lmasin).
     #[test]
