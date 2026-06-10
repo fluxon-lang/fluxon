@@ -550,7 +550,10 @@ res = http.get url {timeout: 0}   # timeout'siz (faqat ishonchli upstream uchun)
 ```
 Server tomonda ham header o'qish uchun 30s timeout bor (slowloris-uslubdagi sekin
 ulanishlardan himoya). LLM so'rovlari (`ai.ask`/`ai.json`/`ai.run`) default 120s
-timeout bilan ishlaydi — `$AI_TIMEOUT` (soniya) bilan sozlanadi.
+timeout bilan ishlaydi — `$AI_TIMEOUT` (soniya) bilan sozlanadi. LLM API
+vaqtinchalik xato qaytarsa (429 rate-limit / 529 overloaded) so'rov **bir marta**
+avtomatik qayta uriniladi (server `Retry-After` bersa unga amal qilinadi,
+bo'lmasa 2s kutiladi); boshqa xatolar darhol qaytadi.
 
 ### 9.2 `db` — ma'lumotlar bazasi (Postgres)
 

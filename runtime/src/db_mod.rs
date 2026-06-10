@@ -2175,7 +2175,13 @@ mod tests {
     fn rebuild_preserves_data_and_adds_fk() {
         // rebuild_table: mavjud ustunga FK qo'shadi, ma'lumotni saqlaydi,
         // foreign_keys() introspeksiyasi yangi FK'ni ko'radi.
-        let db = SqliteDb::open(":memory:").unwrap();
+        //
+        // NOYOB nomli memory DB: default `:memory:` aslida JARAYON BO'YLAB
+        // bitta umumiy shared-cache DB (Pool izohi) — parallel ishlaydigan
+        // boshqa db testlari bilan jadval nomi va shared-cache table-lock
+        // ("database table is locked") to'qnashuvi flaky qiladi. Alohida nom
+        // testni to'liq izolyatsiya qiladi.
+        let db = SqliteDb::open("file:rebuild_fk_test?mode=memory&cache=shared").unwrap();
         // Parent + child (FK'siz) + ma'lumot.
         db.exec(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
@@ -2225,7 +2231,11 @@ mod tests {
     fn rebuild_twice_same_ts_no_backup_collision() {
         // Codex revyu: bir jadval bir sekundda (bir xil `ts`) ikki marta rebuild
         // bo'lsa (ref qo'shish -> tez orada olib tashlash), backup nomi to'qnashmasin.
-        let db = SqliteDb::open(":memory:").unwrap();
+        //
+        // NOYOB nomli memory DB — sabab rebuild_preserves_data_and_adds_fk
+        // izohida (default :memory: jarayon bo'ylab umumiy, parallel test
+        // to'qnashuvi flaky qiladi).
+        let db = SqliteDb::open("file:rebuild_ts_test?mode=memory&cache=shared").unwrap();
         db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY)", &[])
             .unwrap();
         db.exec("INSERT INTO users (id) VALUES (1)", &[]).unwrap();

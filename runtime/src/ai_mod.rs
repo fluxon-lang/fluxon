@@ -380,6 +380,13 @@ impl Interp {
 // Umumiy https POST (content-type: json). `add_headers` provayderga xos
 // autentifikatsiya/versiya header'larini qo'shadi. Javob matni + davomiyligini
 // (ms) qaytaradi; non-2xx -> aniq xato.
+//
+// Vaqtinchalik xatolarda (429 rate-limit / 529 overloaded) BIR marta qayta
+// urinish (issue #92 bonus): LLM API'lari qisqa yuk cho'qqilarida shu
+// statuslarni qaytaradi — bitta backoff'li retry barqarorlikni sezilarli
+// oshiradi, cheksiz loop xavfisiz. Timeout har urinishga alohida qo'llanadi
+// (eng yomon holat: 2 urinish + backoff). Shu sababli `add_headers` Fn
+// (FnOnce emas) — retry'da so'rov qaytadan quriladi.
 fn post_json<F>(
     url: &str,
     body: String,
@@ -387,59 +394,92 @@ fn post_json<F>(
     add_headers: F,
 ) -> Result<(String, i64), Flow>
 where
-    F: FnOnce(hyper::http::request::Builder) -> hyper::http::request::Builder + Send + 'static,
+    F: Fn(hyper::http::request::Builder) -> hyper::http::request::Builder + Send + 'static,
 {
     let url = url.to_string();
     let started = std::time::Instant::now();
     let text = client_runtime().block_on(async move {
-        // Butun POST (yuborish + javob o'qish) mantig'i — timeout uni qamraydi.
-        let work = async move {
-            let builder = Request::builder()
-                .method("POST")
-                .uri(url)
-                .header("content-type", "application/json");
-            let builder = add_headers(builder);
-            let req = builder
-                .body(Full::new(Bytes::from(body)))
-                .map_err(|e| Flow::err(format!("ai: so'rov qurish: {}", e)))?;
+        let mut retried = false;
+        loop {
+            // Bitta urinish (yuborish + javob o'qish) — timeout shu blokni qamraydi.
+            let work = async {
+                let builder = Request::builder()
+                    .method("POST")
+                    .uri(url.clone())
+                    .header("content-type", "application/json");
+                let builder = add_headers(builder);
+                let req = builder
+                    .body(Full::new(Bytes::from(body.clone())))
+                    .map_err(|e| Flow::err(format!("ai: so'rov qurish: {}", e)))?;
 
-            let resp = pooled_http_client()
-                .request(req)
-                .await
-                .map_err(|e| Flow::err(format!("ai: tarmoq xatosi: {}", e)))?;
-            let status = resp.status().as_u16();
-            let bytes = resp
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| Flow::err(format!("ai: javob o'qish: {}", e)))?
-                .to_bytes();
-            let text = String::from_utf8_lossy(&bytes).to_string();
-            if !(200..300).contains(&status) {
-                return Err(Flow::err(format!(
-                    "ai: API xatosi (status {}): {}",
-                    status,
-                    truncate(&text, 300)
-                )));
+                let resp = pooled_http_client()
+                    .request(req)
+                    .await
+                    .map_err(|e| Flow::err(format!("ai: tarmoq xatosi: {}", e)))?;
+                let status = resp.status().as_u16();
+                // Retry-After'ni tana o'qilishidan OLDIN olamiz (into_body resp'ni
+                // yutadi) — server bergan kutish vaqti backoff'da ishlatiladi.
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok());
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| Flow::err(format!("ai: javob o'qish: {}", e)))?
+                    .to_bytes();
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                Ok::<_, Flow>((status, retry_after, text))
+            };
+
+            // Timeout o'rnatilgan bo'lsa urinishni unga o'raymiz; tugamasa aniq
+            // xato (qotgan LLM endpoint thread'ni abadiy bloklamasin — issue #92).
+            let (status, retry_after, text) = match timeout {
+                Some(dur) => match tokio::time::timeout(dur, work).await {
+                    Ok(r) => r?,
+                    Err(_) => {
+                        return Err(Flow::err(format!(
+                            "ai: so'rov timeout ({} sek ichida javob yo'q)",
+                            dur.as_secs()
+                        )));
+                    }
+                },
+                None => work.await?,
+            };
+
+            if (200..300).contains(&status) {
+                return Ok(text);
             }
-            Ok(text)
-        };
-
-        // Timeout o'rnatilgan bo'lsa unga o'raymiz; tugamasa aniq xato (qotgan LLM
-        // endpoint thread'ni abadiy bloklamasin — issue #92).
-        match timeout {
-            Some(dur) => match tokio::time::timeout(dur, work).await {
-                Ok(r) => r,
-                Err(_) => Err(Flow::err(format!(
-                    "ai: so'rov timeout ({} sek ichida javob yo'q)",
-                    dur.as_secs()
-                ))),
-            },
-            None => work.await,
+            if !retried && should_retry_status(status) {
+                retried = true;
+                tokio::time::sleep(retry_backoff(retry_after)).await;
+                continue;
+            }
+            return Err(Flow::err(format!(
+                "ai: API xatosi (status {}): {}",
+                status,
+                truncate(&text, 300)
+            )));
         }
     })?;
     let ms = started.elapsed().as_millis() as i64;
     Ok((text, ms))
+}
+
+// 429 (rate limit) va 529 (Anthropic overloaded) — vaqtinchalik holatlar: bir
+// marta qayta urinish o'rinli (issue #92 bonus). Boshqa 4xx/5xx (401 noto'g'ri
+// kalit, 400 yaroqsiz so'rov...) qayta urinishdan tuzalmaydi — darhol xato.
+fn should_retry_status(status: u16) -> bool {
+    matches!(status, 429 | 529)
+}
+
+// Retry oldidan kutish: server `Retry-After` (soniya) bergan bo'lsa unga amal
+// qilamiz — lekin 1..=30 ga qisqartirilgan (handler thread'ini juda uzoq
+// ushlamaslik uchun); header bo'lmasa default 2s.
+fn retry_backoff(retry_after: Option<u64>) -> Duration {
+    Duration::from_secs(retry_after.map(|s| s.clamp(1, 30)).unwrap_or(2))
 }
 
 // --- Javob parse ---
@@ -1035,6 +1075,137 @@ mod tests {
         assert_eq!(
             resolve_ai_timeout(Some("abc")),
             Some(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn retry_status_faqat_vaqtinchalik() {
+        // 429/529 — retry; autentifikatsiya/validatsiya xatolari — yo'q.
+        assert!(should_retry_status(429));
+        assert!(should_retry_status(529));
+        assert!(!should_retry_status(400));
+        assert!(!should_retry_status(401));
+        assert!(!should_retry_status(500));
+        assert!(!should_retry_status(503));
+    }
+
+    #[test]
+    fn retry_backoff_retry_after_va_default() {
+        // Retry-After bo'lsa unga amal (1..=30 clamp), bo'lmasa default 2s.
+        assert_eq!(retry_backoff(Some(5)), Duration::from_secs(5));
+        assert_eq!(retry_backoff(Some(0)), Duration::from_secs(1));
+        assert_eq!(retry_backoff(Some(300)), Duration::from_secs(30));
+        assert_eq!(retry_backoff(None), Duration::from_secs(2));
+    }
+
+    // Lokal test serveri: berilgan javoblarni navbat bilan qaytaradi (har ulanish
+    // bitta javob, connection: close). Nechta so'rov kelganini qaytaradi.
+    fn serve_responses(
+        responses: Vec<String>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<usize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut served = 0;
+            for resp in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                // So'rovni to'liq o'qiymiz (header'lar + content-length tana) —
+                // aks holda javobdan keyin yopilgan socket RST berishi mumkin.
+                let mut data = Vec::new();
+                let mut buf = [0u8; 4096];
+                let total = loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break None;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&data[..pos]).to_lowercase();
+                        let cl = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break Some(pos + 4 + cl);
+                    }
+                };
+                if let Some(total) = total {
+                    while data.len() < total {
+                        let n = stream.read(&mut buf).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                    }
+                }
+                stream.write_all(resp.as_bytes()).unwrap();
+                served += 1;
+            }
+            served
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn post_json_429_dan_keyin_retry_qiladi() {
+        // issue #92 bonus: birinchi javob 429 bo'lsa BIR marta qayta uriniladi —
+        // ikkinchi urinish 200 qaytarsa natija muvaffaqiyatli.
+        let r429 = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string();
+        let r200 = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}".to_string();
+        let (addr, handle) = serve_responses(vec![r429, r200]);
+        let url = format!("http://{}/v1/x", addr);
+        let res = post_json(&url, "{}".to_string(), Some(Duration::from_secs(10)), |b| b);
+        match res {
+            Ok((text, _ms)) => assert_eq!(text, "{\"ok\":1}"),
+            Err(Flow::Error(e)) => panic!("retry'dan keyin Ok kutilgan: {}", e),
+            Err(_) => panic!("kutilmagan Flow"),
+        }
+        assert_eq!(
+            handle.join().unwrap(),
+            2,
+            "ikki so'rov (asl + retry) kelishi kerak"
+        );
+    }
+
+    #[test]
+    fn post_json_ikkinchi_429_xato_qaytaradi() {
+        // Faqat BIR marta retry — ikkinchi urinish ham 429 bo'lsa aniq xato
+        // qaytadi (cheksiz retry loop yo'q).
+        let r429 = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string();
+        let (addr, handle) = serve_responses(vec![r429.clone(), r429]);
+        let url = format!("http://{}/v1/x", addr);
+        let res = post_json(&url, "{}".to_string(), Some(Duration::from_secs(10)), |b| b);
+        match res {
+            Err(Flow::Error(e)) => assert!(e.contains("429"), "429 xatosi kutilgan: {}", e),
+            Ok(_) => panic!("ikkinchi 429 dan keyin xato kutilgan"),
+            Err(_) => panic!("Flow::Error kutilgan"),
+        }
+        assert_eq!(
+            handle.join().unwrap(),
+            2,
+            "aniq ikki urinish bo'lishi kerak"
+        );
+    }
+
+    #[test]
+    fn post_json_401_retry_qilmaydi() {
+        // Doimiy xato (401 noto'g'ri kalit) — retry YO'Q, bitta so'rov bilan xato.
+        let r401 = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            .to_string();
+        let (addr, handle) = serve_responses(vec![r401]);
+        let url = format!("http://{}/v1/x", addr);
+        let res = post_json(&url, "{}".to_string(), Some(Duration::from_secs(10)), |b| b);
+        match res {
+            Err(Flow::Error(e)) => assert!(e.contains("401"), "401 xatosi kutilgan: {}", e),
+            Ok(_) => panic!("401 dan keyin xato kutilgan"),
+            Err(_) => panic!("Flow::Error kutilgan"),
+        }
+        assert_eq!(
+            handle.join().unwrap(),
+            1,
+            "faqat bitta so'rov bo'lishi kerak"
         );
     }
 
