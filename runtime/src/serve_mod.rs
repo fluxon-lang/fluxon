@@ -21,7 +21,8 @@ use crate::interp::{Flow, Interp};
 // Kutilayotgan deferred ish. `http.serve`/`ws.serve`/`cron.run` ro'yxatga qo'shadi.
 #[derive(Clone, Copy)]
 pub enum PendingServer {
-    Http { port: u16 },
+    // max_body — so'rov tanasi o'lcham chegarasi (bayt); 0 = cheklovsiz (#91).
+    Http { port: u16, max_body: usize },
     Ws { port: u16 },
     // cron.run — port yo'q; scheduler fon thread'da ishlaydi, bu faqat dasturni
     // ushlab turish (top-level tugaganda chiqib ketmaslik) belgisi.
@@ -79,10 +80,10 @@ pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
         for srv in servers {
             let interp = interp.clone();
             match srv {
-                PendingServer::Http { port } => {
+                PendingServer::Http { port, max_body } => {
                     let listener = crate::http_mod::bind(port).await?;
                     handles.push(tokio::spawn(async move {
-                        crate::http_mod::serve_loop(interp, listener).await
+                        crate::http_mod::serve_loop(interp, listener, max_body).await
                     }));
                 }
                 PendingServer::Ws { port } => {
@@ -124,7 +125,7 @@ mod tests {
             .pending_servers
             .lock()
             .unwrap()
-            .push(PendingServer::Http { port });
+            .push(PendingServer::Http { port, max_body: 0 });
 
         let res = run_pending(&interp);
         assert!(

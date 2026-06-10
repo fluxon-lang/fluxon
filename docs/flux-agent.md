@@ -132,6 +132,9 @@ http.serve 8080
   `http.limit "/api/*" 100 :min \req -> req.headers.x_api_key` (per-key, prefix).
   Over the limit → auto `429` + `Retry-After` (seconds until window resets). Key fn
   nil → falls back to `req.ip`. Fixed-window, in-memory (single instance only).
+- Body size limit (DoS guard): `http.serve 8080 {max_body: BYTES}`. Default 10 MiB;
+  over the limit → `413 Payload Too Large` (body not buffered). `max_body: 0`
+  disables the limit (unlimited — only behind a trusted internal network).
 ```flux
 http.before "/api/*" \req ->
   if !req.headers.authorization

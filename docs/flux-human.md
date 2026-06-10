@@ -490,6 +490,10 @@ http.serve 8080
 - `rep status body` — the response. If `body` is a map, it **automatically**
   becomes JSON.
 - `http.serve port` — starts the server.
+- `http.serve port {max_body: BYTES}` — configures the request body size limit
+  (DoS guard). Default `10 MiB` (10485760 bytes); over the limit the server
+  returns `413 Payload Too Large` without buffering the body. `max_body: 0`
+  disables the limit (unlimited — only behind a trusted internal network).
 
 **Redirect.** There is no special verb — with `rep` you give a 302 status and a
 `location` key; it becomes the Location header:

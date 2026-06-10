@@ -59,7 +59,9 @@ http.serve 8080
   application/json` bo'lsa `body` avtomat map'ga dekod bo'ladi.
 - `rep status body` — javob. body map/list bo'lsa avtomat JSON, str bo'lsa matn.
 - `fail status "msg"` — handler ichida xato javob (`{"error":"msg"}` + status).
-- `http.serve port` — serverni **bloklab** ishga tushiradi.
+- `http.serve port` — serverni **bloklab** ishga tushiradi. Ixtiyoriy opsiya:
+  `http.serve port {max_body: BAYT}` — so'rov tanasi o'lcham chegarasi (default
+  10 MiB, oshsa `413`; `max_body: 0` — cheklovsiz).
 - Klient: `http.get url`, `http.post url body`, `http.put url body`,
   `http.del url` (body map -> JSON). Natija `{status, body}`; javob JSON
   bo'lsa `body` dekod qilinadi.

@@ -492,6 +492,10 @@ http.serve 8080
   - `req.headers` — sarlavhalar
 - `rep status body` — javob. `body` map bo'lsa, **avtomat JSON** bo'ladi.
 - `http.serve port` — serverni ishga tushiradi.
+- `http.serve port {max_body: BAYT}` — so'rov tanasi o'lcham chegarasini sozlaydi
+  (DoS himoyasi). Default `10 MiB` (10485760 bayt); chegaradan oshsa server
+  `413 Payload Too Large` qaytaradi va tanani xotiraga yig'maydi. `max_body: 0`
+  chegarani o'chiradi (cheklovsiz — faqat ishonchli ichki tarmoq orqasida).
 
 **Redirect (yo'naltirish).** Maxsus fe'l yo'q — `rep` bilan 302 status va
 `location` kalitini berasiz; u Location header'ga aylanadi:

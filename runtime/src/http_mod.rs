@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -77,6 +77,13 @@ impl LimitBucket {
 
 // Necha operatsiyada bir marta eski oyna kalitlarini tozalaymiz.
 const SWEEP_EVERY: u32 = 1024;
+
+// HTTP server uchun standart so'rov tanasi (body) o'lcham chegarasi (issue #91).
+// Chegarasiz `collect()` butun tanani xotiraga yig'adi — mijoz ulkan body yuborib
+// server xotirasini to'ldira oladi (DoS). Default 10 MiB; `http.serve PORT
+// {max_body: N}` bilan sozlanadi. `max_body: 0` chegarani o'chiradi (cheklovsiz —
+// faqat ishonchli, ichki tarmoq orqasida ishlating).
+const DEFAULT_MAX_BODY: usize = 10 * 1024 * 1024;
 
 pub type LimitState = Arc<Mutex<LimitBucket>>;
 
@@ -437,6 +444,26 @@ fn text_response(status: u16, body: String) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
+// 413 Payload Too Large — so'rov tanasi o'lcham chegarasidan oshib ketdi (#91).
+fn payload_too_large(limit: usize) -> Response<Full<Bytes>> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "error".to_string(),
+        Value::Str(format!(
+            "so'rov tanasi juda katta (chegara: {} bayt)",
+            limit
+        )),
+    );
+    json_response(413, json_encode(&Value::Map(m)))
+}
+
+// 400 Bad Request — so'rov tanasini o'qishda xato (masalan uzilgan ulanish) (#91).
+fn bad_request(msg: &str) -> Response<Full<Bytes>> {
+    let mut m = BTreeMap::new();
+    m.insert("error".to_string(), Value::Str(msg.to_string()));
+    json_response(400, json_encode(&Value::Map(m)))
+}
+
 // Qiymat `rep`-javobmi? `rep status body` -> {__resp:true ...} map (builtins.rs).
 // Middleware shu javobni qaytarsa zanjir to'xtaydi (P1: rep auth rad etishi).
 fn is_resp(v: &Value) -> bool {
@@ -728,10 +755,29 @@ impl Interp {
             Some(Value::Int(n)) => *n as u16,
             _ => return Err(Flow::err("http.serve: port (int) bo'lishi kerak")),
         };
+        // Ixtiyoriy ikkinchi argument — opsiyalar map'i: `{max_body: BAYT}`.
+        // Berilmasa default DEFAULT_MAX_BODY; `max_body: 0` chegarani o'chiradi.
+        let max_body = match args.get(1) {
+            None => DEFAULT_MAX_BODY,
+            Some(Value::Map(m)) => match m.get("max_body") {
+                None => DEFAULT_MAX_BODY,
+                Some(Value::Int(n)) if *n >= 0 => *n as usize,
+                _ => {
+                    return Err(Flow::err(
+                        "http.serve: max_body manfiy bo'lmagan int bo'lishi kerak",
+                    ));
+                }
+            },
+            _ => {
+                return Err(Flow::err(
+                    "http.serve: ikkinchi argument opsiyalar map'i bo'lishi kerak ({max_body: N})",
+                ));
+            }
+        };
         self.pending_servers
             .lock()
             .unwrap()
-            .push(crate::serve_mod::PendingServer::Http { port });
+            .push(crate::serve_mod::PendingServer::Http { port, max_body });
         Ok(Value::Nil)
     }
 }
@@ -751,7 +797,7 @@ pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
 // Bitta HTTP server uchun accept loop — umumiy event-loop ichida spawn qilinadi
 // (`serve_mod`). Listener oldindan `bind` bilan ochilgan (bind xatosi spawn'dan
 // oldin ko'tariladi).
-pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener) {
+pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: usize) {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
     eprintln!("Flux HTTP server: http://localhost:{}", port);
 
@@ -772,7 +818,7 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener) {
             let service = service_fn(move |req: Request<Incoming>| {
                 let interp = interp.clone();
                 let client_ip = client_ip.clone();
-                async move { handle_request(interp, req, client_ip).await }
+                async move { handle_request(interp, req, client_ip, max_body).await }
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, service)
@@ -790,6 +836,7 @@ async fn handle_request(
     interp: Arc<Interp>,
     req: Request<Incoming>,
     client_ip: String,
+    max_body: usize,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().as_str().to_lowercase();
     let uri = req.uri().clone();
@@ -827,10 +874,44 @@ async fn handle_request(
         }
     };
 
-    // Tanani yig'amiz.
-    let body_bytes = match req.into_body().collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => Bytes::new(),
+    // Tanani yig'amiz — o'lcham chegarasi bilan (issue #91). Chegarasiz collect()
+    // butun tanani xotiraga yig'adi: mijoz ulkan body yuborib server xotirasini
+    // to'ldira oladi (DoS).
+    let body_bytes = if max_body == 0 {
+        // Chegara o'chirilgan (http.serve PORT {max_body: 0}) — cheklovsiz o'qish.
+        match req.into_body().collect().await {
+            Ok(c) => c.to_bytes(),
+            // Oldin bu jim Bytes::new() ga tushardi (uzilgan POST handler'ga
+            // body:nil bilan yetardi); endi 400 qaytaramiz (issue #91).
+            Err(_) => return Ok(bad_request("so'rov tanasini o'qib bo'lmadi")),
+        }
+    } else {
+        // Tez yo'l: Content-Length e'lon qilingan o'lcham chegaradan oshsa, tanani
+        // umuman o'qimasdan 413 qaytaramiz (mijoz GB'lab yuklab tugatishini
+        // kutmaymiz). Yolg'on/yo'q Content-Length'ni quyidagi Limited ushlaydi.
+        let declared = req
+            .headers()
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+        if matches!(declared, Some(len) if len > max_body as u64) {
+            return Ok(payload_too_large(max_body));
+        }
+        // Limited oqim davomida ham haqiqiy chegarani majburlaydi — chegara oshsa
+        // o'qishni to'xtatadi (Content-Length yolg'on bo'lsa ham himoyalaydi).
+        match Limited::new(req.into_body(), max_body).collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(e) => {
+                // Chegara oshib ketdi -> 413; boshqa o'qish xatosi (masalan uzilgan
+                // ulanish) -> 400.
+                if e.downcast_ref::<http_body_util::LengthLimitError>()
+                    .is_some()
+                {
+                    return Ok(payload_too_large(max_body));
+                }
+                return Ok(bad_request("so'rov tanasini o'qib bo'lmadi"));
+            }
+        }
     };
 
     // Bu so'rovga mos middleware zanjirini yig'amiz (issue #67): avval global
