@@ -177,9 +177,12 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
         "floor" => Ok(Value::Int(x.floor() as i64)),
         "ceil" => Ok(Value::Int(x.ceil() as i64)),
         "abs" => {
-            // int kirsa int, flt kirsa flt qaytaramiz
+            // int kirsa int, flt kirsa flt qaytaramiz.
+            // i64::MIN.abs() panic beradi (musbat juftligi sig'maydi) — checked.
             match &args[0] {
-                Value::Int(n) => Ok(Value::Int(n.abs())),
+                Value::Int(n) => Ok(Value::Int(
+                    n.checked_abs().ok_or_else(|| Flow::overflow("math.abs"))?,
+                )),
                 _ => Ok(Value::Flt(x.abs())),
             }
         }
@@ -200,9 +203,18 @@ fn rand_module(func: &str, args: Vec<Value>) -> R {
             if b < a {
                 return Err(Flow::err("rand.int: yuqori chegara pastdan kichik"));
             }
-            let span = (b - a + 1) as u64;
-            let r = next_rand() % span;
-            Ok(Value::Int(a + r as i64))
+            // span i128 da: a/b chekka qiymatlarda (masalan a juda manfiy,
+            // b juda musbat) b - a + 1 i64 ga sig'maydi va overflow berardi.
+            let span = (b as i128) - (a as i128) + 1; // [1, 2^64]
+            let r = if span > u64::MAX as i128 {
+                next_rand() // to'liq i64 oralig'i — har qanday u64 mos qiymat
+            } else {
+                next_rand() % (span as u64)
+            };
+            // Haqiqiy natija a + r doim [a, b] ichida — ikkilik to'ldiruvchi
+            // modulyar arifmetikasida wrapping_add aynan shu qiymatni beradi
+            // (oraliq yig'indi i64 dan toshsa ham).
+            Ok(Value::Int(a.wrapping_add(r as i64)))
         }
         "str" => {
             let n = arg_int(&args, 0, "rand.str")? as usize;
@@ -239,7 +251,12 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                     unit
                 ))
             })?;
-            Ok(Value::Str(fmt_unix(now_unix() - n * secs)))
+            // Katta N da n * secs (yoki ayirma) i64 dan toshadi — checked.
+            let ts = n
+                .checked_mul(secs)
+                .and_then(|off| now_unix().checked_sub(off))
+                .ok_or_else(|| Flow::overflow("time.ago"))?;
+            Ok(Value::Str(fmt_unix(ts)))
         }
         // time.in N :birlik -> hozirdan N birlik KEYINGI UTC matn (TTL/expiry).
         // time.ago ning ko'zgusi — yagona farq qo'shish/ayirish ishorasi.
@@ -252,7 +269,11 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                     unit
                 ))
             })?;
-            Ok(Value::Str(fmt_unix(now_unix() + n * secs)))
+            let ts = n
+                .checked_mul(secs)
+                .and_then(|off| now_unix().checked_add(off))
+                .ok_or_else(|| Flow::overflow("time.in"))?;
+            Ok(Value::Str(fmt_unix(ts)))
         }
         // time.sleep secs -> secs soniya kutadi (flt ham — 0.5 yarim soniya).
         // Polling/retry backoff uchun: xato holatda qayta urinishdan oldin
@@ -329,7 +350,11 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                     unit
                 ))
             })?;
-            Ok(Value::Str(fmt_unix(base + n * secs)))
+            let ts = n
+                .checked_mul(secs)
+                .and_then(|off| base.checked_add(off))
+                .ok_or_else(|| Flow::overflow("time.add"))?;
+            Ok(Value::Str(fmt_unix(ts)))
         }
         // time.sub t N :birlik -> t timestamp'dan N birlik AYIRIB UTC matn qaytaradi.
         // time.add ning ko'zgusi (time.ago/time.in juftligi kabi). Qavssiz chaqiruvda
@@ -345,7 +370,11 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                     unit
                 ))
             })?;
-            Ok(Value::Str(fmt_unix(base - n * secs)))
+            let ts = n
+                .checked_mul(secs)
+                .and_then(|off| base.checked_sub(off))
+                .ok_or_else(|| Flow::overflow("time.sub"))?;
+            Ok(Value::Str(fmt_unix(ts)))
         }
         // time.diff a b -> (a - b) ikki vaqt orasidagi farq SEKUNDDA (int).
         // Musbat natija = a, b dan keyin (kelajakda). Birlikka bo'lib o'tiladi
@@ -1265,6 +1294,26 @@ mod rand_tests {
         assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
+    // Issue #89: chekka chegaralarda span hisobi (b - a + 1) i64 dan toshardi
+    // va panic berardi. Endi i128 oraliq — to'liq i64 diapazoni ham ishlaydi.
+    #[test]
+    fn int_extreme_bounds_no_overflow() {
+        for &(a, b) in &[
+            (i64::MIN, i64::MAX),     // span = 2^64 (u64 ga ham sig'maydi)
+            (i64::MIN, i64::MIN + 5), // juda manfiy tor diapazon
+            (i64::MAX - 5, i64::MAX), // juda musbat tor diapazon
+            (-3, i64::MAX),           // span > i64::MAX
+        ] {
+            for _ in 0..50 {
+                let Ok(Value::Int(v)) = rand_module("int", vec![Value::Int(a), Value::Int(b)])
+                else {
+                    panic!("rand.int int qaytarishi kerak ({}..{})", a, b);
+                };
+                assert!((a..=b).contains(&v), "diapazondan tashqari: {}", v);
+            }
+        }
+    }
+
     // Kriptografik manba: ketma-ket ikki token bir xil emas (bashorat qilinmas).
     // Eski xorshift'da bir nanosekundda ochilgan thread'lar bir xil olardi.
     #[test]
@@ -1277,6 +1326,26 @@ mod rand_tests {
             };
             assert!(seen.insert(s), "takror token chiqdi — CSPRNG buzildi");
         }
+    }
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    // Issue #89: i64::MIN.abs() panic berardi (musbat juftligi i64 ga sig'maydi).
+    // Endi Flux xatosi; oddiy qiymatlar avvalgidek ishlaydi.
+    #[test]
+    fn abs_min_is_error_not_panic() {
+        let r = math_module("abs", vec![Value::Int(i64::MIN)]);
+        let Err(Flow::Error(msg)) = r else {
+            panic!("math.abs i64::MIN xato berishi kerak");
+        };
+        assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        assert!(matches!(
+            math_module("abs", vec![Value::Int(-7)]),
+            Ok(Value::Int(7))
+        ));
     }
 }
 
@@ -1466,6 +1535,29 @@ mod time_tests {
             ],
         );
         assert!(r.is_err(), "noma'lum birlik xato berishi kerak");
+    }
+
+    // Issue #89: n * secs ko'paytmasi (yoki yakuniy yig'indi) i64 dan toshsa
+    // panic/jim wrap emas, Flux xatosi qaytadi — to'rttala offset funksiyada.
+    #[test]
+    fn time_offsets_overflow_is_error() {
+        let big = Value::Int(i64::MAX / 2);
+        let day = Value::Str("day".into());
+        for func in ["ago", "in"] {
+            let r = time_module(func, vec![big.clone(), day.clone()]);
+            let Err(Flow::Error(msg)) = r else {
+                panic!("time.{} overflow'da xato berishi kerak", func);
+            };
+            assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        }
+        let base = Value::Str("2026-06-10 10:00:00".into());
+        for func in ["add", "sub"] {
+            let r = time_module(func, vec![base.clone(), big.clone(), day.clone()]);
+            let Err(Flow::Error(msg)) = r else {
+                panic!("time.{} overflow'da xato berishi kerak", func);
+            };
+            assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        }
     }
 
     #[test]

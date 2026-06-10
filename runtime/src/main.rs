@@ -166,6 +166,63 @@ fn g x -> x + 1
         check_source(&ok).unwrap_or_else(|e| panic!("200 daraja o'tishi kerak: {}", e));
     }
 
+    // Issue #89: int arifmetika overflow'da panic (debug) / jim wrap (release)
+    // o'rniga ikkala rejimda ham bir xil Flux xatosi qaytadi.
+    #[test]
+    fn int_overflow_xato_panic_emas() {
+        // + overflow (debug'da panic berardi)
+        let e = run_source("log (9223372036854775806 + 2)").unwrap_err();
+        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        // i64::MIN / -1 — Rust'da release'da ham panic berardi
+        let e = run_source(
+            r#"
+a = 0 - 9223372036854775807 - 1
+log (a / (0 - 1))
+"#,
+        )
+        .unwrap_err();
+        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        // i64::MIN % -1 — xuddi shu oila
+        let e = run_source(
+            r#"
+a = 0 - 9223372036854775807 - 1
+log (a % (0 - 1))
+"#,
+        )
+        .unwrap_err();
+        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        // unar minus ham: -(i64::MIN) sig'maydi
+        let e = run_source(
+            r#"
+a = 0 - 9223372036854775807 - 1
+log (-a)
+"#,
+        )
+        .unwrap_err();
+        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        // * va - ham checked
+        assert!(run_source("log (4611686018427387904 * 2)").is_err());
+        assert!(run_source("log (0 - 9223372036854775807 - 2)").is_err());
+        // Oddiy arifmetika avvalgidek ishlaydi
+        run(r#"
+((2 + 3) == 5) | (fail "yig'indi buzildi")
+((7 / 2) == 3) | (fail "bo'lish buzildi")
+((7 % 2) == 1) | (fail "mod buzildi")
+((-(5)) == (0 - 5)) | (fail "unar minus buzildi")
+"#);
+    }
+
+    // Issue #89: range oxiri i64::MAX bo'lganda `i += 1` toshib ketardi —
+    // endi oxirgi elementdan keyin to'xtaydi.
+    #[test]
+    fn range_i64_max_chegarasida_toxtaydi() {
+        run(r#"
+m = 9223372036854775806
+r = m..(m + 1)
+(r.len == 2) | (fail "range uzunligi noto'g'ri: ${r.len}")
+"#);
+    }
+
     #[test]
     fn fib_recursion() {
         run(r#"

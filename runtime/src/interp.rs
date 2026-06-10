@@ -159,6 +159,13 @@ impl Flow {
     pub fn err(msg: impl Into<String>) -> Flow {
         Flow::Error(msg.into())
     }
+
+    // i64 arifmetikasi chegaradan oshganda yagona xato (issue #89). checked_*
+    // bilan birga ishlatiladi: debug'dagi panic va release'dagi jim wrap o'rniga
+    // ikkala rejimda ham bir xil, oshkora runtime xato beradi.
+    pub fn overflow(who: &str) -> Flow {
+        Flow::Error(format!("{}: son chegaradan oshdi (i64)", who))
+    }
 }
 
 pub type EvalResult = Result<Value, Flow>;
@@ -1192,7 +1199,10 @@ impl Interp {
                 match op {
                     UnOp::Not => Ok(Value::Bool(!v.truthy())),
                     UnOp::Neg => match v {
-                        Value::Int(n) => Ok(Value::Int(-n)),
+                        // i64::MIN ni teskarilab bo'lmaydi — int_arith bilan bir xil xato.
+                        Value::Int(n) => Ok(Value::Int(
+                            n.checked_neg().ok_or_else(|| Flow::overflow("-"))?,
+                        )),
                         Value::Flt(x) => Ok(Value::Flt(-x)),
                         other => Err(Flow::err(format!(
                             "'-' faqat songa, {} berildi",
@@ -1211,7 +1221,12 @@ impl Interp {
                         let mut i = s;
                         while i <= e {
                             out.push(Value::Int(i));
-                            i += 1;
+                            // end = i64::MAX bo'lsa i += 1 toshib ketardi —
+                            // oxirgi element qo'shilgach to'xtaymiz.
+                            match i.checked_add(1) {
+                                Some(n) => i = n,
+                                None => break,
+                            }
                         }
                         Ok(Value::List(out))
                     }
@@ -1874,21 +1889,24 @@ fn to_f64(v: &Value) -> f64 {
 
 fn int_arith(op: BinOp, a: i64, b: i64) -> EvalResult {
     use Value::*;
+    // checked_*: overflow'da debug panic / release jim wrap o'rniga ikkala
+    // rejimda bir xil Flux xatosi. i64::MIN / -1 (va % -1) Rust'da release'da
+    // ham panic berardi — checked_div/checked_rem uni ham ushlaydi.
     Ok(match op {
-        BinOp::Add => Int(a + b),
-        BinOp::Sub => Int(a - b),
-        BinOp::Mul => Int(a * b),
+        BinOp::Add => Int(a.checked_add(b).ok_or_else(|| Flow::overflow("+"))?),
+        BinOp::Sub => Int(a.checked_sub(b).ok_or_else(|| Flow::overflow("-"))?),
+        BinOp::Mul => Int(a.checked_mul(b).ok_or_else(|| Flow::overflow("*"))?),
         BinOp::Div => {
             if b == 0 {
                 return Err(Flow::err("nolga bo'lish"));
             }
-            Int(a / b)
+            Int(a.checked_div(b).ok_or_else(|| Flow::overflow("/"))?)
         }
         BinOp::Mod => {
             if b == 0 {
                 return Err(Flow::err("nolga bo'lish (mod)"));
             }
-            Int(a % b)
+            Int(a.checked_rem(b).ok_or_else(|| Flow::overflow("%"))?)
         }
         BinOp::Lt => Bool(a < b),
         BinOp::Le => Bool(a <= b),
