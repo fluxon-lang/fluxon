@@ -1235,9 +1235,26 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     if status == 303 || ((status == 301 || status == 302) && cur_method == "POST") {
                         cur_method = "GET".to_string();
                     }
-                    // 3xx tanasini drain qilamiz — o'qilmagan body bilan hyper
-                    // pool ulanishni qayta ishlata olmaydi (issue #96).
-                    let _ = resp.into_body().collect().await;
+                    // 3xx tanasini frame-ma-frame drain qilamiz — o'qilmagan body
+                    // bilan hyper pool ulanishni qayta ishlata olmaydi (issue #96).
+                    // collect() emas: butun tana xotiraga yig'ilmasin. Zararli
+                    // upstream juda katta 302 tanasi bilan kechiktirmasin —
+                    // limitdan oshsa drain to'xtaydi (body drop → ulanish pool'ga
+                    // qaytmaydi, keyingi hop yangi ulanish ochadi).
+                    const REDIRECT_DRAIN_MAX: usize = 64 * 1024;
+                    let mut drained = 0usize;
+                    let mut body = resp.into_body();
+                    while let Some(frame) = body.frame().await {
+                        match frame {
+                            Ok(f) => {
+                                drained += f.data_ref().map_or(0, |d| d.len());
+                                if drained > REDIRECT_DRAIN_MAX {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     continue;
                 }
 
