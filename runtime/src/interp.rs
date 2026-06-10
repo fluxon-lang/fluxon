@@ -332,7 +332,7 @@ impl Interp {
     fn migrate(&self, db: &dyn crate::db_mod::Db) -> Result<(), Flow> {
         use crate::db_mod::{
             ColDef, SqlVal, build_add_column, build_backup, build_create_index, build_drop_column,
-            build_drop_index, index_name,
+            build_drop_index, coldef_foreign_key, index_name,
         };
 
         // 0. Flux boshqaradigan jadvallar reyestri (xavfsiz DROP uchun).
@@ -418,6 +418,40 @@ impl Interp {
             //    allaqachon mavjud). IF NOT EXISTS idempotent.
             for idx in &meta.indexes {
                 db.exec(&build_create_index(idx), &[]).map_err(Flow::err)?;
+            }
+        }
+
+        // 5.5 FK RECONCILE — ALOHIDA pass (barcha jadval/ustun yaratilgandan keyin,
+        //     parent jadval mavjudligi kafolatlanadi). DB'dagi HAQIQIY FK to'plamini
+        //     (introspeksiya) `ref:tbl.col` deklaratsiyasi bilan solishtiramiz:
+        //     faqat kodga emas, eski holatga ham qaraymiz. Farq bo'lsa (mavjud
+        //     ustunga FK qo'shilgan/olib tashlangan) ALTER yetmaydi — jadvalni
+        //     rebuild qilamiz (ma'lumot saqlanadi). Yangi ustun FK'si ADD COLUMN'da
+        //     allaqachon qo'llangan; bu pass faqat mavjud ustunlar farqini yopadi.
+        for (table, meta) in schema.iter() {
+            let coldefs: Vec<ColDef> = meta
+                .col_order
+                .iter()
+                .map(|c| ColDef {
+                    name: c.clone(),
+                    type_name: meta.columns[c].type_name.clone(),
+                    modifiers: meta.columns[c].modifiers.clone(),
+                })
+                .collect();
+            let desired: HashSet<_> = coldefs
+                .iter()
+                .filter_map(coldef_foreign_key)
+                .map(|fk| (fk.from, fk.table, fk.to))
+                .collect();
+            let live: HashSet<_> = db
+                .foreign_keys(table)
+                .map_err(Flow::err)?
+                .into_iter()
+                .map(|fk| (fk.from, fk.table, fk.to))
+                .collect();
+            if desired != live {
+                db.rebuild_table(table, &coldefs, &meta.indexes, ts)
+                    .map_err(Flow::err)?;
             }
         }
 

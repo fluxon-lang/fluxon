@@ -60,6 +60,25 @@ pub struct IndexInfo {
     pub name: String,
 }
 
+// FOREIGN KEY cheklovi: `from` ustun -> `table`.`to`. `ref:tbl.col` deklaratsiyasi
+// va DB'dagi haqiqiy holat (pragma_foreign_key_list) shu shaklda solishtiriladi —
+// farq bo'lsa migration jadvalni qayta quradi (FK ALTER bilan qo'shilmaydi).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ForeignKey {
+    pub from: String,
+    pub table: String,
+    pub to: String,
+}
+
+// `ref:tbl.col` modifikatoridan ustun FK'sini ajratadi. Modifikator bo'lmasa None.
+pub fn coldef_foreign_key(c: &ColDef) -> Option<ForeignKey> {
+    column_ref_target(&c.modifiers).map(|(table, to)| ForeignKey {
+        from: c.name.clone(),
+        table: table.to_string(),
+        to: to.to_string(),
+    })
+}
+
 // --- Db trait: dialekt-neytral backend interfeysi ---
 
 pub trait Db: Send + Sync {
@@ -92,6 +111,20 @@ pub trait Db: Send + Sync {
     // `_flux_schema` meta-jadvalidagi Flux yaratgan jadval nomlari. DROP TABLE
     // faqat shu ro'yxatdagi jadvallarga (Flux yaratmagan jadval saqlanadi).
     fn flux_tables(&self) -> Result<Vec<String>, String>;
+
+    // Jadvaldagi mavjud FOREIGN KEY cheklovlari (introspeksiya). Migration buni
+    // `ref:tbl.col` deklaratsiyasi bilan solishtiradi — farq bo'lsa rebuild.
+    fn foreign_keys(&self, table: &str) -> Result<Vec<ForeignKey>, String>;
+
+    // Jadvalni to'liq qayta quradi (ma'lumotni saqlab, yangi sxema + FK ga).
+    // FK ALTER bilan qo'shilmaydi — mavjud ustunga FK kerak bo'lsa shu chaqiriladi.
+    fn rebuild_table(
+        &self,
+        table: &str,
+        cols: &[ColDef],
+        indexes: &[IndexDef],
+        ts: u64,
+    ) -> Result<(), String>;
 
     // Tranzaksiya ochish — connection'ni egallagan `'static` obyekt qaytaradi.
     fn begin(&self) -> Result<Box<dyn DbTx>, String>;
@@ -313,6 +346,26 @@ impl Db for SqliteDb {
         r
     }
 
+    fn foreign_keys(&self, table: &str) -> Result<Vec<ForeignKey>, String> {
+        let conn = self.pool.checkout()?;
+        let r = sqlite_foreign_keys(&conn, table);
+        self.pool.checkin(conn);
+        r
+    }
+
+    fn rebuild_table(
+        &self,
+        table: &str,
+        cols: &[ColDef],
+        indexes: &[IndexDef],
+        ts: u64,
+    ) -> Result<(), String> {
+        let conn = self.pool.checkout()?;
+        let r = sqlite_rebuild_table(&conn, table, cols, indexes, ts);
+        self.pool.checkin(conn);
+        r
+    }
+
     fn build_insert(&self, table: &str, cols: &[String]) -> String {
         let collist = cols
             .iter()
@@ -402,16 +455,7 @@ impl Db for SqliteDb {
     }
 
     fn build_create_table(&self, table: &str, cols: &[ColDef]) -> String {
-        let coldefs = cols
-            .iter()
-            .map(sqlite_column_def)
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            q_ident(table),
-            coldefs
-        )
+        build_create_table_sql(table, cols)
     }
 
     fn begin(&self) -> Result<Box<dyn DbTx>, String> {
@@ -473,6 +517,129 @@ fn sqlite_flux_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexInfo>,
         }
     }
     Ok(out)
+}
+
+// Jadvaldagi mavjud FOREIGN KEY cheklovlari — pragma_foreign_key_list orqali.
+// Migration declaration FK to'plami bilan solishtirib, farqda rebuild qiladi.
+// `to` NULL bo'lsa (parent PK'ga ustunsiz ishora) bo'sh satr — bizning DDL doim
+// aniq ustun yozadi, shu sabab amalda NULL kelmaydi.
+fn sqlite_foreign_keys(conn: &Connection, table: &str) -> Result<Vec<ForeignKey>, String> {
+    let mut stmt = conn
+        .prepare("SELECT \"from\", \"table\", \"to\" FROM pragma_foreign_key_list(?1)")
+        .map_err(|e| sql_err("pragma_foreign_key_list", e))?;
+    let rows = stmt
+        .query_map([table], |row| {
+            let from: String = row.get(0)?;
+            let to_table: String = row.get(1)?;
+            let to: Option<String> = row.get(2)?;
+            Ok(ForeignKey {
+                from,
+                table: to_table,
+                to: to.unwrap_or_default(),
+            })
+        })
+        .map_err(|e| sql_err("pragma_foreign_key_list", e))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| sql_err("pragma_foreign_key_list", e))?);
+    }
+    Ok(out)
+}
+
+// FK buzilishlari soni (yetim qatorlar) — pragma_foreign_key_check. Rebuild
+// yakunida tekshiriladi: mavjud ma'lumot yangi FK'ni buzsa, jim yo'qotmasdan xato.
+fn sqlite_fk_violations(conn: &Connection, table: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT count(*) FROM pragma_foreign_key_check(?1)",
+        [table],
+        |row| row.get(0),
+    )
+    .map_err(|e| sql_err("pragma_foreign_key_check", e))
+}
+
+// Jadvalni to'liq qayta quradi (SQLite "12-bosqich" naqshi): ma'lumotni saqlab,
+// yangi sxema (FK bilan) ga ko'chiradi. FK/constraint o'zgarishi ALTER bilan hal
+// bo'lmaganda — mavjud ustunga FK qo'shish/olib tashlash — ishlatiladi.
+//
+// `PRAGMA foreign_keys=OFF` TRANZAKSIYADAN TASHQARIDA o'rnatiladi (tx ichida
+// no-op). Hammasi bitta tranzaksiyada — yarmida uzilsa ROLLBACK, ma'lumot butun
+// qoladi. Yakunda foreign_key_check: yetim qator bo'lsa rebuild bekor qilinadi.
+fn sqlite_rebuild_table(
+    conn: &Connection,
+    table: &str,
+    cols: &[ColDef],
+    indexes: &[IndexDef],
+    ts: u64,
+) -> Result<(), String> {
+    // Ko'chiriladigan ustunlar — live va desired kesishmasi (e'lon tartibida).
+    let desired: std::collections::HashSet<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    let live: Vec<String> = sqlite_column_types(conn, table)?
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let common = live
+        .iter()
+        .filter(|c| desired.contains(c.as_str()))
+        .map(|c| q_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let tmp = format!("_flux_rebuild_{table}");
+    // foreign_keys OFF tx'dan tashqarida; rebuild davomida FK enforce qilinmaydi
+    // (drop/rename parent-child tartibidan qat'i nazar ishlasin).
+    conn.execute_batch("PRAGMA foreign_keys=OFF")
+        .map_err(|e| sql_err("PRAGMA foreign_keys=OFF", e))?;
+
+    let result = (|| -> Result<(), String> {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| sql_err("BEGIN", e))?;
+        // 1. Xavfsizlik backup'i (DROP'dan oldin — agent xatosiga himoya).
+        run_exec(conn, &build_backup(table, ts), &[])?;
+        // 2. Yangi jadval vaqtinchalik nom bilan (to'liq desired sxema + FK).
+        run_exec(conn, &build_create_table_sql(&tmp, cols), &[])?;
+        // 3. Umumiy ustunlarni ko'chir (bo'sh bo'lsa ham INSERT ... SELECT xavfsiz).
+        if !common.is_empty() {
+            run_exec(
+                conn,
+                &format!(
+                    "INSERT INTO {} ({}) SELECT {} FROM {}",
+                    q_ident(&tmp),
+                    common,
+                    common,
+                    q_ident(table)
+                ),
+                &[],
+            )?;
+        }
+        // 4. Eskisini drop, yangisini asl nomga rename.
+        run_exec(conn, &format!("DROP TABLE {}", q_ident(table)), &[])?;
+        run_exec(
+            conn,
+            &format!("ALTER TABLE {} RENAME TO {}", q_ident(&tmp), q_ident(table)),
+            &[],
+        )?;
+        // 5. Indekslarni tikla (DROP TABLE ularni o'chirgan).
+        for idx in indexes {
+            run_exec(conn, &build_create_index(idx), &[])?;
+        }
+        // 6. Yetim qatorlar yangi FK'ni buzsa — jim yo'qotmasdan xato (ROLLBACK).
+        let bad = sqlite_fk_violations(conn, table)?;
+        if bad > 0 {
+            return Err(format!(
+                "jadval `{table}`: {bad} ta yetim qator FK cheklovini buzadi — rebuild bekor qilindi (avval ma'lumotni tozalang)"
+            ));
+        }
+        conn.execute_batch("COMMIT")
+            .map_err(|e| sql_err("COMMIT", e))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    // FK'ni qayta yoqamiz — connection poolga ON bilan qaytsin.
+    let _ = conn.execute_batch("PRAGMA foreign_keys=ON");
+    result
 }
 
 // E'lon qilingan SQLite tipini Flux tip nomiga moslaydi. Hozir faqat json
@@ -619,6 +786,21 @@ pub fn build_drop_column(table: &str, col: &str) -> String {
         "ALTER TABLE {} DROP COLUMN {}",
         q_ident(table),
         q_ident(col)
+    )
+}
+
+// CREATE TABLE IF NOT EXISTS — ColDef ro'yxatidan (FK/REFERENCES bilan). Trait
+// metodi va rebuild ham shu funksiyani ishlatadi (bir xil DDL kafolati).
+pub fn build_create_table_sql(table: &str, cols: &[ColDef]) -> String {
+    let coldefs = cols
+        .iter()
+        .map(sqlite_column_def)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        q_ident(table),
+        coldefs
     )
 }
 
@@ -1874,5 +2056,88 @@ mod tests {
         assert_ne!(u, i);
         assert!(u.starts_with("uniq_"));
         assert!(i.starts_with("idx_"));
+    }
+
+    fn col(name: &str, ty: &str, mods: &[&str]) -> ColDef {
+        ColDef {
+            name: name.to_string(),
+            type_name: ty.to_string(),
+            modifiers: mods.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn coldef_fk_parsing() {
+        // `ref:tbl.col` modifikatori ForeignKey ga to'g'ri ajraladi.
+        let c = col("owner", "int", &["ref:users.id"]);
+        assert_eq!(
+            coldef_foreign_key(&c),
+            Some(ForeignKey {
+                from: "owner".into(),
+                table: "users".into(),
+                to: "id".into(),
+            })
+        );
+        assert_eq!(coldef_foreign_key(&col("title", "str", &[])), None);
+    }
+
+    #[test]
+    fn column_def_emits_references() {
+        // ref:tbl.col -> ustun DDL'da REFERENCES bo'lishi kerak.
+        let ddl = sqlite_column_def(&col("owner", "int", &["ref:users.id"]));
+        assert!(
+            ddl.contains("REFERENCES \"users\"(\"id\")"),
+            "REFERENCES bo'lishi kerak: {ddl}"
+        );
+    }
+
+    #[test]
+    fn rebuild_preserves_data_and_adds_fk() {
+        // rebuild_table: mavjud ustunga FK qo'shadi, ma'lumotni saqlaydi,
+        // foreign_keys() introspeksiyasi yangi FK'ni ko'radi.
+        let db = SqliteDb::open(":memory:").unwrap();
+        // Parent + child (FK'siz) + ma'lumot.
+        db.exec(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+            &[],
+        )
+        .unwrap();
+        db.exec("INSERT INTO users (id, name) VALUES (1, 'a')", &[])
+            .unwrap();
+        db.exec(
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, owner INTEGER, title TEXT)",
+            &[],
+        )
+        .unwrap();
+        db.exec(
+            "INSERT INTO posts (id, owner, title) VALUES (1, 1, 'x')",
+            &[],
+        )
+        .unwrap();
+
+        assert!(
+            db.foreign_keys("posts").unwrap().is_empty(),
+            "boshda FK yo'q"
+        );
+
+        // Rebuild: owner ga ref:users.id.
+        let cols = vec![
+            col("id", "serial", &["pk"]),
+            col("owner", "int", &["ref:users.id"]),
+            col("title", "str", &[]),
+        ];
+        db.rebuild_table("posts", &cols, &[], 42).unwrap();
+
+        // FK qo'shildi.
+        let fks = db.foreign_keys("posts").unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].from, "owner");
+        assert_eq!(fks[0].table, "users");
+        // Ma'lumot saqlandi.
+        let rows = db.query("SELECT title FROM posts", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        // FK endi enforce qilinadi (yetim insert rad etiladi).
+        let orphan = db.exec("INSERT INTO posts (owner, title) VALUES (999, 'y')", &[]);
+        assert!(orphan.is_err(), "yetim insert FK ni buzishi kerak");
     }
 }

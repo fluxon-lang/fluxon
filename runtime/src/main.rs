@@ -1305,6 +1305,134 @@ db.ins "posts" {owner:999 title:"yetim"}
     }
 
     #[test]
+    fn migrate_adds_fk_to_existing_column_via_rebuild() {
+        // Issue #94 (codex revyu): FK faqat YANGI jadvalga emas — MAVJUD jadvaldagi
+        // mavjud ustunga ham qo'llanishi kerak. Eski holatni (DB introspeksiyasi)
+        // declaration bilan solishtirib, farqda jadval rebuild qilinadi. Ma'lumot
+        // saqlanadi, autoincrement davom etadi, FK enforce qilinadi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_fk_rebuild.db");
+
+        // Deploy 1: posts FK'siz, ma'lumot bilan.
+        run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int
+  title str
+db.ins "users" {name:"ali"}
+db.ins "posts" {owner:1 title:"a"}
+db.ins "posts" {owner:1 title:"b"}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1: {}", e));
+
+        // Deploy 2: mavjud `owner` ustuniga ref:users.id qo'shildi -> rebuild.
+        run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int ref:users.id
+  title str
+rows = db.q "select count(*) c from posts"
+(rows.0.c == 2) | (fail "rebuild ma'lumotni saqlashi kerak (2 qator)")
+fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
+(fk.0.c == 1) | (fail "rebuild keyin posts'da FK bo'lishi kerak")
+n = db.ins "posts" {owner:1 title:"c"}
+(n.id == 3) | (fail "autoincrement davom etishi kerak (id=3)")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 rebuild: {}", e));
+
+        // Endi yetim insert rad etiladi (FK enforce).
+        let orphan = run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int ref:users.id
+  title str
+db.ins "posts" {owner:404 title:"yetim"}
+"#,
+        );
+        assert!(
+            orphan.is_err(),
+            "rebuild keyin yetim FK insert xato berishi kerak"
+        );
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn migrate_fk_rebuild_aborts_on_orphan_data() {
+        // Mavjud ma'lumotda yetim qator bo'lsa, FK qo'shish rebuild'i JIM yo'qotmaydi
+        // — aniq xato beradi va ROLLBACK orqali ma'lumot butun qoladi.
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_fk_orphan.db");
+
+        run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int
+  title str
+db.ins "users" {name:"a"}
+db.ins "posts" {owner:1 title:"ok"}
+db.ins "posts" {owner:777 title:"yetim"}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1 orphan: {}", e));
+
+        // ref qo'shish -> yetim qator FK ni buzadi -> migrate xato (rebuild abort).
+        let res = run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int ref:users.id
+  title str
+db.q "select 1 x"
+"#,
+        );
+        assert!(
+            res.is_err(),
+            "yetim ma'lumotda FK rebuild abort bo'lishi kerak"
+        );
+
+        // Ma'lumot va eski (FK'siz) sxema saqlangan bo'lishi kerak.
+        run_source(
+            r#"
+use db
+n = db.q "select count(*) c from posts"
+(n.0.c == 2) | (fail "rollback ma'lumotni saqlashi kerak (2 qator)")
+fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
+(fk.0.c == 0) | (fail "abort keyin FK qo'shilmasligi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("verify orphan: {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
     fn db_tx_commit_returns_value() {
         with_db_test("tx_commit", || {
             run(r#"
