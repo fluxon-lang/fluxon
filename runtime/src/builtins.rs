@@ -735,29 +735,15 @@ fn fmt_in_zone(unix: i64, pat: &str, zone: &str) -> Option<String> {
     ))
 }
 
-// Oddiy xorshift RNG. Seed system time'dan bir marta olinadi.
+// OS kriptografik CSPRNG (getrandom orqali, `auth` battery'dagi OsRng bilan
+// bir xil manba). Avval thread-local xorshift edi, seed = system time (nanos) —
+// seed bashorat qilinardi va bir nanosekundda ochilgan ikki thread bir xil
+// ketma-ketlik olardi. `rand.str` token/session-ID generatsiyaga tabiiy
+// ishlatilgani uchun (#97) rand butunlay kriptografik xavfsiz manbaga o'tdi:
+// bir ish = bir yo'l — alohida "xavfsiz rand" o'rganishga hojat yo'q.
 fn next_rand() -> u64 {
-    use std::cell::Cell;
-    thread_local! {
-        static STATE: Cell<u64> = Cell::new(seed());
-    }
-    STATE.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        x
-    })
-}
-
-fn seed() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E3779B97F4A7C15);
-    nanos | 1 // nol bo'lmasligi uchun
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    OsRng.next_u64()
 }
 
 // ---------------- json ----------------
@@ -1247,6 +1233,50 @@ fn arg_num(args: &[Value], i: usize, who: &str) -> Result<f64, Flow> {
             i + 1,
             other.type_name()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod rand_tests {
+    use super::*;
+
+    // rand.int chegaralar ichida qoladi (a..=b), span=1 ham (a==b).
+    #[test]
+    fn int_in_range() {
+        for _ in 0..1000 {
+            let Ok(Value::Int(v)) = rand_module("int", vec![Value::Int(10), Value::Int(20)]) else {
+                panic!("rand.int int qaytarishi kerak");
+            };
+            assert!((10..=20).contains(&v), "diapazondan tashqari: {}", v);
+        }
+        let Ok(Value::Int(v)) = rand_module("int", vec![Value::Int(7), Value::Int(7)]) else {
+            panic!("rand.int int qaytarishi kerak");
+        };
+        assert_eq!(v, 7); // span=1 -> doim a
+    }
+
+    // rand.str so'ralgan uzunlikda va faqat alfanumerik belgilardan iborat.
+    #[test]
+    fn str_len_and_alphabet() {
+        let Ok(Value::Str(s)) = rand_module("str", vec![Value::Int(32)]) else {
+            panic!("rand.str matn qaytarishi kerak");
+        };
+        assert_eq!(s.chars().count(), 32);
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    // Kriptografik manba: ketma-ket ikki token bir xil emas (bashorat qilinmas).
+    // Eski xorshift'da bir nanosekundda ochilgan thread'lar bir xil olardi.
+    #[test]
+    fn tokens_are_unique() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for _ in 0..100 {
+            let Ok(Value::Str(s)) = rand_module("str", vec![Value::Int(24)]) else {
+                panic!("rand.str matn qaytarishi kerak");
+            };
+            assert!(seen.insert(s), "takror token chiqdi — CSPRNG buzildi");
+        }
     }
 }
 

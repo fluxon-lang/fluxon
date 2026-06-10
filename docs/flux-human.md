@@ -890,8 +890,11 @@ math.abs -5            # → 5
 **`rand` — random:**
 ```flux
 rand.int 1 100         # a random integer in the range 1..100
-rand.str 6             # a random string of 6 characters (ideal for short codes)
+rand.str 6             # a random string of 6 characters (codes / tokens)
 ```
+
+`rand` is backed by the OS cryptographic CSPRNG, so `rand.str` is safe for
+session IDs, tokens, and other secrets (its output is not predictable).
 
 **`time` — time and date:**
 ```flux

@@ -896,8 +896,11 @@ math.abs -5            # → 5
 **`rand` — tasodifiy:**
 ```flux
 rand.int 1 100         # 1..100 oralig'ida tasodifiy butun son
-rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod uchun ideal)
+rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod / token uchun)
 ```
+
+`rand` OS kriptografik CSPRNG'idan foydalanadi, shuning uchun `rand.str` ni
+session-ID, token va boshqa sirlar uchun ishlatish xavfsiz (bashorat qilinmaydi).
 
 **`time` — vaqt va sana:**
 ```flux
