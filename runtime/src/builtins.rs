@@ -940,6 +940,11 @@ impl<'a> JsonParser<'a> {
         Ok(Value::List(out))
     }
     fn string(&mut self) -> Result<String, Flow> {
+        // Kesilgan input (masalan `{`) bilan chegaradan o'tib panic bo'lmasin —
+        // ishonchsiz tashqi ma'lumot (HTTP body) crash qildirmasligi shart.
+        if self.i >= self.b.len() {
+            return Err(Flow::err("json: kutilmagan tugash"));
+        }
         if self.b[self.i] != b'"' {
             return Err(Flow::err("json: satr kutilgan"));
         }
@@ -957,6 +962,11 @@ impl<'a> JsonParser<'a> {
                         .map_err(|_| Flow::err("json: satr noto'g'ri UTF-8"));
                 }
                 b'\\' => {
+                    // Satr `\` bilan tugab qolsa (masalan `"ab\`) escape baytini
+                    // o'qishda chegaradan o'tmaylik — aks holda panic.
+                    if self.i >= self.b.len() {
+                        return Err(Flow::err("json: kutilmagan tugash"));
+                    }
                     let e = self.b[self.i];
                     self.i += 1;
                     match e {
@@ -1893,5 +1903,22 @@ mod json_tests {
         assert!(matches!(json_decode("-5"), Ok(Value::Int(-5))));
         assert!(matches!(json_decode("1.5e3"), Ok(Value::Flt(_))));
         assert!(matches!(json_decode("0"), Ok(Value::Int(0))));
+    }
+
+    // Dekoder: kesilgan/buzuq JSON panic emas, xato qaytaradi (issue #87).
+    // Tashqi input (HTTP body) interpreterni yiqitmasligi shart.
+    #[test]
+    fn truncated_json_no_panic() {
+        // satr ochilib tugamasdan kesilgan: `{` -> kalit kutilgan joyda tugash
+        assert!(json_decode("{").is_err());
+        // ochilib yopilmagan satr
+        assert!(json_decode("\"").is_err());
+        assert!(json_decode("\"ab").is_err());
+        // satr `\` bilan tugab qolgan (escape baytini o'qishda chegaradan o'tish)
+        assert!(json_decode("\"ab\\").is_err());
+        // ochilib tugamagan massiv/obyekt ham xato
+        assert!(json_decode("[").is_err());
+        assert!(json_decode("[1,").is_err());
+        assert!(json_decode("{\"k\"").is_err());
     }
 }
