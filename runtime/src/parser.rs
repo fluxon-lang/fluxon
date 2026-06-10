@@ -382,7 +382,19 @@ impl Parser {
             loop {
                 if let Tok::Ident(m) = self.peek().clone() {
                     self.advance();
-                    modifiers.push(m);
+                    // `ref:tbl.col` — FK modifikatori. `ref` dan keyin DARHOL `:`
+                    // kelsa maxsus tarmoq: nishon `tbl.col` ni o'qib bitta
+                    // `ref:tbl.col` modifikator-satri sifatida saqlaymiz (db_mod
+                    // uni FOREIGN KEY ... REFERENCES ga aylantiradi).
+                    if m == "ref" && self.check(&Tok::Colon) {
+                        self.advance(); // :
+                        let target_tbl = self.expect_ident("ref jadval nomi")?;
+                        self.expect(&Tok::Dot, "ref `tbl.col`")?;
+                        let target_col = self.expect_ident("ref ustun nomi")?;
+                        modifiers.push(format!("ref:{target_tbl}.{target_col}"));
+                    } else {
+                        modifiers.push(m);
+                    }
                 } else if self.check(&Tok::Pipe) {
                     self.advance();
                 } else {
@@ -398,7 +410,8 @@ impl Parser {
                     unique: has("uniq"),
                 });
             }
-            // ref:tbl.col kabilarni qator oxirigacha o'tkazib yuboramiz
+            // Tanilmagan qoldiq token'larni (kelajakdagi modifikatorlar) qator
+            // oxirigacha jim o'tkazib yuboramiz — `ref:` yuqorida ushlangan.
             while !self.check(&Tok::Newline) && !self.check(&Tok::Dedent) && !self.check(&Tok::Eof)
             {
                 self.advance();
