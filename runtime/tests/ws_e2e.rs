@@ -20,17 +20,24 @@ use tokio_tungstenite::tungstenite::Message;
 // Berilgan port uchun ws skriptini vaqtinchalik faylga yozib, flux serverini
 // ishga tushiradi. Serverni o'chirish uchun `Child` qaytaradi.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
+    spawn_server_env(port, script, &[])
+}
+
+// `spawn_server` ning env o'zgaruvchilarini beradigan varianti. Env faqat shu
+// subprocess'ga ta'sir qiladi (boshqa testlar bilan poyga yo'q).
+fn spawn_server_env(port: u16, script: &str, env: &[(&str, &str)]) -> (Child, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("flux_ws_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
     f.write_all(script.as_bytes()).expect("temp fx yozish");
     drop(f);
 
     let bin = env!("CARGO_BIN_EXE_flux");
-    let child = Command::new(bin)
-        .arg("run")
-        .arg(&path)
-        .spawn()
-        .expect("flux serverini ishga tushirish");
+    let mut cmd = Command::new(bin);
+    cmd.arg("run").arg(&path);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().expect("flux serverini ishga tushirish");
     (child, path)
 }
 
@@ -53,6 +60,14 @@ async fn next_text<S>(ws: &mut S) -> String
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
+    next_text_within(ws, Duration::from_secs(3)).await
+}
+
+// `next_text` ning kutish muddatini beradigan varianti (sekin handler testi).
+async fn next_text_within<S>(ws: &mut S, dur: Duration) -> String
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     let fut = async {
         loop {
             match ws.next().await {
@@ -63,7 +78,7 @@ where
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(3), fut)
+    tokio::time::timeout(dur, fut)
         .await
         .expect("xabar kutishda timeout")
 }
@@ -280,6 +295,135 @@ async fn cron_run_does_not_block_http_serve() {
         resp.contains("200") || resp.contains("ok"),
         "server javobi: {}",
         resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Server o'zi davriy ping yuboradi — half-open (o'lik) ulanishlarni aniqlash
+// uchun (issue #107). Ping oralig'ini `FLUX_WS_PING_SECS=1` bilan tezlashtiramiz
+// va klient ~1s ichida Ping frame'ini olishini tekshiramiz.
+const PING_SCRIPT: &str = r#"
+use ws
+
+ws.on :connect \conn ->
+  log "ulandi"
+
+ws.serve PORT
+"#;
+
+#[tokio::test]
+async fn server_sends_periodic_ping() {
+    let port = 9315;
+    let script = PING_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (mut ws, _) = connect_async(&url).await.expect("ulanish");
+
+    // ~1s ichida server ping yuborishi kerak. Ping frame klientga ham yetadi
+    // (tokio-tungstenite avtomatik pong qaytaradi, lekin frame'ni ko'rsatadi).
+    let fut = async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Ping(_))) => return,
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => panic!("ws o'qish xatosi: {}", e),
+                None => panic!("ulanish kutilmaganda yopildi"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .expect("server davriy ping yubormadi");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Uzoq handler (ping oralig'idan oshadigan) select loop'ni bloklaganda, o'tkazib
+// yuborilgan ping tick'lari burst bo'lib ulanishni noto'g'ri yopmasligi kerak
+// (MissedTickBehavior::Delay). Handler `time.sleep` bilan bloklaydi — u
+// spawn_blocking'da ishlaydi, ya'ni reader loop'ning await'ini ushlab turadi.
+const SLOW_HANDLER_SCRIPT: &str = r#"
+use ws
+
+ws.on :message \conn msg ->
+  if msg == "slow"
+    time.sleep 2.5
+  ws.send conn "ok:${msg}"
+
+ws.serve PORT
+"#;
+
+#[tokio::test]
+async fn long_handler_does_not_kill_connection() {
+    let port = 9316;
+    let script = SLOW_HANDLER_SCRIPT.replace("PORT", &port.to_string());
+    // Ping oralig'i 1s: 2.5s handler 2 oraliqdan oshadi → burst xavfi.
+    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (mut ws, _) = connect_async(&url).await.expect("ulanish");
+
+    // "slow" — handler 2.5s bloklaydi, keyin javob qaytaradi.
+    ws.send(Message::text("slow")).await.unwrap();
+    let first = next_text_within(&mut ws, Duration::from_secs(6)).await;
+    assert_eq!(first, "ok:slow", "sekin handler javobi kutilgan");
+
+    // Eng muhimi: ulanish hali tirik — burst tick uni yopmadi. Yangi xabar
+    // tezda javob olishi kerak (yopilgan bo'lsa next_text timeout/panic beradi).
+    ws.send(Message::text("again")).await.unwrap();
+    let second = next_text_within(&mut ws, Duration::from_secs(3)).await;
+    assert_eq!(
+        second, "ok:again",
+        "uzoq handler'dan keyin ulanish noto'g'ri yopilgan"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// review P2 post-ping holati: server ping yuborgach (awaiting_pong=true), mijoz
+// hali ping'ni o'qib pong qaytarmasdan turib sekin xabar yuboradi. Handler
+// `fire_handler().await` da bloklagani uchun pong (xabar orqasida navbatda)
+// o'qilmaydi — eski mantiqда keyingi tick sog'lom ulanishni yopardi. Endi xabar
+// o'zi tiriklik isboti, ulanish saqlanadi.
+#[tokio::test]
+async fn slow_handler_with_outstanding_ping_keeps_connection() {
+    let port = 9317;
+    let script = SLOW_HANDLER_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (mut ws, _) = connect_async(&url).await.expect("ulanish");
+
+    // ~1.3s o'qimaymiz: server 1s'da ping yuboradi (awaiting_pong=true), lekin
+    // mijoz ping'ni o'qimagani uchun pong hali qaytmaydi.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    // Ping kutilayotgan holatda sekin xabar (handler 2.5s bloklaydi).
+    ws.send(Message::text("slow")).await.unwrap();
+
+    // Handler tugab server qaror qabul qilguncha (~handler oxiri) O'QIMAYMIZ —
+    // aks holda mijoz ping'ni darhol o'qib pong qaytarib bug'ni yashirardi
+    // (deterministik bo'lishi uchun). Eski mantiqда server shu nuqtada
+    // awaiting_pong=true bilan ulanishni yopadi.
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+
+    let first = next_text_within(&mut ws, Duration::from_secs(3)).await;
+    assert_eq!(first, "ok:slow", "sekin handler javobi kutilgan");
+
+    // Ulanish tirik qolishi kerak — pong navbatda turган bo'lsa ham yopilmagan.
+    ws.send(Message::text("again")).await.unwrap();
+    let second = next_text_within(&mut ws, Duration::from_secs(3)).await;
+    assert_eq!(
+        second, "ok:again",
+        "ping kutilayotganda sekin handler ulanishni noto'g'ri yopdi"
     );
 
     let _ = std::fs::remove_file(&path);

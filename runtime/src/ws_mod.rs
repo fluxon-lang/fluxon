@@ -27,15 +27,30 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::interp::{Flow, Interp};
 use crate::value::Value;
+
+// Yozma kanal bufer hajmi. Chegaralangan: sekin/zararli mijoz (o'qimaydigan)
+// xotirani cheksiz o'stirmasin — bufer to'lsa ulanish uziladi (issue #107).
+const SEND_BUFFER: usize = 256;
+// Davriy ping oralig'i — o'lik (half-open TCP) ulanishlarni aniqlash uchun.
+// Ping yuborilgach keyingi tick'gacha pong kelmasa ulanish o'lik deb yopiladi
+// (ya'ni javobsiz qolish chegarasi ~PING_INTERVAL). `FLUX_WS_PING_SECS` env
+// bilan sozlanadi (ops tuning + integratsion test) — `ping_interval_dur`.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+// reader loop tugagach writer-task'ni kutish muddati. TCP yozma buferi to'lib
+// qotgan mijozda writer cheksiz kutmasligi uchun — muddatdan keyin abort.
+const WRITER_SHUTDOWN: Duration = Duration::from_secs(5);
 
 // Hodisa turi — `ws.on :connect/:message/:disconnect` ro'yxatga oladi.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,17 +71,22 @@ impl Event {
     }
 }
 
-// Bitta ulanishning yozma uchi: writer-task'ga matn uzatadi. None(close) emas —
-// yopish kanal drop bo'lishidan kelib chiqadi.
-type ConnTx = mpsc::UnboundedSender<Message>;
+// Bitta ulanishning server tomonidagi uchi. `tx` — chegaralangan yozma kanal
+// (writer-task shundan o'qib socketga yozadi); `close` — boshqa thread'dan
+// ulanishni majburan uzish signali (bufer to'lganda reader loop'ni uyg'otadi).
+// Yopish odatda kanal drop bo'lishidan kelib chiqadi; `close` esa zudlik bilan.
+struct Conn {
+    tx: mpsc::Sender<Message>,
+    close: Arc<Notify>,
+}
 
 // WS battery holati — jarayonga bitta (Interp ichida Arc). http `routes` kabi
 // top-level kod to'ldiradi (`ws.on`), server thread'lari o'qiydi/yozadi.
 pub struct WsState {
     // event -> handler (Value::Fn). `ws.on` to'ldiradi, serve loop o'qiydi.
     handlers: Mutex<HashMap<Event, Value>>,
-    // conn id -> yozma kanal. Ulanish ochilganda qo'shiladi, yopilganda o'chadi.
-    conns: Mutex<HashMap<String, ConnTx>>,
+    // conn id -> ulanish uchi. Ulanish ochilganda qo'shiladi, yopilganda o'chadi.
+    conns: Mutex<HashMap<String, Conn>>,
     // xona nomi -> a'zo conn id'lar. `ws.room.*` boshqaradi.
     rooms: Mutex<HashMap<String, HashSet<String>>>,
     // conn id -> per-ulanish sessiya map'i (`ws.data.set/get`).
@@ -103,10 +123,15 @@ impl WsState {
     }
 
     // Bitta conn id'ga matn yuborish. Kanal yopiq/topilmasa — jimgina e'tiborsiz
-    // (ulanish allaqachon uzilgan bo'lishi mumkin).
+    // (ulanish allaqachon uzilgan bo'lishi mumkin). Bufer to'lib qolsa (mijoz
+    // o'qimayapti) ulanishni uzishga signal beramiz — xotira cheksiz o'smasin.
     fn send_to(&self, id: &str, text: String) {
-        if let Some(tx) = self.conns.lock().get(id) {
-            let _ = tx.send(Message::text(text));
+        if let Some(conn) = self.conns.lock().get(id) {
+            match conn.tx.try_send(Message::text(text)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => conn.close.notify_one(),
+                Err(TrySendError::Closed(_)) => {}
+            }
         }
     }
 }
@@ -315,6 +340,19 @@ impl Interp {
     }
 }
 
+// Ping oralig'ini aniqlaydi: standart PING_INTERVAL, `FLUX_WS_PING_SECS` env
+// (musbat butun son, sekund) bilan override qilinadi. Noto'g'ri/0 qiymat —
+// standart. Test va deploy sozlash uchun.
+fn ping_interval_dur() -> Duration {
+    match std::env::var("FLUX_WS_PING_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(n) if n > 0 => Duration::from_secs(n),
+        _ => PING_INTERVAL,
+    }
+}
+
 // WS port'ni bind qiladi. Bind xatosini `Flow::Error` sifatida qaytaradi —
 // http_mod::bind bilan bir xil (issue #108: bind muvaffaqiyatsizligi exit code
 // ≠ 0 bilan tugashi kerak).
@@ -363,9 +401,18 @@ async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
     let id = interp.ws.alloc_id();
     let (mut writer, mut reader) = ws_stream.split();
 
-    // Yozma kanal: ws.send/room.send shu yerga itaradi, writer-task socketga yozadi.
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-    interp.ws.conns.lock().insert(id.clone(), tx);
+    // Yozma kanal (chegaralangan): ws.send/room.send shu yerga itaradi,
+    // writer-task socketga yozadi. ping_tx — davriy ping uchun nusxa.
+    let (tx, mut rx) = mpsc::channel::<Message>(SEND_BUFFER);
+    let close = Arc::new(Notify::new());
+    let ping_tx = tx.clone();
+    interp.ws.conns.lock().insert(
+        id.clone(),
+        Conn {
+            tx,
+            close: close.clone(),
+        },
+    );
 
     // Writer-task: kanaldan kelgan har xabarni socketga ketma-ket yozadi.
     let writer_task = tokio::spawn(async move {
@@ -380,28 +427,76 @@ async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
     // :connect handler.
     fire_handler(&interp, Event::Connect, &id, None).await;
 
-    // Xabar loop: har matn xabari uchun :message handler.
-    while let Some(item) = reader.next().await {
-        match item {
-            Ok(Message::Text(t)) => {
-                fire_handler(&interp, Event::Message, &id, Some(t.to_string())).await;
+    // Davriy ping: birinchi tick oraliqdan keyin (darhol emas).
+    let ping_dur = ping_interval_dur();
+    let mut ping_interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + ping_dur, ping_dur);
+    // Uzoq handler (select loop'ni bloklab turadigan) ping oralig'idan oshsa,
+    // standart Burst xulqi o'tkazib yuborilgan tick'larni ketma-ket beradi:
+    // birinchisi ping yuborib awaiting_pong=true qiladi, keyingisi darhol
+    // "javobsiz" deb yopib yuborardi. Delay — har tick orasida to'liq oraliqni
+    // kafolatlaydi, ya'ni ping va o'lik-tekshiruv orasida mijozga javob vaqti.
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Oldingi ping'ga pong kutilyaptimi: yana tick kelganda hali true bo'lsa,
+    // mijoz javob bermadi — ulanish o'lik (half-open) deb yopiladi.
+    let mut awaiting_pong = false;
+
+    // Xabar loop: socket o'qish, davriy ping va uzish signalini birga kutamiz.
+    loop {
+        tokio::select! {
+            item = reader.next() => {
+                match item {
+                    Some(Ok(msg)) => {
+                        // Har qanday kelgan kadr ulanish tirikligini isbotlaydi —
+                        // pong shart emas. Uzoq handler `fire_handler().await` da
+                        // bloklab, mijoz pong'ini vaqtida o'qitmasligi mumkin
+                        // (pong xabar orqasida navbatda turadi); shu sabab kutish
+                        // bayrog'ini har kadrda tozalaymiz (review P2).
+                        awaiting_pong = false;
+                        match msg {
+                            Message::Text(t) => {
+                                fire_handler(&interp, Event::Message, &id, Some(t.to_string()))
+                                    .await;
+                            }
+                            Message::Binary(b) => {
+                                // Binary'ni lossy matn sifatida uzatamiz (Flux str-markazli).
+                                let t = String::from_utf8_lossy(&b).to_string();
+                                fire_handler(&interp, Event::Message, &id, Some(t)).await;
+                            }
+                            Message::Close(_) => break,
+                            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                        }
+                    }
+                    Some(Err(_)) | None => break, // ulanish uzildi
+                }
             }
-            Ok(Message::Binary(b)) => {
-                // Binary'ni lossy matn sifatida uzatamiz (Flux str-markazli).
-                let t = String::from_utf8_lossy(&b).to_string();
-                fire_handler(&interp, Event::Message, &id, Some(t)).await;
+            _ = ping_interval.tick() => {
+                if awaiting_pong {
+                    break; // oldingi ping'ga javob (pong yoki har qanday kadr) kelmadi
+                }
+                awaiting_pong = true;
+                // Kanal to'la/yopiq bo'lsa yozolmaymiz — uzamiz.
+                if ping_tx.try_send(Message::Ping(Vec::new())).is_err() {
+                    break;
+                }
             }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
-            Err(_) => break, // ulanish uzildi
+            _ = close.notified() => break, // sekin mijoz: bufer to'ldi — uzamiz
         }
     }
 
     // :disconnect handler — keyin ro'yxatdan o'chiramiz.
     fire_handler(&interp, Event::Disconnect, &id, None).await;
     interp.ws.remove_conn(&id);
-    // Kanal drop bo'lgach writer-task tugaydi; kutib olamiz.
-    let _ = writer_task.await;
+    drop(ping_tx); // qolgan sender — kanal yopilsin (writer-task tugaydi)
+    // Sekin mijozda (TCP yozma buferi to'la) writer cheksiz qotmasligi uchun
+    // qisqa kutamiz, so'ng majburan to'xtatamiz.
+    let abort = writer_task.abort_handle();
+    if tokio::time::timeout(WRITER_SHUTDOWN, writer_task)
+        .await
+        .is_err()
+    {
+        abort.abort();
+    }
 }
 
 // Hodisa handler'ini chaqiradi (ro'yxatga olingan bo'lsa). Sinxron interp
@@ -432,5 +527,108 @@ fn flow_msg(flow: &Flow) -> String {
         Flow::Fail { message, .. } => message.clone(),
         Flow::Error(e) => e.clone(),
         _ => "skip/stop/return".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // issue #107: bounded kanal to'lganda send_to ulanishni uzishga signal
+    // beradi (sekin/zararli mijoz xotirani cheksiz o'stirmasin).
+    #[tokio::test]
+    async fn send_to_bufer_tolsa_uzadi() {
+        let state = WsState::new();
+        // Sig'imi 1: 1-xabar buferga sig'adi, 2-chisi to'ldiradi → close signal.
+        let (tx, _rx) = mpsc::channel::<Message>(1);
+        let close = Arc::new(Notify::new());
+        state.conns.lock().insert(
+            "c1".to_string(),
+            Conn {
+                tx,
+                close: close.clone(),
+            },
+        );
+
+        state.send_to("c1", "a".to_string()); // buferga sig'adi
+        state.send_to("c1", "b".to_string()); // bufer to'la → notify
+
+        // close zudlik bilan signal berilgan bo'lishi kerak.
+        tokio::time::timeout(Duration::from_millis(500), close.notified())
+            .await
+            .expect("bufer to'lganda close signali kutilgan edi");
+    }
+
+    // remove_conn kanal, sessiya holati va xona a'zoligini tozalaydi
+    // (o'lik ulanish yozuvlari abadiy qolmasin).
+    #[test]
+    fn remove_conn_hammasini_tozalaydi() {
+        let state = WsState::new();
+        let (tx, _rx) = mpsc::channel::<Message>(SEND_BUFFER);
+        let close = Arc::new(Notify::new());
+        state
+            .conns
+            .lock()
+            .insert("c1".to_string(), Conn { tx, close });
+        state
+            .rooms
+            .lock()
+            .entry("xona".to_string())
+            .or_default()
+            .insert("c1".to_string());
+        state
+            .data
+            .lock()
+            .entry("c1".to_string())
+            .or_default()
+            .insert("k".to_string(), Value::Int(1));
+
+        state.remove_conn("c1");
+
+        assert!(state.conns.lock().is_empty(), "conns tozalanmadi");
+        assert!(state.rooms.lock().is_empty(), "bo'sh xona o'chmadi");
+        assert!(state.data.lock().is_empty(), "sessiya tozalanmadi");
+    }
+
+    // To'liq oqim: haqiqiy server + mijoz. Echo handler xabarni qaytaradi
+    // (refaktor qilingan select-loop xabarni boshqaradi), so'ng mijoz uzilganda
+    // server conn'ni tozalaydi.
+    #[tokio::test]
+    async fn echo_va_uzilishda_tozalash() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+
+        // :message echo handler'ini ro'yxatga olamiz.
+        let src = "ws.on :message \\conn msg -> ws.send conn msg\n";
+        let toks = crate::lexer::lex(src).unwrap();
+        let prog = crate::parser::parse(toks).unwrap();
+        let interp = Interp::new_arc();
+        interp.run(&prog).unwrap();
+
+        // Ephemeral portda server ko'taramiz.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = interp.clone();
+        tokio::spawn(async move { serve_loop(srv, listener).await });
+
+        // Haqiqiy mijoz ulanadi va xabar yuboradi.
+        let url = format!("ws://127.0.0.1:{}/", port);
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        ws.send(Message::text("salom")).await.unwrap();
+        let reply = ws.next().await.unwrap().unwrap();
+        assert_eq!(reply.to_text().unwrap(), "salom");
+        assert_eq!(interp.ws.conns.lock().len(), 1, "ulanish ro'yxatda yo'q");
+
+        // Mijoz uzadi → server :disconnect + remove_conn (async) bajaradi.
+        ws.close(None).await.unwrap();
+        for _ in 0..100 {
+            if interp.ws.conns.lock().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            interp.ws.conns.lock().is_empty(),
+            "uzilgandan keyin conn tozalanmadi"
+        );
     }
 }
