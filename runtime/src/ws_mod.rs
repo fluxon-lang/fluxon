@@ -315,16 +315,20 @@ impl Interp {
     }
 }
 
-// Bitta WS server uchun accept loop — umumiy event-loop ichida spawn qilinadi.
-pub async fn serve_loop(interp: Arc<Interp>, port: u16) {
+// WS port'ni bind qiladi. Bind xatosini `Flow::Error` sifatida qaytaradi —
+// http_mod::bind bilan bir xil (issue #108: bind muvaffaqiyatsizligi exit code
+// ≠ 0 bilan tugashi kerak).
+pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Flux WS port {} bind xatosi: {}", port, e);
-            return;
-        }
-    };
+    TcpListener::bind(addr)
+        .await
+        .map_err(|e| Flow::err(format!("Flux WS port {} bind xatosi: {}", port, e)))
+}
+
+// Bitta WS server uchun accept loop — umumiy event-loop ichida spawn qilinadi.
+// Listener oldindan `bind` bilan ochilgan.
+pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener) {
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
     eprintln!("Flux WS server: ws://localhost:{}", port);
 
     loop {

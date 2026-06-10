@@ -68,21 +68,32 @@ pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
         .build()
         .map_err(|e| Flow::err(format!("tokio runtime: {}", e)))?;
 
+    // Portlarni AVVAL bind qilamiz (accept loop'ni spawn qilishdan oldin). Port
+    // band bo'lsa bind xato qaytaradi → butun `run_pending` `Err` bilan chiqadi →
+    // jarayon exit code ≠ 0 (issue #108: deploy/supervisor jim muvaffaqiyatga
+    // aldanmasin). Bind upfront bo'lgani uchun xato deterministik chiqadi —
+    // accept loop'lar cheksiz bo'lib, hech qachon tugamasligini hisobga olib,
+    // ularning `await`'iga tayanib bo'lmaydi.
     rt.block_on(async move {
         let mut handles = Vec::new();
         for srv in servers {
             let interp = interp.clone();
-            let h = match srv {
+            match srv {
                 PendingServer::Http { port } => {
-                    tokio::spawn(async move { crate::http_mod::serve_loop(interp, port).await })
+                    let listener = crate::http_mod::bind(port).await?;
+                    handles.push(tokio::spawn(async move {
+                        crate::http_mod::serve_loop(interp, listener).await
+                    }));
                 }
                 PendingServer::Ws { port } => {
-                    tokio::spawn(async move { crate::ws_mod::serve_loop(interp, port).await })
+                    let listener = crate::ws_mod::bind(port).await?;
+                    handles.push(tokio::spawn(async move {
+                        crate::ws_mod::serve_loop(interp, listener).await
+                    }));
                 }
                 // Cron yuqorida filtrlangan — bu yerga yetib kelmaydi.
                 PendingServer::Cron => continue,
-            };
-            handles.push(h);
+            }
         }
         // Har bir serve_loop cheksiz (accept loop). Hammasini kutib turamiz —
         // amalda hech biri tugamaydi, jarayon shu yerda bloklanib qoladi.
@@ -90,6 +101,35 @@ pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
         for h in handles {
             let _ = h.await;
         }
-    });
+        Ok::<(), Flow>(())
+    })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn band_port_run_pending_err() {
+        // Bind xatosi `run_pending` dan `Err(Flow::Error)` bo'lib ko'tariladi
+        // (issue #108) — jim `Ok(())` emas. Bu interp.rs'da exit code ≠ 0 ga
+        // aylanadi (deploy/supervisor xatoni sezsin). Portni std listener bilan
+        // egallaymiz, so'ng o'sha portni kutilayotgan Http server qilib qo'yamiz.
+        let occupied = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = occupied.local_addr().unwrap().port();
+
+        let interp = crate::interp::Interp::new_arc();
+        interp
+            .pending_servers
+            .lock()
+            .unwrap()
+            .push(PendingServer::Http { port });
+
+        let res = run_pending(&interp);
+        assert!(
+            matches!(res, Err(Flow::Error(_))),
+            "band port → Err(Flow::Error) kutilgan, oldingi jim Ok emas"
+        );
+    }
 }
