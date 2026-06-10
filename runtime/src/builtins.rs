@@ -787,7 +787,15 @@ fn json_encode_map(m: &std::collections::BTreeMap<String, Value>) -> String {
 pub fn json_encode(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
-        Value::Flt(x) => x.to_string(),
+        // JSON'da Infinity/NaN yo'q — JSON.stringify kabi `null` chiqaramiz
+        // (aks holda "inf"/"NaN" qat'iy parserlarda rad etiladi).
+        Value::Flt(x) => {
+            if x.is_finite() {
+                x.to_string()
+            } else {
+                "null".into()
+            }
+        }
         Value::Bool(b) => b.to_string(),
         Value::Nil => "null".into(),
         Value::Str(s) | Value::Sym(s) => json_str(s),
@@ -811,6 +819,13 @@ fn json_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            // Qolgan control belgilar (0x00–0x1F) JSON spec'da xom kelolmaydi —
+            // \u00XX shaklida escape qilamiz (aks holda chiqish invalid JSON).
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
             _ => out.push(c),
         }
     }
@@ -827,6 +842,11 @@ pub fn json_decode(s: &str) -> R {
     p.skip_ws();
     let v = p.value()?;
     p.skip_ws();
+    // Qiymatdan keyin chiqindi qolmasligi kerak — `"1 garbage"` endi xato beradi
+    // (avval jim `1` qaytarardi).
+    if p.i < p.b.len() {
+        return Err(Flow::err("json: qiymatdan keyin ortiqcha matn"));
+    }
     Ok(v)
 }
 
@@ -850,9 +870,14 @@ impl<'a> JsonParser<'a> {
             b'[' => self.array(),
             b'"' => Ok(Value::Str(self.string()?)),
             b't' | b'f' => self.boolean(),
+            // `null`ni harf-baharf tekshiramiz — avval `nqqq` ham jim nil berardi.
             b'n' => {
-                self.i += 4;
-                Ok(Value::Nil)
+                if self.b[self.i..].starts_with(b"null") {
+                    self.i += 4;
+                    Ok(Value::Nil)
+                } else {
+                    Err(Flow::err("json: noto'g'ri qiymat (null kutilgan)"))
+                }
             }
             _ => self.number(),
         }
@@ -1001,18 +1026,48 @@ impl<'a> JsonParser<'a> {
             Err(Flow::err("json: noto'g'ri bool"))
         }
     }
+    // JSON son grammatikasini qat'iy tutamiz: [-] int [frac] [exp].
+    // Avvalgi versiya `+5`, `1.2.3` kabi yaroqsiz sonlarni yutardi.
     fn number(&mut self) -> R {
         let start = self.i;
         let mut is_float = false;
-        while self.i < self.b.len() {
-            let c = self.b[self.i];
-            if c.is_ascii_digit() || c == b'-' || c == b'+' {
+        // ixtiyoriy manfiy belgi — JSON faqat '-' ruxsat beradi ('+' emas)
+        if self.b.get(self.i) == Some(&b'-') {
+            self.i += 1;
+        }
+        // butun qism: '0' yoki 1-9 dan boshlanuvchi raqamlar
+        match self.b.get(self.i) {
+            Some(b'0') => self.i += 1,
+            Some(c) if c.is_ascii_digit() => {
+                while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+                    self.i += 1;
+                }
+            }
+            _ => return Err(Flow::err("json: noto'g'ri son")),
+        }
+        // kasr qismi: '.' dan keyin kamida bitta raqam
+        if self.b.get(self.i) == Some(&b'.') {
+            is_float = true;
+            self.i += 1;
+            if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+                return Err(Flow::err("json: noto'g'ri son"));
+            }
+            while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
                 self.i += 1;
-            } else if c == b'.' || c == b'e' || c == b'E' {
-                is_float = true;
+            }
+        }
+        // eksponent: e/E [+/-] kamida bitta raqam
+        if matches!(self.b.get(self.i), Some(b'e') | Some(b'E')) {
+            is_float = true;
+            self.i += 1;
+            if matches!(self.b.get(self.i), Some(b'+') | Some(b'-')) {
                 self.i += 1;
-            } else {
-                break;
+            }
+            if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+                return Err(Flow::err("json: noto'g'ri son"));
+            }
+            while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+                self.i += 1;
             }
         }
         let text = std::str::from_utf8(&self.b[start..self.i]).unwrap_or("");
@@ -1772,5 +1827,71 @@ mod sh_tests {
     #[test]
     fn sh_is_module() {
         assert!(is_module("sh"));
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    // Control belgilar (0x00–0x1F) \u00XX shaklida escape bo'lishi kerak —
+    // issue #102: avval 0x08 kabilar xom chiqib invalid JSON berardi.
+    #[test]
+    fn control_chars_escaped() {
+        let s = Value::Str("a\u{08}b\u{01}c".into());
+        // 0x08 -> \b (qisqa shakl), 0x01 -> umumiy \u escape 
+        assert_eq!(json_encode(&s), "\"a\\bb\\u0001c\"");
+    }
+
+    // \f va \b qisqa shaklda; round-trip dekoder bilan ishlashi kerak.
+    #[test]
+    fn backspace_formfeed_roundtrip() {
+        let s = Value::Str("x\u{0C}y\u{08}z".into());
+        let enc = json_encode(&s);
+        assert_eq!(enc, "\"x\\fy\\bz\"");
+        match json_decode(&enc) {
+            Ok(Value::Str(out)) => assert_eq!(out, "x\u{0C}y\u{08}z"),
+            other => panic!("round-trip buzildi: {:?}", other.is_ok()),
+        }
+    }
+
+    // Infinity/NaN -> null (JSON.stringify xulqi), "inf"/"NaN" emas.
+    #[test]
+    fn non_finite_floats_become_null() {
+        assert_eq!(json_encode(&Value::Flt(f64::INFINITY)), "null");
+        assert_eq!(json_encode(&Value::Flt(f64::NEG_INFINITY)), "null");
+        assert_eq!(json_encode(&Value::Flt(f64::NAN)), "null");
+        // oddiy float o'zgarishsiz qoladi
+        assert_eq!(json_encode(&Value::Flt(1.5)), "1.5");
+    }
+
+    // Dekoder: qiymatdan keyin chiqindi xato beradi (avval jim qabul qilinardi).
+    #[test]
+    fn trailing_garbage_rejected() {
+        assert!(json_decode("1 garbage").is_err());
+        assert!(json_decode("{} extra").is_err());
+        // bo'sh joy bilan tugagan to'g'ri JSON esa qabul qilinadi
+        assert!(matches!(json_decode("1  \n"), Ok(Value::Int(1))));
+    }
+
+    // Dekoder: noto'g'ri `null`-o'xshash matn xato beradi (avval nil berardi).
+    #[test]
+    fn invalid_null_rejected() {
+        assert!(json_decode("nqqq").is_err());
+        assert!(matches!(json_decode("null"), Ok(Value::Nil)));
+    }
+
+    // Dekoder: yaroqsiz sonlar rad etiladi (boshida '+', ikkita nuqta...).
+    #[test]
+    fn strict_number_grammar() {
+        assert!(json_decode("+5").is_err());
+        assert!(json_decode("1.2.3").is_err());
+        assert!(json_decode("01").is_err());
+        assert!(json_decode("1.").is_err());
+        assert!(json_decode("1e").is_err());
+        // to'g'ri sonlar ishlaydi
+        assert!(matches!(json_decode("-5"), Ok(Value::Int(-5))));
+        assert!(matches!(json_decode("1.5e3"), Ok(Value::Flt(_))));
+        assert!(matches!(json_decode("0"), Ok(Value::Int(0))));
     }
 }
