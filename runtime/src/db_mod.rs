@@ -1495,19 +1495,58 @@ fn param_to_sqlval(v: &Value) -> Result<SqlVal, Flow> {
     })
 }
 
-// SQL'dan asosiy jadval nomini ajratadi: lowercase ` from ` dan keyingi
-// identifikator. Join/alias'da cheklov — eng keng tarqalgan `from <table>` holati
-// uchun sym/json konversiya ishlaydi.
+// SQL'dan asosiy jadval nomini ajratadi: ` from ` dan keyingi identifikator.
+// Join/alias'da cheklov — eng keng tarqalgan `from <table>` holati uchun sym/json
+// konversiya ishlaydi.
+//
+// Qidiruv `char`lar ustida bevosita asl `sql` da olib boriladi: `to_lowercase()`
+// ba'zi belgilarda bayt uzunligini o'zgartiradi (masalan `İ` U+0130 → `i̇`),
+// shu sababli lowercase'dan olingan bayt-indeksni asl matnga qo'llash char-chegara
+// panikiga olib keladi (issue #88). Bundan tashqari satr-literal (`'...'`) ichidagi
+// ` from ` e'tiborsiz qoldiriladi — aks holda noto'g'ri jadval nomi olinadi.
 fn extract_from_table(sql: &str) -> Option<String> {
-    let lower = sql.to_lowercase();
-    let pos = lower.find(" from ")?;
-    let after = &sql[pos + 6..];
-    let tok: String = after
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-    if tok.is_empty() { None } else { Some(tok) }
+    let chars: Vec<char> = sql.chars().collect();
+    let n = chars.len();
+    let mut in_str = false; // `'` bilan ochilgan SQL satr-literal ichidamizmi
+    let mut i = 0;
+    // i+5 — ` from ` ning oxirgi bo'shlig'i; shu indeksgача mavjud bo'lishi shart.
+    while i + 5 < n {
+        let c = chars[i];
+        if in_str {
+            // `''` (literal ichida ikkilangan apostrof) bu yerda ham to'g'ri kuzatiladi:
+            // birinchi `'` literalni yopadi, keyingisi qaytadan ochadi.
+            if c == '\'' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '\'' {
+            in_str = true;
+            i += 1;
+            continue;
+        }
+        // <bo'shliq> f r o m <bo'shliq> — katta-kichik harfga sezgir emas.
+        if c.is_whitespace()
+            && chars[i + 1].eq_ignore_ascii_case(&'f')
+            && chars[i + 2].eq_ignore_ascii_case(&'r')
+            && chars[i + 3].eq_ignore_ascii_case(&'o')
+            && chars[i + 4].eq_ignore_ascii_case(&'m')
+            && chars[i + 5].is_whitespace()
+        {
+            let tok: String = chars[i + 6..]
+                .iter()
+                .copied()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !tok.is_empty() {
+                return Some(tok);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 // ==================== deklarativ o'qish builder'i (issue #78) ====================
@@ -1858,5 +1897,46 @@ mod tests {
         assert_ne!(u, i);
         assert!(u.starts_with("uniq_"));
         assert!(i.starts_with("idx_"));
+    }
+
+    #[test]
+    fn extract_from_table_basic() {
+        // Oddiy holatlar: katta-kichik harf va keyingi bandlar (where) ajraladi.
+        assert_eq!(
+            extract_from_table("select * from users"),
+            Some("users".to_string())
+        );
+        assert_eq!(
+            extract_from_table("SELECT id FROM Bookings WHERE id = 1"),
+            Some("Bookings".to_string())
+        );
+        assert_eq!(extract_from_table("select 1"), None);
+    }
+
+    #[test]
+    fn extract_from_table_unicode_no_panic() {
+        // Issue #88: lowercase'da bayt uzunligini o'zgartiruvchi belgilar
+        // (masalan `İ` U+0130) char-chegara panikiga olib kelmasligi kerak.
+        assert_eq!(
+            extract_from_table("select İİ from té"),
+            Some("té".to_string())
+        );
+        // Jadval nomidan oldin ham Unicode bo'lsa panik bo'lmasin.
+        assert_eq!(
+            extract_from_table("select * from naïve_таблица"),
+            Some("naïve_таблица".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_from_table_ignores_string_literal() {
+        // Issue #88 qo'shimcha: satr-literal (`'...'`) ichidagi ` from ` jadval
+        // nomi deb olinmasligi kerak — haqiqiy FROM bandidagi nom topiladi.
+        assert_eq!(
+            extract_from_table("select * from posts where body like '% from secret %'"),
+            Some("posts".to_string())
+        );
+        // Literal ichida ` from ` bo'lsa-yu, undan tashqarida FROM bo'lmasa — None.
+        assert_eq!(extract_from_table("select '% from x %'"), None);
     }
 }
