@@ -593,8 +593,20 @@ fn sqlite_rebuild_table(
     let result = (|| -> Result<(), String> {
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| sql_err("BEGIN", e))?;
-        // 1. Xavfsizlik backup'i (DROP'dan oldin — agent xatosiga himoya).
-        run_exec(conn, &build_backup(table, ts), &[])?;
+        // 1. Xavfsizlik backup'i (DROP'dan oldin — agent xatosiga himoya). Rebuild
+        //    uchun ALOHIDA nom (`_fk` suffiks): bir migration ichida DROP COLUMN
+        //    ham backup yaratgan bo'lishi mumkin (`build_backup` bir xil `ts` bilan)
+        //    — nom to'qnashuvini oldini olamiz.
+        let bak = format!("_flux_bak_{table}_{ts}_fk");
+        run_exec(
+            conn,
+            &format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                q_ident(&bak),
+                q_ident(table)
+            ),
+            &[],
+        )?;
         // 2. Yangi jadval vaqtinchalik nom bilan (to'liq desired sxema + FK).
         run_exec(conn, &build_create_table_sql(&tmp, cols), &[])?;
         // 3. Umumiy ustunlarni ko'chir (bo'sh bo'lsa ham INSERT ... SELECT xavfsiz).

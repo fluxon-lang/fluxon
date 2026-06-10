@@ -1375,6 +1375,56 @@ db.ins "posts" {owner:404 title:"yetim"}
     }
 
     #[test]
+    fn migrate_drop_column_and_add_fk_same_deploy() {
+        // Codex revyu: bitta migration ham ustun DROP qilsa, ham mavjud ustunga
+        // ref qo'shsa — DROP COLUMN backup'i (`_flux_bak_<t>_<ts>`) bilan rebuild
+        // backup'i NOM TO'QNASHMASLIGI kerak (rebuild `_fk` suffiks ishlatadi).
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_drop_and_fk.db");
+
+        // Deploy 1: `old` ustuni bor, ref yo'q.
+        run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int
+  title str
+  old   str
+db.ins "users" {name:"a"}
+db.ins "posts" {owner:1 title:"x" old:"eski"}
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy1 drop+fk: {}", e));
+
+        // Deploy 2: `old` DROP + `owner` ga ref qo'shish (bitta migration).
+        run_source(
+            r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int ref:users.id
+  title str
+n = db.q "select count(*) c from posts"
+(n.0.c == 1) | (fail "ma'lumot saqlanishi kerak (1 qator)")
+fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
+(fk.0.c == 1) | (fail "FK qo'shilishi kerak")
+cols = db.q "select count(*) c from pragma_table_info('posts')"
+(cols.0.c == 3) | (fail "old ustun DROP bo'lib 3 ustun qolishi kerak")
+"#,
+        )
+        .unwrap_or_else(|e| panic!("deploy2 drop+fk (backup to'qnashuvi?): {}", e));
+
+        cleanup_db(&path);
+    }
+
+    #[test]
     fn migrate_fk_rebuild_aborts_on_orphan_data() {
         // Mavjud ma'lumotda yetim qator bo'lsa, FK qo'shish rebuild'i JIM yo'qotmaydi
         // — aniq xato beradi va ROLLBACK orqali ma'lumot butun qoladi.
