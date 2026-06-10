@@ -1231,6 +1231,80 @@ db.ins "users" {email:"a@x.uz"}
     }
 
     #[test]
+    fn migrate_multi_column_uniq_constraint() {
+        // Issue #94: `uniq(a, b)` (vergulli) ko'p-ustunli UNIQUE cheklov yaratadi —
+        // soxta "uniq" ustun EMAS. Dublikat (a,b) juftligi xato beradi.
+        with_db_test("multi_uniq", || {
+            // 1. Soxta `uniq` ustun yo'qligi: jadvalda faqat a, b bo'lishi kerak.
+            run(r#"
+use db
+tbl t
+  a str
+  b str
+  uniq(a, b)
+n = (db.q "select count(*) c from pragma_table_info('t')").0.c
+(n == 2) | (fail "jadvalda faqat 2 ustun (a, b) bo'lishi kerak — soxta uniq yo'q")
+ui = db.q "select name from sqlite_master where type='index' and name='uniq_t_a_b'"
+(ui.len == 1) | (fail "uniq_t_a_b unikal index yaratilishi kerak")
+db.ins "t" {a:"x" b:"y"}
+"#);
+
+            // 2. Dublikat (a, b) juftligi UNIQUE cheklovni buzadi. Ikkala insert
+            //    bir manbada — shared-memory db run'lar orasida yo'qolmasin.
+            let dup = run_source(
+                r#"
+use db
+tbl t
+  a str
+  b str
+  uniq(a, b)
+db.ins "t" {a:"x" b:"y"}
+db.ins "t" {a:"x" b:"y"}
+"#,
+            );
+            assert!(dup.is_err(), "dublikat (a, b) uniq xato berishi kerak");
+        });
+    }
+
+    #[test]
+    fn fk_ref_modifier_enforced() {
+        // Issue #94 (bog'liq): `ref:tbl.col` FK modifikatori endi enforce qilinadi —
+        // mavjud bo'lmagan ota qatorga ishora qilgan insert xato beradi.
+        with_db_test("fk_ref", || {
+            // Yaroqli FK: ota qator mavjud — insert o'tadi.
+            run(r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int ref:users.id
+  title str
+db.ins "users" {name:"ali"}
+p = db.ins "posts" {owner:1 title:"salom"}
+(p.id == 1) | (fail "yaroqli FK insert o'tishi kerak")
+"#);
+
+            // Yetim FK: owner=999 mavjud emas -> FOREIGN KEY constraint failed.
+            let orphan = run_source(
+                r#"
+use db
+tbl users
+  id   serial pk
+  name str
+tbl posts
+  id    serial pk
+  owner int ref:users.id
+  title str
+db.ins "posts" {owner:999 title:"yetim"}
+"#,
+            );
+            assert!(orphan.is_err(), "yetim FK insert xato berishi kerak");
+        });
+    }
+
+    #[test]
     fn db_tx_commit_returns_value() {
         with_db_test("tx_commit", || {
             run(r#"

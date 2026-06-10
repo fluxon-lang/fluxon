@@ -519,7 +519,23 @@ fn sqlite_column_def(c: &ColDef) -> String {
     if c.type_name == "now" {
         def.push_str(" DEFAULT CURRENT_TIMESTAMP");
     }
+    // `ref:tbl.col` -> ustun darajasida REFERENCES (FOREIGN KEY). `PRAGMA
+    // foreign_keys=ON` har ulanishda yoqilgan (checkout), shu sabab cheklov
+    // ins/up'da enforce qilinadi. Ustun NULL'ga ruxsat berilgan (NOT NULL
+    // emas), shu sabab ALTER TABLE ADD COLUMN ham REFERENCES bilan ishlaydi.
+    if let Some((tbl, col)) = column_ref_target(&c.modifiers) {
+        def.push_str(&format!(" REFERENCES {}({})", q_ident(tbl), q_ident(col)));
+    }
     def
+}
+
+// `ref:tbl.col` modifikatoridan FK nishonini (jadval, ustun) ajratadi. Topilmasa
+// None. Birinchi `ref:` modifikatori ishlatiladi (ustun bitta FK ga ega bo'ladi).
+fn column_ref_target(modifiers: &[String]) -> Option<(&str, &str)> {
+    modifiers
+        .iter()
+        .find_map(|m| m.strip_prefix("ref:"))
+        .and_then(|t| t.split_once('.'))
 }
 
 // FNV-1a 32-bit hash — DETERMINISTIK (Rust versiyalari/platformalar orasida

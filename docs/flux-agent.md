@@ -238,6 +238,8 @@ tbl products
 Types: serial int flt str bool json now sym money (`int` 64-bit). Modifiers:
 `pk uniq null index ref:tbl.col`. Multi-column: `index(a b)`, `uniq(a b)`.
 Index names are automatic (`idx_<tbl>_<cols>` / `uniq_<tbl>_<cols>`).
+`ref:tbl.col` → enforced FOREIGN KEY (`PRAGMA foreign_keys=ON`); inserting a
+child row whose parent is missing fails.
 
 `tbl` is the single source of truth — auto-migration diffs it against the DB:
 new column → `ADD COLUMN`, removed column → `DROP COLUMN` (backed up first),
