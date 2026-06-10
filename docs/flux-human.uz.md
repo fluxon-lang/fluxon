@@ -280,7 +280,7 @@ double (add 2 3)   # avval add 2 3 = 5, keyin double 5 = 10
 argument bilan aniqlangani uchun, parametri yo'q funksiyani chaqirishning yagona
 yo'li shu. Bu nom (qiymat) bilan chaqiruvni aniq ajratadi:
 ```flux
-fn new_id -> rand.str 8
+fn new_id -> rand.str 24
 new_id()           # CHAQIRUV → har safar yangi tasodifiy id
 new_id             # CHAQIRMAYDI → funksiya QIYMATI (callback/reg uchun)
 ```
@@ -901,7 +901,10 @@ rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod uchun ideal)
 
 > `rand` OS CSPRNG'dan (operatsion tizim entropiyasi) o'qiydi, shuning uchun
 > `rand.str` token/session-ID generatsiya uchun ham xavfsiz — qiymat bashorat
-> qilinmaydi.
+> qilinmaydi. Xavfsizlikka bog'liq tokenlar uchun (session ID, API kalit,
+> parol tiklash havolasi) **kamida 24 belgi** ishlating (62 belgili alfavit
+> bilan ≈ 143 bit entropiya). Yuqoridagi 6 belgili misol faqat qisqa
+> ko'rsatma kodlari uchun mos — sir kalitlari uchun emas. Misol: `rand.str 24`.
 
 **`time` — vaqt va sana:**
 ```flux

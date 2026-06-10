@@ -279,7 +279,7 @@ call without parentheses is defined by its arguments, this is the only way to
 call a function that has no parameters. This clearly distinguishes a name (value)
 from a call:
 ```flux
-fn new_id -> rand.str 8
+fn new_id -> rand.str 24
 new_id()           # CALL → a new random id each time
 new_id             # NOT a call → the function VALUE (for callback/reg)
 ```
@@ -895,6 +895,10 @@ rand.str 6             # a random string of 6 characters (ideal for short codes)
 
 > `rand` reads from the OS CSPRNG (operating-system entropy), so `rand.str` is
 > safe for token/session-ID generation too — the values are not predictable.
+> For security-sensitive tokens (session IDs, API keys, password-reset links),
+> use **at least 24 characters** (≈ 143 bits of entropy with the 62-char
+> alphabet). The 6-character example above is suitable for short display codes
+> only — not for secrets. Example: `rand.str 24`.
 
 **`time` — time and date:**
 ```flux
