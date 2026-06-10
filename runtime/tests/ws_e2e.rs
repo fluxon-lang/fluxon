@@ -60,6 +60,14 @@ async fn next_text<S>(ws: &mut S) -> String
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
+    next_text_within(ws, Duration::from_secs(3)).await
+}
+
+// `next_text` ning kutish muddatini beradigan varianti (sekin handler testi).
+async fn next_text_within<S>(ws: &mut S, dur: Duration) -> String
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     let fut = async {
         loop {
             match ws.next().await {
@@ -70,7 +78,7 @@ where
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(3), fut)
+    tokio::time::timeout(dur, fut)
         .await
         .expect("xabar kutishda timeout")
 }
@@ -330,6 +338,50 @@ async fn server_sends_periodic_ping() {
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("server davriy ping yubormadi");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Uzoq handler (ping oralig'idan oshadigan) select loop'ni bloklaganda, o'tkazib
+// yuborilgan ping tick'lari burst bo'lib ulanishni noto'g'ri yopmasligi kerak
+// (MissedTickBehavior::Delay). Handler `time.sleep` bilan bloklaydi — u
+// spawn_blocking'da ishlaydi, ya'ni reader loop'ning await'ini ushlab turadi.
+const SLOW_HANDLER_SCRIPT: &str = r#"
+use ws
+
+ws.on :message \conn msg ->
+  if msg == "slow"
+    time.sleep 2.5
+  ws.send conn "ok:${msg}"
+
+ws.serve PORT
+"#;
+
+#[tokio::test]
+async fn long_handler_does_not_kill_connection() {
+    let port = 9316;
+    let script = SLOW_HANDLER_SCRIPT.replace("PORT", &port.to_string());
+    // Ping oralig'i 1s: 2.5s handler 2 oraliqdan oshadi → burst xavfi.
+    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (mut ws, _) = connect_async(&url).await.expect("ulanish");
+
+    // "slow" — handler 2.5s bloklaydi, keyin javob qaytaradi.
+    ws.send(Message::text("slow")).await.unwrap();
+    let first = next_text_within(&mut ws, Duration::from_secs(6)).await;
+    assert_eq!(first, "ok:slow", "sekin handler javobi kutilgan");
+
+    // Eng muhimi: ulanish hali tirik — burst tick uni yopmadi. Yangi xabar
+    // tezda javob olishi kerak (yopilgan bo'lsa next_text timeout/panic beradi).
+    ws.send(Message::text("again")).await.unwrap();
+    let second = next_text_within(&mut ws, Duration::from_secs(3)).await;
+    assert_eq!(
+        second, "ok:again",
+        "uzoq handler'dan keyin ulanish noto'g'ri yopilgan"
+    );
 
     let _ = std::fs::remove_file(&path);
 }

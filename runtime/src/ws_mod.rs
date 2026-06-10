@@ -431,6 +431,12 @@ async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
     let ping_dur = ping_interval_dur();
     let mut ping_interval =
         tokio::time::interval_at(tokio::time::Instant::now() + ping_dur, ping_dur);
+    // Uzoq handler (select loop'ni bloklab turadigan) ping oralig'idan oshsa,
+    // standart Burst xulqi o'tkazib yuborilgan tick'larni ketma-ket beradi:
+    // birinchisi ping yuborib awaiting_pong=true qiladi, keyingisi darhol
+    // "javobsiz" deb yopib yuborardi. Delay — har tick orasida to'liq oraliqni
+    // kafolatlaydi, ya'ni ping va o'lik-tekshiruv orasida mijozga javob vaqti.
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Oldingi ping'ga pong kutilyaptimi: yana tick kelganda hali true bo'lsa,
     // mijoz javob bermadi — ulanish o'lik (half-open) deb yopiladi.
     let mut awaiting_pong = false;
