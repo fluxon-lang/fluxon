@@ -896,11 +896,14 @@ math.abs -5            # → 5
 **`rand` — tasodifiy:**
 ```flux
 rand.int 1 100         # 1..100 oralig'ida tasodifiy butun son
-rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod / token uchun)
+rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod uchun)
 ```
 
-`rand` OS kriptografik CSPRNG'idan foydalanadi, shuning uchun `rand.str` ni
-session-ID, token va boshqa sirlar uchun ishlatish xavfsiz (bashorat qilinmaydi).
+`rand` OS kriptografik CSPRNG'idan foydalanadi, shuning uchun chiqishi
+bashorat qilinmaydi. Ammo **uzunlik ham muhim**: `rand.str 6` atigi ~36 bit
+entropiya beradi (62⁶) — qisqa kod uchun yetarli, lekin sir uchun brute-force
+qilinadi. Session-ID, token va boshqa sirlar uchun kamida `rand.str 24`
+ishlating (~140+ bit).
 
 **`time` — vaqt va sana:**
 ```flux
