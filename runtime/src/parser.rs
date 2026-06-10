@@ -423,7 +423,13 @@ impl Parser {
         self.parse_binary(0)
     }
 
+    // Range `..` ustuvorligi: arifmetikadan PAST, lekin pipe/taqqoslash/mantiqdan
+    // YUQORI. Shu sababli `1..n+1` = `1..(n+1)` (arifmetika endpoint ichida
+    // bog'lanadi), `1..3 |> f` = `(1..3) |> f` (pipe butun range'ga qo'llanadi).
+    const RANGE_PREC: u8 = 7;
+
     // Operator ustuvorligi jadvali. Kichik raqam = past ustuvorlik.
+    // `..` (RANGE_PREC = 7) arifmetika va pipe orasida turadi.
     fn bin_prec(t: &Tok) -> Option<(BinOp, u8)> {
         Some(match t {
             Tok::Pipe => (BinOp::Or, 1),
@@ -436,18 +442,36 @@ impl Parser {
             Tok::GtEq => (BinOp::Ge, 4),
             Tok::Question2 => (BinOp::Coalesce, 5),
             Tok::PipeGt => (BinOp::Pipe, 6),
-            Tok::Plus => (BinOp::Add, 7),
-            Tok::Minus => (BinOp::Sub, 7),
-            Tok::Star => (BinOp::Mul, 8),
-            Tok::Slash => (BinOp::Div, 8),
-            Tok::Percent => (BinOp::Mod, 8),
+            Tok::Plus => (BinOp::Add, 8),
+            Tok::Minus => (BinOp::Sub, 8),
+            Tok::Star => (BinOp::Mul, 9),
+            Tok::Slash => (BinOp::Div, 9),
+            Tok::Percent => (BinOp::Mod, 9),
             _ => return None,
         })
     }
 
     fn parse_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
-        let mut lhs = self.parse_range()?;
-        while let Some((op, prec)) = Self::bin_prec(self.peek()) {
+        let mut lhs = self.parse_application()?;
+        loop {
+            // `..` ustuvorlik zinapoyasiga to'qilgan (Range BinOp emas, shuning
+            // uchun alohida tarmoq). Arifmetika o'ng tomonda bog'lanib qoladi
+            // (RANGE_PREC + 1), past operatorlar (pipe va h.k.) range'ni o'rab oladi.
+            if self.check(&Tok::DotDot) {
+                if Self::RANGE_PREC < min_prec {
+                    break;
+                }
+                self.advance();
+                let rhs = self.parse_binary(Self::RANGE_PREC + 1)?;
+                lhs = Expr::Range {
+                    start: Box::new(lhs),
+                    end: Box::new(rhs),
+                };
+                continue;
+            }
+            let Some((op, prec)) = Self::bin_prec(self.peek()) else {
+                break;
+            };
             if prec < min_prec {
                 break;
             }
@@ -459,20 +483,6 @@ impl Parser {
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
             };
-        }
-        Ok(lhs)
-    }
-
-    // Range `a..b` — binary'dan yuqori, application'dan past.
-    fn parse_range(&mut self) -> ParseResult<Expr> {
-        let lhs = self.parse_application()?;
-        if self.check(&Tok::DotDot) {
-            self.advance();
-            let rhs = self.parse_application()?;
-            return Ok(Expr::Range {
-                start: Box::new(lhs),
-                end: Box::new(rhs),
-            });
         }
         Ok(lhs)
     }

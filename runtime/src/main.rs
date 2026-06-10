@@ -144,6 +144,39 @@ each i in 0..10
 "#);
     }
 
+    // Issue #99: `..` arifmetikadan PAST, lekin pipe/taqqoslashdan YUQORI
+    // bog'lanadi. `1..n+1` = `1..(n+1)` (AI uchun tabiiy), avval `(1..n)+1`
+    // bo'lib runtime xato berardi. Pipe esa butun range'ni o'raydi.
+    #[test]
+    fn range_ustuvorligi() {
+        run(r#"
+n = 3
+# end tomon: +1 butun range'ga emas, faqat n'ga qo'llanadi
+(1..n+1 == [1 2 3 4]) | (fail "1..n+1 noto'g'ri")
+# end tomon: -1
+(0..n-1 == [0 1 2]) | (fail "0..n-1 noto'g'ri")
+# har ikki tomon arifmetika bilan
+(2*1..2+1 == [2 3]) | (fail "2*1..2+1 noto'g'ri")
+# each loop ichida ham xatosiz ishlaydi
+sum <- 0
+each i in 1..n+1
+  sum <- sum + i
+(sum == 10) | (fail "each 1..n+1 yig'indisi noto'g'ri: ${sum}")
+"#);
+    }
+
+    // Issue #99 (review): pipe range'dan PASTROQ bog'lanadi, shuning uchun
+    // `1..3 |> f` = `(1..3) |> f` — qurilgan range f'ga uzatiladi, qavssiz.
+    #[test]
+    fn range_pipe_butun_diapazonni_uzatadi() {
+        run(r#"
+fn total xs
+  xs.reduce 0 \acc x -> acc + x
+# pipe butun range'ga (1..3 = [1 2 3]) qo'llanadi, end tomonga emas
+(1..3 |> total == 6) | (fail "pipe range noto'g'ri")
+"#);
+    }
+
     // Inline if (ternary ekvivalenti): `if shart a else b` bir qiymat qaytaradi.
     // Issue #66 — ixcham shartli ifoda (leading-zero formatlash kabi joylar uchun).
     #[test]
