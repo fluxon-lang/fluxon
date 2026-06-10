@@ -383,6 +383,28 @@ up = str.up "salom"
 "#);
     }
 
+    // Issue #98 — ichma-ich raqamli indeks `m.0.1`. Lexer ilgari `.1` ni
+    // ochko'zlik bilan `Flt(0.1)` deb yutardi (oldin `.` member konteksti
+    // borligini bilmasdan). Endi member-indeksdan keyingi son float
+    // boshlamaydi: `m.0.1` ≡ `(m.0).1`.
+    #[test]
+    fn nested_numeric_index() {
+        run(r#"
+m = [[1 2] [3 4]]
+(m.0.1 == 2) | (fail "m.0.1 != 2: ${m.0.1}")
+(m.1.0 == 3) | (fail "m.1.0 != 3: ${m.1.0}")
+
+# uch darajali ichma-ich indeks ham
+deep = [[[7 8]]]
+(deep.0.0.1 == 8) | (fail "deep.0.0.1 != 8: ${deep.0.0.1}")
+
+# regressiya: oddiy float literallar buzilmadi
+(0.5 + 0.5 == 1.0) | (fail "float literal buzildi")
+fs = [0.5 1.5]
+(fs.1 == 1.5) | (fail "float element buzildi: ${fs.1}")
+"#);
+    }
+
     #[test]
     fn mutable_and_each() {
         run(r#"

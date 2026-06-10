@@ -360,8 +360,12 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
         let mut is_float = false;
+        // member-indeks konteksti: `m.0.1` da `.1` ni float kasri deb yutmaymiz —
+        // oldingi token `.` bo'lsa, bu son indeks (`(m.0).1`), float emas.
+        let after_dot = matches!(self.tokens.last(), Some(t) if t.tok == Tok::Dot);
         // float nuqtasi, lekin '..' (range) emas
-        if !self.at_end()
+        if !after_dot
+            && !self.at_end()
             && self.peek() == b'.'
             && self.peek_or(1) != b'.'
             && self.peek_or(1).is_ascii_digit()
