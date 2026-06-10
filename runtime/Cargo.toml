@@ -44,3 +44,8 @@ base64 = "0.22"
 # auth battery: parol hash (argon2id — bcrypt'dan afzal, default xavfsiz).
 # Salt avtomatik (PHC string ichida), `auth.check` doimiy-vaqt taqqoslash.
 argon2 = "0.5"
+# Rekursiya xavfsizligi (issue #90): chuqur Flux rekursiyasida native stack'ni
+# segmentlab o'stiradi (rustc ham shu yondashuvni ishlatadi). Shunda chuqurlik
+# limiti (MAX_CALL_DEPTH) native stack hajmiga emas, faqat hisoblagichga bog'liq —
+# 2MB'lik spawn_blocking thread'ida ham abort o'rniga graceful xato.
+stacker = "0.1"
