@@ -87,7 +87,8 @@ flux-lang/
 ├── docs/
 │   ├── flux-human.md      # batafsil qo'llanma (odamlar uchun, inglizcha)
 │   ├── flux-human.uz.md   # batafsil qo'llanma (odamlar uchun, o'zbekcha)
-│   └── flux-agent.md      # ixcham spec (AI agent uchun — ~2700 token)
+│   ├── flux-agent.md      # ixcham spec (AI agent uchun — ~2700 token)
+│   └── ROADMAP.md         # haqiqiy tilga yo'l xaritasi (fazalar, ochiq ishlar)
 ├── examples/              # ishlaydigan misol loyihalar
 │   ├── support-tickets/   # AI klassifikatsiya + confidence routing
 │   ├── ecommerce/         # katalog, savat, checkout (tranzaksiya), AI tavsiya
@@ -105,6 +106,7 @@ flux-lang/
 
 🚧 **Faol ishlab chiqilmoqda.** Til yadrosi ishlaydigan **runtime** (Rust,
 tree-walking interpreter) mavjud — `.fx` fayllarni ishga tushira oladi.
+Loyiha qayerga ketayotgani va fazalar: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 **Ishlaydi:**
 
