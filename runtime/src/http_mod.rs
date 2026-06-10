@@ -1235,25 +1235,32 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     if status == 303 || ((status == 301 || status == 302) && cur_method == "POST") {
                         cur_method = "GET".to_string();
                     }
-                    // 3xx tanasini frame-ma-frame drain qilamiz — o'qilmagan body
-                    // bilan hyper pool ulanishni qayta ishlata olmaydi (issue #96).
-                    // collect() emas: butun tana xotiraga yig'ilmasin. Zararli
-                    // upstream juda katta 302 tanasi bilan kechiktirmasin —
-                    // limitdan oshsa drain to'xtaydi (body drop → ulanish pool'ga
-                    // qaytmaydi, keyingi hop yangi ulanish ochadi).
-                    const REDIRECT_DRAIN_MAX: usize = 64 * 1024;
-                    let mut drained = 0usize;
-                    let mut body = resp.into_body();
-                    while let Some(frame) = body.frame().await {
-                        match frame {
-                            Ok(f) => {
-                                drained += f.data_ref().map_or(0, |d| d.len());
-                                if drained > REDIRECT_DRAIN_MAX {
+                    // 3xx tanasi drain qilinsa hyper pool ulanishni qayta ishlata
+                    // oladi (issue #96). Lekin drain redirect'ni qotirmasin (PR
+                    // #144 revyu): faqat hajmi ma'lum va kichik bo'lsa, qisqa
+                    // timeout ichida frame-ma-frame (bufersiz) o'qiymiz. Hajmi
+                    // noma'lum (chunked/stream) yoki katta bo'lsa darhol drop —
+                    // ulanish yopiladi, keyingi hop yangisini ochadi.
+                    const REDIRECT_DRAIN_MAX: u64 = 64 * 1024;
+                    let known_len = resp
+                        .headers()
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok());
+                    if let Some(len) = known_len
+                        && len <= REDIRECT_DRAIN_MAX
+                    {
+                        let drain = async {
+                            let mut body = resp.into_body();
+                            while let Some(frame) = body.frame().await {
+                                if frame.is_err() {
                                     break;
                                 }
                             }
-                            Err(_) => break,
-                        }
+                        };
+                        // Sekin upstream e'lon qilingan kichik hajmni ham asta
+                        // oqizishi mumkin — tugamasa ulanishni tashlab ketamiz.
+                        let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
                     }
                     continue;
                 }
