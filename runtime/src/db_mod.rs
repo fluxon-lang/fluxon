@@ -557,6 +557,34 @@ fn sqlite_fk_violations(conn: &Connection, table: &str) -> Result<i64, String> {
     .map_err(|e| sql_err("pragma_foreign_key_check", e))
 }
 
+// Mavjud bo'lmagan (bo'sh) rebuild backup nomini topadi. `ts` faqat sekund
+// aniqligida — bir sekundda bir jadval ikki marta rebuild bo'lsa (masalan, bir
+// deploy `ref:` qo'shadi, tez orada boshqasi olib tashlaydi) bir xil nom
+// to'qnashadi. Bo'sh nom topilguncha sanoq qo'shamiz: `_fk`, `_fk_2`, `_fk_3`...
+// Har backup ataylab saqlanadi, shu sabab clobber emas — yangi nom.
+fn unique_rebuild_backup_name(conn: &Connection, table: &str, ts: u64) -> Result<String, String> {
+    let base = format!("_flux_bak_{table}_{ts}_fk");
+    let mut name = base.clone();
+    let mut n = 2;
+    while sqlite_table_exists(conn, &name)? {
+        name = format!("{base}_{n}");
+        n += 1;
+    }
+    Ok(name)
+}
+
+// Jadval (yoki view) shu nom bilan mavjudmi — sqlite_master orqali.
+fn sqlite_table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
+    let c: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|e| sql_err("sqlite_master", e))?;
+    Ok(c > 0)
+}
+
 // Jadvalni to'liq qayta quradi (SQLite "12-bosqich" naqshi): ma'lumotni saqlab,
 // yangi sxema (FK bilan) ga ko'chiradi. FK/constraint o'zgarishi ALTER bilan hal
 // bo'lmaganda — mavjud ustunga FK qo'shish/olib tashlash — ishlatiladi.
@@ -593,11 +621,12 @@ fn sqlite_rebuild_table(
     let result = (|| -> Result<(), String> {
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| sql_err("BEGIN", e))?;
-        // 1. Xavfsizlik backup'i (DROP'dan oldin — agent xatosiga himoya). Rebuild
-        //    uchun ALOHIDA nom (`_fk` suffiks): bir migration ichida DROP COLUMN
-        //    ham backup yaratgan bo'lishi mumkin (`build_backup` bir xil `ts` bilan)
-        //    — nom to'qnashuvini oldini olamiz.
-        let bak = format!("_flux_bak_{table}_{ts}_fk");
+        // 1. Xavfsizlik backup'i (DROP'dan oldin — agent xatosiga himoya). Nom
+        //    to'qnashuvga qarshi: (a) bir migration ichida DROP COLUMN ham backup
+        //    yaratgan bo'lishi mumkin (`build_backup` bir xil `ts`) — `_fk` suffiks;
+        //    (b) bir sekundda ikki rebuild bo'lsa (`ts` faqat sekund aniqligida)
+        //    bo'sh nom topilguncha sanoq qo'shamiz (`_fk`, `_fk_2`, ...).
+        let bak = unique_rebuild_backup_name(conn, table, ts)?;
         run_exec(
             conn,
             &format!(
@@ -2151,5 +2180,50 @@ mod tests {
         // FK endi enforce qilinadi (yetim insert rad etiladi).
         let orphan = db.exec("INSERT INTO posts (owner, title) VALUES (999, 'y')", &[]);
         assert!(orphan.is_err(), "yetim insert FK ni buzishi kerak");
+    }
+
+    #[test]
+    fn rebuild_twice_same_ts_no_backup_collision() {
+        // Codex revyu: bir jadval bir sekundda (bir xil `ts`) ikki marta rebuild
+        // bo'lsa (ref qo'shish -> tez orada olib tashlash), backup nomi to'qnashmasin.
+        let db = SqliteDb::open(":memory:").unwrap();
+        db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY)", &[])
+            .unwrap();
+        db.exec("INSERT INTO users (id) VALUES (1)", &[]).unwrap();
+        db.exec(
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, owner INTEGER)",
+            &[],
+        )
+        .unwrap();
+        db.exec("INSERT INTO posts (id, owner) VALUES (1, 1)", &[])
+            .unwrap();
+
+        let with_fk = vec![
+            col("id", "serial", &["pk"]),
+            col("owner", "int", &["ref:users.id"]),
+        ];
+        let no_fk = vec![col("id", "serial", &["pk"]), col("owner", "int", &[])];
+
+        // 1-rebuild: FK qo'shadi (bir xil ts=7).
+        db.rebuild_table("posts", &with_fk, &[], 7).unwrap();
+        assert_eq!(db.foreign_keys("posts").unwrap().len(), 1);
+        // 2-rebuild: AYNAN o'sha ts bilan FK olib tashlaydi — to'qnashuvsiz o'tishi kerak.
+        db.rebuild_table("posts", &no_fk, &[], 7).unwrap();
+        assert!(db.foreign_keys("posts").unwrap().is_empty());
+
+        // Ikkala backup ham saqlangan (turli nom: `_fk` va `_fk_2`).
+        let baks = db
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '_flux_bak_posts_7_fk%' ORDER BY name",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            baks.len(),
+            2,
+            "ikki rebuild ikki alohida backup qoldirishi kerak"
+        );
+        // Ma'lumot saqlangan.
+        assert_eq!(db.query("SELECT id FROM posts", &[]).unwrap().len(), 1);
     }
 }
