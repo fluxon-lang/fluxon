@@ -617,6 +617,11 @@ impl Interp {
         if let Err(Flow::Error(e)) = crate::serve_mod::run_pending(&self.arc_self()) {
             return Err(e);
         }
+        // Server yo'q bo'lsa run_pending darhol qaytadi — chiqishdan oldin fon
+        // navbatidagi ishlar tugashini kutamiz (issue #105: faqat-queue skript
+        // ishlarni bajarmasdan chiqib ketmasin). Server bo'lsa run_pending
+        // bloklaydi va bu yerga umuman yetib kelmaymiz.
+        self.queue_wait_drain();
         Ok(())
     }
 

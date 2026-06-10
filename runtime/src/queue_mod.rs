@@ -13,18 +13,23 @@
 //     thread, lekin u vaqt bo'yicha emas, navbat bo'yicha uyg'onadi.)
 //   - Handler hali ro'yxatga olinmagan ish uchun `queue.push` chaqirilsa, ish
 //     navbatda KUTIB turadi. Flux top-level kodda `queue.push` `queue.on` dan
-//     oldin yozilishi mumkin — worker handler paydo bo'lguncha ishni qaytarib
-//     navbat oxiriga qo'yadi va qisqa uxlaydi (busy-spin emas).
+//     oldin yozilishi mumkin — worker Condvar'da uxlaydi, `queue.on` kelganda
+//     uyg'onib ishni bajaradi (busy-loop YO'Q, issue #105). Handler'siz ish
+//     handler'i BOR boshqa ishlarni to'sib qo'ymaydi.
+//   - Top-level kod tugaganda `queue_wait_drain` navbat bo'shashini kutadi —
+//     ishlar jim yo'qolmaydi (issue #105). Handler'i hech qachon ro'yxatga
+//     olinmagan ishlar shu yerda ogohlantirish bilan tashlanadi (ularni
+//     bajarishning iloji yo'q — kutish abadiy bo'lardi).
 //
 // Worker — oddiy `std::thread` + `Condvar` (tokio EMAS): handler'lar sinxron
 // tree-walking, async kerak emas. Handler `apply` orqali bitta `job` map argumenti
 // bilan chaqiriladi; xato worker'ni o'ldirmaydi (cron/ws fire kabi stderr diagnostika).
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
@@ -45,6 +50,9 @@ pub struct QueueState {
     // tekshiradi). Condvar yangi ish/handler kelganini worker'ga bildiradi.
     inner: Mutex<QueueInner>,
     not_empty: Condvar,
+    // Worker bitta ishni tugatganini bildiradi — `queue_wait_drain` shu orqali
+    // navbat bo'shashini kutadi (issue #105: ishlar jim yo'qolmasin).
+    idle: Condvar,
     // Worker thread BIR marta yonishi uchun marker (idempotent start).
     started: OnceLock<()>,
 }
@@ -52,6 +60,11 @@ pub struct QueueState {
 struct QueueInner {
     queue: VecDeque<Job>,
     handlers: HashMap<String, Value>,
+    // Worker hozir bitta ishni bajaryaptimi — drain navbat bo'sh bo'lsa ham
+    // bajarilayotgan ish tugashini kutishi kerak.
+    busy: bool,
+    // Handler'siz nom haqida stderr ogohlantirishi BIR marta chiqsin.
+    warned: HashSet<String>,
 }
 
 impl QueueState {
@@ -60,8 +73,11 @@ impl QueueState {
             inner: Mutex::new(QueueInner {
                 queue: VecDeque::new(),
                 handlers: HashMap::new(),
+                busy: false,
+                warned: HashSet::new(),
             }),
             not_empty: Condvar::new(),
+            idle: Condvar::new(),
             started: OnceLock::new(),
         }
     }
@@ -156,44 +172,90 @@ impl Interp {
         let interp = self.clone();
         std::thread::spawn(move || run_worker(interp));
     }
+
+    // Top-level kod tugaganda chaqiriladi (interp.rs `run`): navbatdagi bajarib
+    // bo'ladigan ishlar va bajarilayotgan ish tugaguncha bloklaydi — skript
+    // chiqishida fon ishlar jim yo'qolmasin (issue #105). Handler'i hech qachon
+    // ro'yxatga olinmagan ishlarni bajarishning iloji yo'q — ogohlantirib
+    // tashlaymiz (aks holda kutish abadiy bo'lardi). Handler ichidan push
+    // qilingan yangi ishlar ham shu yerda kutiladi (predikat har uyg'onishda
+    // qayta tekshiriladi).
+    pub fn queue_wait_drain(&self) {
+        let mut inner = self.queue.inner.lock();
+        loop {
+            let runnable = inner
+                .queue
+                .iter()
+                .any(|j| inner.handlers.contains_key(&j.name));
+            if !runnable && !inner.busy {
+                break;
+            }
+            self.queue.idle.wait(&mut inner);
+        }
+        for job in inner.queue.drain(..) {
+            eprintln!(
+                "queue: '{}' ishi bajarilmadi — handler ro'yxatga olinmagan (process tugadi)",
+                job.name
+            );
+        }
+    }
 }
 
-// Worker sikli: navbatdan oldingi ishni oladi, nomiga handler topsa chaqiradi.
-// Handler hali yo'q bo'lsa ishni navbat OXIRIGA qaytarib qo'yadi va qisqa uxlaydi
-// (busy-spin emas) — handler keyin `queue.on` bilan kelishini kutadi.
+// Worker sikli: navbatdan handler'i ro'yxatga olingan BIRINCHI ishni oladi va
+// chaqiradi. Handler'i hali yo'q ish navbatda qoladi (eski "qayta qo'yish +
+// 50ms uxlash" busy-loop'i emas — issue #105): worker Condvar'da uxlaydi,
+// `queue.on`/`queue.push` uyg'otadi. Handler'siz ish handler'i bor ishlarni
+// to'sib qo'ymaydi; bir nom ichida FIFO saqlanadi (bir nomli ishlarning handler
+// holati bir xil — tanlash tartibni buzmaydi).
 fn run_worker(interp: Arc<Interp>) {
     loop {
-        // Navbatdan keyingi ishni va (agar bor bo'lsa) handler'ini bitta lock ostida
-        // olamiz. Navbat bo'sh bo'lsa Condvar'da uxlaymiz (uyg'otilguncha bloklanadi).
         let (job, handler) = {
             let mut inner = interp.queue.inner.lock();
-            while inner.queue.is_empty() {
+            loop {
+                // MutexGuard orqali maydonlarni alohida borrow qilish uchun.
+                let st = &mut *inner;
+                if let Some(pos) = st
+                    .queue
+                    .iter()
+                    .position(|j| st.handlers.contains_key(&j.name))
+                {
+                    // pos hozirgina topildi — remove albatta Some qaytaradi.
+                    let Some(job) = st.queue.remove(pos) else {
+                        continue;
+                    };
+                    let handler = st.handlers[&job.name].clone();
+                    // Drain navbat bo'sh bo'lsa ham shu ish tugashini kutsin.
+                    st.busy = true;
+                    break (job, handler);
+                }
+                // Bajarib bo'ladigan ish yo'q. Handler'siz kutayotgan nomlar
+                // haqida BIR marta diagnostika beramiz (issue #105).
+                let unknown: Vec<String> = st
+                    .queue
+                    .iter()
+                    .map(|j| j.name.clone())
+                    .filter(|n| !st.warned.contains(n))
+                    .collect();
+                for name in unknown {
+                    eprintln!(
+                        "queue: '{}' uchun handler yo'q (queue.on chaqirilmagan) — ish navbatda kutmoqda",
+                        name
+                    );
+                    st.warned.insert(name);
+                }
                 interp.queue.not_empty.wait(&mut inner);
             }
-            // Front'dagi ishni olamiz; handler'ini darhol shu lock ostida izlaymiz.
-            let job = inner.queue.pop_front();
-            let Some(job) = job else { continue };
-            let handler = inner.handlers.get(&job.name).cloned();
-            (job, handler)
         };
 
-        match handler {
-            Some(handler) => {
-                // Handler'ni SHU thread'da, bitta `job` (payload) argumenti bilan
-                // chaqiramiz — FIFO va ketma-ketlik shu bilan kafolatlanadi. Xato
-                // worker'ni o'ldirmaydi.
-                if let Err(flow) = interp.apply(handler, vec![job.payload]) {
-                    eprintln!("queue handler '{}' xatosi: {}", job.name, flow_msg(&flow));
-                }
-            }
-            None => {
-                // Handler hali ro'yxatga olinmagan — ishni navbat oxiriga qaytarib,
-                // qisqa uxlaymiz. Bu ish push qilingan, lekin handler keyin keladigan
-                // holatni qoplaydi (top-level tartibga bog'liq emas).
-                interp.queue.inner.lock().queue.push_back(job);
-                std::thread::sleep(Duration::from_millis(50));
-            }
+        // Handler'ni SHU thread'da, bitta `job` (payload) argumenti bilan
+        // chaqiramiz — FIFO va ketma-ketlik shu bilan kafolatlanadi. Xato
+        // worker'ni o'ldirmaydi.
+        if let Err(flow) = interp.apply(handler, vec![job.payload]) {
+            eprintln!("queue handler '{}' xatosi: {}", job.name, flow_msg(&flow));
         }
+        // Ish tugadi — drain kutayotgan bo'lsa uyg'otamiz.
+        interp.queue.inner.lock().busy = false;
+        interp.queue.idle.notify_all();
     }
 }
 
@@ -207,6 +269,8 @@ fn flow_msg(flow: &Flow) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     // queue.push payload'siz ham ishlashi kerak (payload Nil bo'ladi).
@@ -367,6 +431,105 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "handler kelgach kutib turgan ish bajarilishi kerak"
+        );
+    }
+
+    // Issue #105: drain navbatdagi ishlar TUGASHINI kutadi — qaytgach handler
+    // allaqachon ishlagan bo'ladi (poll/race'siz tekshiramiz).
+    #[test]
+    fn drain_ishlar_tugashini_kutadi() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let interp = Arc::new(Interp::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let handler = Value::Native(Arc::new(crate::value::NativeFn {
+            name: "sekin".into(),
+            func: Box::new(move |_| {
+                // Atayin sekin handler — drain kutmasa counter 3 ga yetmaydi.
+                std::thread::sleep(Duration::from_millis(20));
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Nil)
+            }),
+        }));
+        assert!(
+            interp
+                .queue_on(vec![Value::Str("ish".into()), handler])
+                .is_ok()
+        );
+        for _ in 0..3 {
+            assert!(interp.queue_push(vec![Value::Str("ish".into())]).is_ok());
+        }
+
+        interp.queue_wait_drain();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "drain hamma ish tugashini kutishi kerak"
+        );
+    }
+
+    // Issue #105: handler'i hech qachon ro'yxatga olinmagan ish drain'ni abadiy
+    // ushlab turmaydi — ogohlantirish bilan tashlanadi va navbat bo'shaydi.
+    #[test]
+    fn drain_handlersiz_ishni_tashlab_yuboradi() {
+        let interp = Arc::new(Interp::new());
+        assert!(interp.queue_push(vec![Value::Str("yetim".into())]).is_ok());
+
+        // Drain'ni alohida thread'da chaqiramiz — regressiyada (abadiy kutish)
+        // test o'zi osilib qolmasin.
+        let i2 = interp.clone();
+        let h = std::thread::spawn(move || i2.queue_wait_drain());
+        for _ in 0..200 {
+            if h.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            h.is_finished(),
+            "drain handler'siz ishda osilib qolmasligi kerak"
+        );
+        h.join().unwrap();
+        assert!(
+            interp.queue.inner.lock().queue.is_empty(),
+            "tashlangan ish navbatdan chiqishi kerak"
+        );
+    }
+
+    // Issue #105: handler'siz ish navbat BOSHIDA tursa ham, handler'i bor ish
+    // to'silmaydi (eski busy-loop har aylanishda hammasini 50ms kechiktirardi).
+    #[test]
+    fn handlersiz_ish_boshqalarni_tosmaydi() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let interp = Arc::new(Interp::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+
+        // Avval handler'siz ish — navbat boshini egallaydi.
+        assert!(interp.queue_push(vec![Value::Str("yoq".into())]).is_ok());
+
+        let handler = Value::Native(Arc::new(crate::value::NativeFn {
+            name: "inc".into(),
+            func: Box::new(move |_| {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Nil)
+            }),
+        }));
+        assert!(
+            interp
+                .queue_on(vec![Value::Str("bor".into()), handler])
+                .is_ok()
+        );
+        assert!(interp.queue_push(vec![Value::Str("bor".into())]).is_ok());
+
+        // Drain "bor" tugashini kutadi, "yoq"ni esa tashlab yuboradi.
+        interp.queue_wait_drain();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "handler'i bor ish handler'siz ish ortida qolib ketmasligi kerak"
         );
     }
 }

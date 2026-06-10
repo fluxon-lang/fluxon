@@ -1934,6 +1934,42 @@ queue.push "tozala"
     }
 
     #[test]
+    fn queue_handlersiz_push_dastur_tugaydi() {
+        // Issue #105: handler'i hech qachon ro'yxatga olinmagan ish dastur
+        // chiqishini bloklamasligi kerak — run() ogohlantirish bilan normal
+        // tugaydi (eski busy-loop'da ish abadiy aylanardi).
+        run(r#"queue.push "yetim" {x:1}"#);
+    }
+
+    #[test]
+    fn queue_drain_handler_haqiqatan_ishlaydi() {
+        // Issue #105: run() qaytishidan oldin navbat drain bo'ladi — handler
+        // haqiqatan ishlagani DB orqali RACE'siz tekshiriladi (ilgari worker
+        // fon thread'i tugashini kafolatlab bo'lmasdi).
+        let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = setup_db("flux_queue_drain.db");
+
+        run(r#"
+use db
+tbl jobs
+  id  serial pk
+  nom str
+queue.on "yoz" \job ->
+  db.ins "jobs" {nom:job.nom}
+queue.push "yoz" {nom:"a"}
+queue.push "yoz" {nom:"b"}
+"#);
+
+        // Birinchi run() drain bilan tugadi — ikkala ish DB'da bo'lishi SHART.
+        run(r#"
+use db
+((db.q "select * from jobs").len == 2) | (fail "queue ishlari bajarilmagan")
+"#);
+
+        cleanup_db(&path);
+    }
+
+    #[test]
     fn queue_push_nom_str_bolmasa_xato() {
         // 1-argument ish nomi str bo'lishi shart.
         let err = run_source(r#"queue.push 5"#).expect_err("nom str bo'lmasa xato kutiladi");
