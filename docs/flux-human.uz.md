@@ -542,6 +542,16 @@ Header qiymati str bo'lmasa matnga aylantiriladi; `nil` qiymatli header
 tashlanadi. Foydalanuvchi `content-type` bersa, avtomatik `application/json`
 o'rniga o'sha ishlatiladi.
 
+**Timeout (default 30s).** Qotgan upstream so'rovni abadiy bloklamasligi uchun
+har bir klient so'rovi standart 30 soniya timeout bilan ishlaydi. Sozlash:
+```flux
+res = http.get url {timeout: 5}   # 5 soniyada javob bo'lmasa xato
+res = http.get url {timeout: 0}   # timeout'siz (faqat ishonchli upstream uchun)
+```
+Server tomonda ham header o'qish uchun 30s timeout bor (slowloris-uslubdagi sekin
+ulanishlardan himoya). LLM so'rovlari (`ai.ask`/`ai.json`/`ai.run`) default 120s
+timeout bilan ishlaydi — `$AI_TIMEOUT` (soniya) bilan sozlanadi.
+
 ### 9.2 `db` — ma'lumotlar bazasi (Postgres)
 
 Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi. Hech
@@ -776,11 +786,16 @@ each i in 1..10                          # maksimum 10 qadam
   r = ai.run msgs tools                  # tools: [{name desc params}] ro'yxati
   if r.kind == :final
     ret r.text                           # AI tugadi → final javob
-  # r.kind == :call → AI tool chaqirmoqchi
-  out = reg.call r.tool r.args           # tool'ni nomi bilan bajar (pastга qara)
-  log "tool ${r.tool}: ${r._.ms}ms"      # logging/cost/tasdiq shu yerda
-  msgs <- msgs.push {role::tool name:r.tool content:(json.enc out)}
+  # r.kind == :call → AI tool chaqirmoqchi. Model parallel bir nechta tool
+  # chaqirishi mumkin → hammasi r.calls'da; HAR biriga natija qaytar.
+  each c in r.calls
+    out = reg.call c.tool c.args         # tool'ni nomi bilan bajar (pastга qara)
+    log "tool ${c.tool}"                 # logging/cost/tasdiq shu yerda
+    msgs <- msgs.push {role::tool id:c.id content:(json.enc out)}
 ```
+> `r.tool`/`r.args`/`r.id` — orqaga moslik uchun `r.calls[0]` bilan bir xil
+> (bitta tool bo'lsa eski kod ishlayveradi). Lekin parallel chaqiruvda HAR bir
+> `tool_use_id` uchun natija qaytarmasangiz, keyingi so'rov 400 oladi.
 > `ai.run` ataylab bir qadamli. Agar AI'ning tool chaqiruvlarini avtomat,
 > nazoratsiz bajartirsa, logging/narx/tasdiq qila olmas edingiz. Loop sizniki —
 > shuning uchun har tool chaqiruvini ko'rasiz va boshqarasiz.

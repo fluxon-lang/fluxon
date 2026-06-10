@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -22,7 +22,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 
 use crate::builtins::{json_decode, json_encode};
@@ -84,6 +84,20 @@ const SWEEP_EVERY: u32 = 1024;
 // {max_body: N}` bilan sozlanadi. `max_body: 0` chegarani o'chiradi (cheklovsiz —
 // faqat ishonchli, ichki tarmoq orqasida ishlating).
 const DEFAULT_MAX_BODY: usize = 10 * 1024 * 1024;
+
+// HTTP klient (http.get/post/...) standart timeout'i (issue #92). Timeout'siz
+// qotgan upstream butun skriptni (yoki handler ichida chaqirilsa, o'sha request
+// thread'ini) ABADIY bloklaydi. Default 30s; `http.get url {timeout: N}` (soniya)
+// bilan sozlanadi, `timeout: 0` — timeout'siz (faqat ishonchli upstream uchun).
+// Timeout butun so'rovni qamraydi: connect + yuborish + javob (redirect'lar bilan
+// birga) — qaysidir bosqichda osilib qolsa ham vaqt tugashi bilan xato qaytadi.
+const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 30;
+
+// HTTP server header o'qish timeout'i (issue #92). Slowloris-uslubdagi ulanish
+// header'larni juda sekin (yoki umuman) yubormay socket/task'ni cheksiz ushlab
+// turishi mumkin. hyper header'larni shu muddatda to'liq olmasa ulanishni yopadi.
+// (header_read_timeout faqat Builder::timer o'rnatilgan bo'lsa kuchga kiradi.)
+const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 
 pub type LimitState = Arc<Mutex<LimitBucket>>;
 
@@ -820,7 +834,12 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: us
                 let client_ip = client_ip.clone();
                 async move { handle_request(interp, req, client_ip, max_body).await }
             });
+            // header_read_timeout slowloris ulanishlarini (header'larni juda sekin
+            // yuboradigan) cheklaydi (issue #92). Timer o'rnatilmasa sozlama jim
+            // e'tiborsiz qoladi (yoki panic) — TokioTimer beramiz.
             if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS))
                 .serve_connection(io, service)
                 .await
             {
@@ -1049,6 +1068,9 @@ struct ClientOpts {
     follow: bool,
     max: i64,
     headers: BTreeMap<String, String>,
+    // So'rov timeout'i: Some(dur) — shu muddatda tugamasa xato; None — timeout'siz
+    // (`timeout: 0`). Default Some(30s) (issue #92).
+    timeout: Option<Duration>,
 }
 
 impl Default for ClientOpts {
@@ -1057,6 +1079,7 @@ impl Default for ClientOpts {
             follow: false,
             max: 10,
             headers: BTreeMap::new(),
+            timeout: Some(Duration::from_secs(DEFAULT_CLIENT_TIMEOUT_SECS)),
         }
     }
 }
@@ -1070,6 +1093,15 @@ fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
         }
         if let Some(Value::Int(n)) = m.get("max") {
             o.max = *n;
+        }
+        // timeout: N (soniya) — so'rov shu muddatda tugamasa xato. 0 yoki manfiy —
+        // timeout'siz (None). Boshqa qiymat turlari e'tiborsiz qoladi (default 30s).
+        if let Some(Value::Int(n)) = m.get("timeout") {
+            o.timeout = if *n > 0 {
+                Some(Duration::from_secs(*n as u64))
+            } else {
+                None
+            };
         }
         // headers: {kalit: qiymat} — har bir juftlikni str'ga aylantirib olamiz.
         // Kalit asl holida saqlanadi (HTTP header nomi katta-kichik harfga
@@ -1116,112 +1148,130 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
         None => (String::new(), false),
     };
 
+    // Timeout opts'dan alohida olamiz (opts quyida async blokka ko'chiriladi).
+    let timeout = opts.timeout;
     client_runtime().block_on(async move {
-        let mut current = url;
-        // method redirect'da o'zgarishi mumkin (303 va GET-aylantiruvchi 301/302).
-        let mut cur_method = method.to_string();
-        let mut hops: i64 = 0;
+        // Butun so'rov mantig'i (redirect'lar bilan birga) — timeout uni qamraydi.
+        let work = async move {
+            let mut current = url;
+            // method redirect'da o'zgarishi mumkin (303 va GET-aylantiruvchi 301/302).
+            let mut cur_method = method.to_string();
+            let mut hops: i64 = 0;
 
-        loop {
-            let uri: hyper::Uri = current
-                .parse()
-                .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
+            loop {
+                let uri: hyper::Uri = current
+                    .parse()
+                    .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
 
-            // GET'ga aylangach tana yuborilmaydi.
-            let send_body = cur_method != "GET" && cur_method != "DELETE";
-            let mut builder = Request::builder().method(cur_method.as_str()).uri(uri);
-            // Foydalanuvchi custom header'larini avval qo'shamiz. content-type'ni
-            // foydalanuvchi o'zi bergan bo'lsa, avtomatik qiymat ustiga yozmaymiz.
-            let mut has_user_ct = false;
-            for (k, v) in &opts.headers {
-                if k.eq_ignore_ascii_case("content-type") {
-                    has_user_ct = true;
+                // GET'ga aylangach tana yuborilmaydi.
+                let send_body = cur_method != "GET" && cur_method != "DELETE";
+                let mut builder = Request::builder().method(cur_method.as_str()).uri(uri);
+                // Foydalanuvchi custom header'larini avval qo'shamiz. content-type'ni
+                // foydalanuvchi o'zi bergan bo'lsa, avtomatik qiymat ustiga yozmaymiz.
+                let mut has_user_ct = false;
+                for (k, v) in &opts.headers {
+                    if k.eq_ignore_ascii_case("content-type") {
+                        has_user_ct = true;
+                    }
+                    builder = builder.header(k.as_str(), v.as_str());
                 }
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-            if is_json && send_body && !has_user_ct {
-                builder = builder.header("content-type", "application/json");
-            }
-            let payload = if send_body {
-                Bytes::from(body_str.clone())
-            } else {
-                Bytes::new()
-            };
-            let req = builder
-                .body(Full::new(payload))
-                .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
+                if is_json && send_body && !has_user_ct {
+                    builder = builder.header("content-type", "application/json");
+                }
+                let payload = if send_body {
+                    Bytes::from(body_str.clone())
+                } else {
+                    Bytes::new()
+                };
+                let req = builder
+                    .body(Full::new(payload))
+                    .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
 
-            let resp = pooled_http_client()
-                .request(req)
-                .await
-                .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
+                let resp = pooled_http_client()
+                    .request(req)
+                    .await
+                    .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
 
-            let status = resp.status().as_u16();
+                let status = resp.status().as_u16();
 
-            // Redirect kuzatuvi (opt-in). 3xx + Location bo'lsa keyingi hop'ga o'tamiz.
-            if opts.follow
-                && (300..400).contains(&status)
-                && let Some(loc) = resp
+                // Redirect kuzatuvi (opt-in). 3xx + Location bo'lsa keyingi hop'ga o'tamiz.
+                if opts.follow
+                    && (300..400).contains(&status)
+                    && let Some(loc) = resp
+                        .headers()
+                        .get("location")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                {
+                    hops += 1;
+                    if hops > opts.max {
+                        return Err(Flow::err(format!(
+                            "redirect limiti oshib ketdi ({} hop)",
+                            opts.max
+                        )));
+                    }
+                    // Nisbiy Location'ni joriy URL asosida to'liq URL'ga aylantiramiz.
+                    current = resolve_location(&current, &loc);
+                    // 303 har doim GET; 301/302 amaliyotda GET'ga aylanadi (POST→GET).
+                    // 307/308 metod va tanani saqlaydi.
+                    if status == 303 || ((status == 301 || status == 302) && cur_method == "POST") {
+                        cur_method = "GET".to_string();
+                    }
+                    continue;
+                }
+
+                // Yakuniy javob — header, status, body'ni yig'amiz.
+                let resp_is_json = resp
                     .headers()
-                    .get("location")
+                    .get("content-type")
                     .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            {
-                hops += 1;
-                if hops > opts.max {
-                    return Err(Flow::err(format!(
-                        "redirect limiti oshib ketdi ({} hop)",
-                        opts.max
-                    )));
+                    .map(|s| s.contains("application/json"))
+                    .unwrap_or(false);
+
+                // Header'lar: kalit kichik harf, qiymat str (req.headers bilan simmetrik).
+                let mut headers = BTreeMap::new();
+                for (k, v) in resp.headers() {
+                    if let Ok(val) = v.to_str() {
+                        headers.insert(k.as_str().to_lowercase(), Value::Str(val.to_string()));
+                    }
                 }
-                // Nisbiy Location'ni joriy URL asosida to'liq URL'ga aylantiramiz.
-                current = resolve_location(&current, &loc);
-                // 303 har doim GET; 301/302 amaliyotda GET'ga aylanadi (POST→GET).
-                // 307/308 metod va tanani saqlaydi.
-                if status == 303 || ((status == 301 || status == 302) && cur_method == "POST") {
-                    cur_method = "GET".to_string();
+
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
+                    .to_bytes();
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                let resp_body = if resp_is_json {
+                    json_decode(&text).unwrap_or(Value::Str(text))
+                } else {
+                    Value::Str(text)
+                };
+
+                let mut m = BTreeMap::new();
+                m.insert("status".to_string(), Value::Int(status as i64));
+                m.insert("body".to_string(), resp_body);
+                m.insert("headers".to_string(), Value::Map(headers));
+                // follow yoqilgan bo'lsa nechta redirect bo'lganini ham qaytaramiz.
+                if opts.follow {
+                    m.insert("hops".to_string(), Value::Int(hops));
                 }
-                continue;
+                return Ok(Value::Map(m));
             }
+        };
 
-            // Yakuniy javob — header, status, body'ni yig'amiz.
-            let resp_is_json = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.contains("application/json"))
-                .unwrap_or(false);
-
-            // Header'lar: kalit kichik harf, qiymat str (req.headers bilan simmetrik).
-            let mut headers = BTreeMap::new();
-            for (k, v) in resp.headers() {
-                if let Ok(val) = v.to_str() {
-                    headers.insert(k.as_str().to_lowercase(), Value::Str(val.to_string()));
-                }
-            }
-
-            let bytes = resp
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
-                .to_bytes();
-            let text = String::from_utf8_lossy(&bytes).to_string();
-            let resp_body = if resp_is_json {
-                json_decode(&text).unwrap_or(Value::Str(text))
-            } else {
-                Value::Str(text)
-            };
-
-            let mut m = BTreeMap::new();
-            m.insert("status".to_string(), Value::Int(status as i64));
-            m.insert("body".to_string(), resp_body);
-            m.insert("headers".to_string(), Value::Map(headers));
-            // follow yoqilgan bo'lsa nechta redirect bo'lganini ham qaytaramiz.
-            if opts.follow {
-                m.insert("hops".to_string(), Value::Int(hops));
-            }
-            return Ok(Value::Map(m));
+        // Timeout o'rnatilgan bo'lsa so'rovni unga o'raymiz; tugamasa aniq xato
+        // (qotgan upstream butun thread'ni abadiy bloklamasin — issue #92).
+        match timeout {
+            Some(dur) => match tokio::time::timeout(dur, work).await {
+                Ok(r) => r,
+                Err(_) => Err(Flow::err(format!(
+                    "http so'rov timeout ({} sek ichida javob yo'q)",
+                    dur.as_secs()
+                ))),
+            },
+            None => work.await,
         }
     })
 }
@@ -1361,6 +1411,71 @@ mod tests {
     fn opts_default_headers_bosh() {
         // Opsiya berilmasa header'lar bo'sh.
         assert!(parse_client_opts(None).headers.is_empty());
+    }
+
+    // --- klient timeout (issue #92) ---
+
+    #[test]
+    fn opts_default_timeout_30s() {
+        // Opsiya berilmasa default 30s timeout (qotgan upstream'ga qarshi himoya).
+        let o = parse_client_opts(None);
+        assert_eq!(
+            o.timeout,
+            Some(Duration::from_secs(DEFAULT_CLIENT_TIMEOUT_SECS))
+        );
+    }
+
+    #[test]
+    fn opts_timeout_sozlanadi() {
+        // `{timeout: N}` — N soniya.
+        let mut m = BTreeMap::new();
+        m.insert("timeout".to_string(), Value::Int(5));
+        let o = parse_client_opts(Some(&Value::Map(m)));
+        assert_eq!(o.timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn opts_timeout_nol_ochiradi() {
+        // `timeout: 0` (va manfiy) — timeout'siz (None). Faqat ishonchli upstream uchun.
+        let mut m = BTreeMap::new();
+        m.insert("timeout".to_string(), Value::Int(0));
+        assert_eq!(parse_client_opts(Some(&Value::Map(m))).timeout, None);
+        let mut m2 = BTreeMap::new();
+        m2.insert("timeout".to_string(), Value::Int(-1));
+        assert_eq!(parse_client_opts(Some(&Value::Map(m2))).timeout, None);
+    }
+
+    #[test]
+    fn http_get_qotgan_upstream_timeout_qaytaradi() {
+        // Acceptance (issue #92): ulanishni qabul qilib JAVOB BERMAYDIGAN upstream
+        // butun thread'ni abadiy bloklamasligi kerak — qisqa timeout bilan xato
+        // qaytishi shart. Listener'ni ochamiz, ulanishni qabul qilamiz, lekin hech
+        // narsa yozmaymiz (slow/qotgan server taqlidi).
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Ulanishni ushlab turamiz, javob yubormaymiz.
+            for stream in listener.incoming() {
+                let _held = stream;
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+        let mut opts = BTreeMap::new();
+        opts.insert("timeout".to_string(), Value::Int(1));
+        let url = format!("http://{}/", addr);
+        let res = http_client("GET", vec![Value::Str(url), Value::Map(opts)], false);
+        match res {
+            Err(Flow::Error(msg)) => {
+                assert!(
+                    msg.contains("timeout"),
+                    "timeout xatosi kutilgan, keldi: {}",
+                    msg
+                )
+            }
+            Ok(_) => panic!("qotgan upstream'dan Ok kutilmagan — timeout bo'lishi kerak"),
+            Err(_) => panic!("Flow::Error(timeout) kutilgan"),
+        }
     }
 
     // build_req'dan body Value'ni ajratib oluvchi yordamchi.

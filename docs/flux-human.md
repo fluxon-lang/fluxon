@@ -780,11 +780,16 @@ each i in 1..10                          # maximum 10 steps
   r = ai.run msgs tools                  # tools: a list of [{name desc params}]
   if r.kind == :final
     ret r.text                           # AI is done → final answer
-  # r.kind == :call → the AI wants to call a tool
-  out = reg.call r.tool r.args           # run the tool by name (see below)
-  log "tool ${r.tool}: ${r._.ms}ms"      # logging/cost/confirmation goes here
-  msgs <- msgs.push {role::tool name:r.tool content:(json.enc out)}
+  # r.kind == :call → the AI wants to call tools. The model may call several
+  # in parallel → all are in r.calls; return a result for EACH one.
+  each c in r.calls
+    out = reg.call c.tool c.args         # run the tool by name (see below)
+    log "tool ${c.tool}"                 # logging/cost/confirmation goes here
+    msgs <- msgs.push {role::tool id:c.id content:(json.enc out)}
 ```
+> `r.tool`/`r.args`/`r.id` mirror `r.calls[0]` for back-compat (single-tool code
+> still works). But on parallel calls you must return a result for every
+> `tool_use_id`, otherwise the next request 400s.
 > `ai.run` is intentionally single-step. If you let the AI's tool calls run
 > automatically and uncontrolled, you could not do logging/cost/confirmation. The
 > loop is yours — so you see and control every tool call.
