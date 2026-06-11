@@ -414,6 +414,36 @@ fn cd_param(line: &str, key: &str) -> Option<String> {
     None
 }
 
+// Boundary qatori shu yerda haqiqatan tugayaptimi? RFC 2046: `--boundary` dan
+// keyin yo yopuvchi `--`, yo ixtiyoriy transport padding (bo'shliq/tab) + CRLF
+// keladi. Tekshiruvsiz fayl mazmunidagi tasodifiy `\r\n--abcXYZ` (boundary
+// `abc` ning prefiksi) chegara deb olinib qism noto'g'ri kesilardi (codex P2
+// revyu) — bunday holatda bu valid mazmun, chegara emas.
+fn boundary_line_ends(rest: &[u8]) -> bool {
+    if rest.starts_with(b"--") {
+        return true;
+    }
+    let mut i = 0;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    rest[i..].starts_with(b"\r\n")
+}
+
+// To'liq boundary qatorini qidiradi: `marker` dan keyingi baytlar ham chegara
+// qatorini tasdiqlashi shart (boundary_line_ends). Mos kelmagan prefiks
+// uchrashlar (fayl mazmunidagi `--boundaryX...`) o'tkazib yuboriladi.
+fn find_boundary(body: &[u8], marker: &[u8], from: usize) -> Option<usize> {
+    let mut search = from;
+    loop {
+        let i = find_sub(body, marker, search)?;
+        if boundary_line_ends(&body[i + marker.len()..]) {
+            return Some(i);
+        }
+        search = i + 1;
+    }
+}
+
 // multipart/form-data tanani qismlarga ajratadi: oddiy form maydonlari ->
 // fields map (req.body — JSON bilan simmetrik), fayl qismlari (filename bor) ->
 // files ro'yxati ({name filename content size}). Tana formatga mos kelmasa
@@ -434,7 +464,14 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Valu
     let mut files = Vec::new();
 
     // Birinchi boundary (RFC 2046 undan oldin preamble'ga ruxsat beradi).
-    let mut pos = find_sub(body, &delim, 0)? + delim.len();
+    // Tana to'g'ridan-to'g'ri `--boundary` bilan boshlansa CRLF prefiksi yo'q —
+    // alohida tekshiramiz; aks holda qator boshidagi (CRLF'dan keyingi)
+    // to'liq chegarani qidiramiz.
+    let mut pos = if body.starts_with(&delim) && boundary_line_ends(&body[delim.len()..]) {
+        delim.len()
+    } else {
+        find_boundary(body, &end_marker, 0)? + end_marker.len()
+    };
     loop {
         // Boundary'dan keyin `--` — yakuniy chegara, tugadik.
         if body[pos..].starts_with(b"--") {
@@ -443,7 +480,7 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Valu
         // Boundary qatori CRLF bilan tugaydi (orada transport padding mumkin).
         let nl = find_sub(body, b"\r\n", pos)?;
         let part_start = nl + 2;
-        let part_end = find_sub(body, &end_marker, part_start)?;
+        let part_end = find_boundary(body, &end_marker, part_start)?;
         let part = &body[part_start..part_end];
 
         // Qism: header'lar + bo'sh qator + mazmun. Header'lar matn (ASCII) —
@@ -1769,6 +1806,38 @@ mod tests {
         );
         let (_, files) = parse_multipart(&body, "MM").expect("parse bo'lishi kerak");
         assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn parse_multipart_mazmundagi_boundary_prefiksi_kesmaydi() {
+        // Fayl mazmunida `\r\n--abcXYZ` bor (boundary `abc` ning prefiksi, lekin
+        // to'liq chegara qatori emas) — qism KESILMAY butun saqlanishi kerak
+        // (codex P2 revyu: faqat `\r\n--boundary` qidirish mazmunni buzardi).
+        let data: &[u8] = b"birinchi\r\n--abcXYZ\r\nqolgan qism";
+        let body = multipart_body("abc", &[("doc", Some("a.txt"), data)]);
+        let (_, files) = parse_multipart(&body, "abc").expect("parse bo'lishi kerak");
+        assert_eq!(files.len(), 1);
+        let Value::Map(f) = &files[0] else {
+            panic!("fayl map bo'lishi kerak");
+        };
+        match f.get("content") {
+            Some(Value::Str(s)) => assert_eq!(s.as_bytes(), data),
+            _ => panic!("mazmun butun str bo'lishi kerak"),
+        }
+        assert!(matches!(f.get("size"), Some(Value::Int(n)) if *n == data.len() as i64));
+    }
+
+    #[test]
+    fn parse_multipart_padding_bilan_boundary_qabul() {
+        // RFC 2046: boundary qatoridan keyin transport padding (bo'shliq/tab)
+        // bo'lishi mumkin — bunday chegara haqiqiy deb olinadi.
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--PP  \r\n");
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"\r\n\r\n");
+        body.extend_from_slice(b"qiymat");
+        body.extend_from_slice(b"\r\n--PP--\r\n");
+        let (fields, _) = parse_multipart(&body, "PP").expect("parse bo'lishi kerak");
+        assert!(matches!(fields.get("a"), Some(Value::Str(s)) if s == "qiymat"));
     }
 
     #[test]
