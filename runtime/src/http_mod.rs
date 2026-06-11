@@ -179,20 +179,70 @@ impl CorsConfig {
     // Javobning HeaderMap'iga CORS header'larini qo'shadi (preflight'siz oddiy
     // javoblar uchun ham). Origin ruxsat etilmagan bo'lsa hech narsa qo'shilmaydi.
     fn apply_to(&self, hmap: &mut hyper::HeaderMap, req_origin: Option<&str>) {
-        use hyper::header::HeaderValue;
         let Some(allow) = self.allow_origin_for(req_origin) else {
             return;
         };
         set_header(hmap, "access-control-allow-origin", &allow);
         // Allow-Origin so'rov origin'iga qarab o'zgaradi — kesh to'g'ri bo'lishi
-        // uchun Vary: Origin (aks holda proksi bir origin javobini boshqasiga beradi).
+        // uchun Vary'ga Origin qo'shamiz (aks holda proksi bir origin javobini
+        // boshqasiga beradi). insert EMAS — handler `rep ... {vary:"Accept-Encoding"}`
+        // bilan qo'ygan Vary'ni saqlab, Origin'ni BIRLASHTIRAMIZ (codex P2: insert
+        // mavjud kesh kalitini buzardi). "*" — javob origin'ga bog'liq emas, Vary shart emas.
         if allow != "*" {
-            hmap.insert(hyper::header::VARY, HeaderValue::from_static("Origin"));
+            add_vary_origin(hmap);
         }
         if self.creds {
             set_header(hmap, "access-control-allow-credentials", "true");
         }
     }
+}
+
+// Javobning `Vary` header'iga `Origin` qo'shadi, mavjud qiymatlarni saqlab.
+// `Vary` allaqachon `Origin` (yoki `*`) ni o'z ichiga olsa — o'zgartirmaydi
+// (takror oldini olish). Aks holda vergul bilan birlashtiradi.
+fn add_vary_origin(hmap: &mut hyper::HeaderMap) {
+    use hyper::header::{HeaderValue, VARY};
+    // Mavjud Vary qiymatlarini o'qiymiz (bir nechta Vary qatori bo'lishi mumkin).
+    let existing: Vec<String> = hmap
+        .get_all(VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .collect();
+    // Allaqachon Origin yoki * bor bo'lsa — qo'shilgan, qaytamiz.
+    let already = existing.iter().any(|line| {
+        line.split(',').any(|tok| {
+            let t = tok.trim();
+            t.eq_ignore_ascii_case("origin") || t == "*"
+        })
+    });
+    if already {
+        return;
+    }
+    if existing.is_empty() {
+        hmap.insert(VARY, HeaderValue::from_static("Origin"));
+    } else {
+        // Mavjud qiymat(lar)ni bitta qatorga birlashtirib Origin qo'shamiz.
+        let merged = format!("{}, Origin", existing.join(", "));
+        if let Ok(hv) = HeaderValue::from_str(&merged) {
+            hmap.insert(VARY, hv);
+        }
+    }
+}
+
+// Javobga CORS header'larini qo'shadi (yoqilgan bo'lsa) va javobni qaytaradi.
+// Body-read xato javoblari (400/413), 404 va handler javobi — hammasi shu
+// orqali yakunlanadi, shunda CORS yoqilganda HAR javob `Access-Control-Allow-*`
+// oladi (codex P2: oldin erta-return xatolari header'siz qaytardi).
+fn cors_finalize(
+    mut resp: Response<Full<Bytes>>,
+    cors: &Option<CorsConfig>,
+    req_origin: Option<&str>,
+) -> Response<Full<Bytes>> {
+    if let Some(cfg) = cors {
+        cfg.apply_to(resp.headers_mut(), req_origin);
+    }
+    resp
 }
 
 // HeaderMap'ga bitta header'ni insert qiladi (eskisini bosadi). Buzuq nom/qiymat
@@ -1308,13 +1358,10 @@ async fn handle_request(
                 "error".to_string(),
                 Value::Str(format!("topilmadi: {} {}", method, path)),
             );
-            let mut resp = json_response(404, json_encode(&Value::Map(m)));
             // 404 ham CORS header oladi — aks holda brauzer xato javob tanasini
             // CORS to'sig'i sabab o'qiy olmaydi (debugni qiyinlashtiradi).
-            if let Some(cfg) = &cors {
-                cfg.apply_to(resp.headers_mut(), req_origin.as_deref());
-            }
-            return Ok(resp);
+            let resp = json_response(404, json_encode(&Value::Map(m)));
+            return Ok(cors_finalize(resp, &cors, req_origin.as_deref()));
         }
     };
 
@@ -1326,8 +1373,15 @@ async fn handle_request(
         match req.into_body().collect().await {
             Ok(c) => c.to_bytes(),
             // Oldin bu jim Bytes::new() ga tushardi (uzilgan POST handler'ga
-            // body:nil bilan yetardi); endi 400 qaytaramiz (issue #91).
-            Err(_) => return Ok(bad_request("so'rov tanasini o'qib bo'lmadi")),
+            // body:nil bilan yetardi); endi 400 qaytaramiz (issue #91). CORS
+            // header bilan yakunlanadi (codex P2: har javob CORS oladi).
+            Err(_) => {
+                return Ok(cors_finalize(
+                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    &cors,
+                    req_origin.as_deref(),
+                ));
+            }
         }
     } else {
         // Tez yo'l: Content-Length e'lon qilingan o'lcham chegaradan oshsa, tanani
@@ -1339,7 +1393,11 @@ async fn handle_request(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
         if matches!(declared, Some(len) if len > max_body as u64) {
-            return Ok(payload_too_large(max_body));
+            return Ok(cors_finalize(
+                payload_too_large(max_body),
+                &cors,
+                req_origin.as_deref(),
+            ));
         }
         // Limited oqim davomida ham haqiqiy chegarani majburlaydi — chegara oshsa
         // o'qishni to'xtatadi (Content-Length yolg'on bo'lsa ham himoyalaydi).
@@ -1351,9 +1409,17 @@ async fn handle_request(
                 if e.downcast_ref::<http_body_util::LengthLimitError>()
                     .is_some()
                 {
-                    return Ok(payload_too_large(max_body));
+                    return Ok(cors_finalize(
+                        payload_too_large(max_body),
+                        &cors,
+                        req_origin.as_deref(),
+                    ));
                 }
-                return Ok(bad_request("so'rov tanasini o'qib bo'lmadi"));
+                return Ok(cors_finalize(
+                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    &cors,
+                    req_origin.as_deref(),
+                ));
             }
         }
     };
@@ -1435,7 +1501,7 @@ async fn handle_request(
     })
     .await;
 
-    let mut resp = match result {
+    let resp = match result {
         Ok(Ok(v)) => value_to_response(v),
         Ok(Err(flow)) => flow_to_response(flow),
         Err(join_err) => flow_to_response(Flow::Error(format!("handler panic: {}", join_err))),
@@ -1443,10 +1509,7 @@ async fn handle_request(
     // CORS yoqilgan bo'lsa har javobga `Access-Control-Allow-*` qo'shamiz
     // (issue #135). Handler `rep ... {access_control_allow_origin: ...}` bilan
     // qo'lda yozgan bo'lsa ham insert ustidan yozadi — kanonik sozlama ustun.
-    if let Some(cfg) = &cors {
-        cfg.apply_to(resp.headers_mut(), req_origin.as_deref());
-    }
-    Ok(resp)
+    Ok(cors_finalize(resp, &cors, req_origin.as_deref()))
 }
 
 // OPTIONS preflight javobi (issue #135). Brauzer haqiqiy so'rovdan oldin
@@ -3165,6 +3228,28 @@ mod tests {
             Some("https://app.example.com")
         );
         assert_eq!(hv(&h, "vary").as_deref(), Some("Origin"));
+    }
+
+    #[test]
+    fn cors_vary_mavjud_qiymatni_saqlaydi() {
+        // Handler `rep ... {vary:"Accept-Encoding"}` qo'ygan Vary'ni o'chirmasdan
+        // Origin'ni birlashtiramiz (codex P2: insert kesh kalitini buzardi).
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::VARY, "Accept-Encoding".parse().unwrap());
+        cfg.apply_to(&mut h, Some("https://app.example.com"));
+        assert_eq!(hv(&h, "vary").as_deref(), Some("Accept-Encoding, Origin"));
+    }
+
+    #[test]
+    fn cors_vary_takror_origin_qoshmaydi() {
+        // Vary allaqachon Origin bo'lsa — takror qo'shilmaydi (case-insensitive).
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::VARY, "origin".parse().unwrap());
+        cfg.apply_to(&mut h, Some("https://app.example.com"));
+        // Mavjud "origin" saqlanadi, ikkinchi marta qo'shilmaydi.
+        assert_eq!(hv(&h, "vary").as_deref(), Some("origin"));
     }
 
     #[test]

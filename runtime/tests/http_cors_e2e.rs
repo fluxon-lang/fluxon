@@ -267,3 +267,47 @@ async fn cors_ruxsat_etilmagan_origin_header_olmaydi() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// Past max_body bilan POST handler — katta tana 413 qaytaradi.
+const LIMIT_SCRIPT: &str = r#"
+http.cors "*"
+
+http.on :post "/upload" \req ->
+  rep 201 {ok: true}
+
+http.serve PORT {max_body: 10}
+"#;
+
+#[tokio::test]
+async fn cors_413_xato_javob_ham_header_oladi() {
+    // Body-read xato javobi (413 Payload Too Large) handler'gacha yetmaydi, lekin
+    // CORS yoqilgan bo'lsa baribir Access-Control-Allow-Origin olishi kerak —
+    // hujjat "har javobga qo'shiladi" deydi (codex P2).
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let port = 8437;
+    let script = LIMIT_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server(port, &script);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    // Content-Length max_body (10) dan katta — tez yo'l tananing o'qimasdan 413.
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("ulanish");
+    let req = "POST /upload HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\n\
+               Content-Type: application/json\r\nContent-Length: 9999\r\nConnection: close\r\n\r\n";
+    stream.write_all(req.as_bytes()).await.expect("yozish");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.expect("o'qish");
+    let resp = String::from_utf8_lossy(&buf).to_string();
+
+    assert!(resp.contains("413"), "413 kutilgan: {}", resp);
+    assert!(
+        resp.to_lowercase()
+            .contains("access-control-allow-origin: *"),
+        "413 javob ham CORS header olishi kerak: {}",
+        resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
