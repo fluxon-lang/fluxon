@@ -1110,6 +1110,14 @@ impl Interp {
         if set_cols.is_empty() {
             return Err(Flow::err("db.up: o'zgartirish map'i bo'sh"));
         }
+        // db.del'dagi kabi guard: bo'sh shart → build_update "WHERE" qismini
+        // ustunsiz quradi (malformed SQL) va butun jadval yangilanardi. Aniq
+        // o'zbekcha xato ber, SQLite'ning xom "incomplete input" xabari o'rniga.
+        if whr_cols.is_empty() {
+            return Err(Flow::err(
+                "db.up: shart map'i bo'sh — butun jadval yangilanmasligi uchun rad etildi",
+            ));
+        }
         vals.extend(whr_vals);
         let sql = self.db_builder(|db| db.build_update(&table, &set_cols, &whr_cols))?;
         with_db(self, |tx| tx.exec(&sql, &vals), |db| db.exec(&sql, &vals))?;
@@ -1345,10 +1353,25 @@ impl Interp {
         // kod tomonda olamiz, lekin first uchun LIMIT 1 qo'shamiz).
         if matches!(mode, RunMode::First) {
             sql.push_str(" LIMIT 1");
-        } else if let Some(Value::Int(n)) = b.get("limit") {
-            sql.push_str(&format!(" LIMIT {}", n));
-            if let Some(Value::Int(off)) = b.get("offset") {
-                sql.push_str(&format!(" OFFSET {}", off));
+        } else {
+            let limit = if let Some(Value::Int(n)) = b.get("limit") {
+                Some(*n)
+            } else {
+                None
+            };
+            let offset = if let Some(Value::Int(off)) = b.get("offset") {
+                Some(*off)
+            } else {
+                None
+            };
+            match (limit, offset) {
+                (Some(n), Some(off)) => sql.push_str(&format!(" LIMIT {} OFFSET {}", n, off)),
+                (Some(n), None) => sql.push_str(&format!(" LIMIT {}", n)),
+                // OFFSET LIMIT'siz: SQLite OFFSET uchun LIMIT talab qiladi, shu
+                // sabab avval jim e'tiborsiz qolardi. LIMIT -1 = cheksiz qatordan
+                // off tasini o'tkazib yuboradi.
+                (None, Some(off)) => sql.push_str(&format!(" LIMIT -1 OFFSET {}", off)),
+                (None, None) => {}
             }
         }
 
@@ -1926,6 +1949,10 @@ fn db_stage_order(args: Vec<Value>) -> Result<Value, Flow> {
 fn db_stage_limit(args: Vec<Value>) -> Result<Value, Flow> {
     let (mut b, rest) = take_builder(args, "db.limit")?;
     let n = arg_int(rest.first(), "db.limit")?;
+    // Manfiy LIMIT SQLite'da "cheksiz" degani — kutilmagan xulq. Aniq rad et.
+    if n < 0 {
+        return Err(Flow::err("db.limit: manfiy qiymat berib bo'lmaydi"));
+    }
     b.insert("limit".to_string(), Value::Int(n));
     Ok(Value::Map(b))
 }
@@ -1933,6 +1960,9 @@ fn db_stage_limit(args: Vec<Value>) -> Result<Value, Flow> {
 fn db_stage_offset(args: Vec<Value>) -> Result<Value, Flow> {
     let (mut b, rest) = take_builder(args, "db.offset")?;
     let n = arg_int(rest.first(), "db.offset")?;
+    if n < 0 {
+        return Err(Flow::err("db.offset: manfiy qiymat berib bo'lmaydi"));
+    }
     b.insert("offset".to_string(), Value::Int(n));
     Ok(Value::Map(b))
 }

@@ -1142,6 +1142,62 @@ nulls = db.from "bookings" |> db.eq {tenant_id:1 resource_id:nil} |> db.all
         });
     }
 
+    // Issue #104: db.up bo'sh shart map'i bilan chaqirilsa, build_update ustunsiz
+    // "WHERE" quradi (malformed SQL) va butun jadval yangilanardi. db.del'dagi
+    // kabi guard endi aniq o'zbekcha xato beradi (SQLite'ning xom "incomplete
+    // input" o'rniga).
+    #[test]
+    fn db_up_bosh_shart_rad_etiladi() {
+        with_db_test("up_empty_where", || {
+            let setup = "use db\ntbl t\n  id serial pk\n  n int\ndb.ins \"t\" {n:1}\n";
+            let e = run_source(&format!("{setup}db.up \"t\" {{n:5}} {{}}\n")).unwrap_err();
+            assert!(
+                e.contains("db.up: shart map'i bo'sh"),
+                "kutilmagan xato: {e}"
+            );
+        });
+    }
+
+    // Issue #104: db.offset LIMIT'siz avval jim e'tiborsiz qolardi (SQLite OFFSET
+    // uchun LIMIT talab qiladi). Endi LIMIT -1 OFFSET m bilan to'g'ri qo'llanadi.
+    #[test]
+    fn db_offset_limitsiz_qollanadi() {
+        with_db_test("offset_no_limit", || {
+            run(r#"
+use db
+tbl t
+  id serial pk
+  n  int
+db.ins "t" {n:1}
+db.ins "t" {n:2}
+db.ins "t" {n:3}
+# offset 1, limit yo'q → birinchisini o'tkazib, qolgan 2 ta qaytadi.
+rows = db.from "t" |> db.order :n |> db.offset 1 |> db.all
+(rows.len == 2) | (fail "offset LIMIT'siz 2 qator kutilgan, ${rows.len}")
+(rows.0.n == 2) | (fail "offset birinchini o'tkazishi kerak, ${rows.0.n}")
+"#);
+        });
+    }
+
+    // Issue #104: manfiy limit/offset SQLite'da kutilmagan xulq beradi (manfiy
+    // LIMIT = cheksiz). Endi user sathida aniq rad etiladi.
+    #[test]
+    fn db_manfiy_limit_offset_rad_etiladi() {
+        with_db_test("neg_limit_offset", || {
+            let setup = "use db\ntbl t\n  id serial pk\n  n int\n";
+            let e1 = run_source(&format!(
+                "{setup}db.from \"t\" |> db.limit (0 - 1) |> db.all\n"
+            ))
+            .unwrap_err();
+            assert!(e1.contains("db.limit: manfiy"), "limit xatosi: {e1}");
+            let e2 = run_source(&format!(
+                "{setup}db.from \"t\" |> db.offset (0 - 3) |> db.all\n"
+            ))
+            .unwrap_err();
+            assert!(e2.contains("db.offset: manfiy"), "offset xatosi: {e2}");
+        });
+    }
+
     // Aggregatsiya builder'i: group + count/sum + conditional agg (count_if/sum_if).
     #[test]
     fn db_query_builder_agg() {
