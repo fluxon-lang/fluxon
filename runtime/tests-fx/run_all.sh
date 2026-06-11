@@ -102,6 +102,9 @@ run "12_modules"            $BIN run $DIR/12_modules.fx
 echo "############ 13 auth (JWT + parol hash) ############"
 run "13_auth"  env AUTH_SECRET=sirli-kalit-13 $BIN run $DIR/13_auth.fx
 
+echo "############ 14 crypto (hash/hmac/b64/hex/uuid) ############"
+run "14_crypto"             $BIN run $DIR/14_crypto.fx
+
 echo "================================================"
 echo "YAKUN: $pass PASS, $fail FAIL"
 echo "================================================"

@@ -15,6 +15,7 @@ mod ast;
 mod auth_mod;
 mod builtins;
 mod cron_mod;
+mod crypto_mod;
 mod db_mod;
 mod http_mod;
 mod interp;
@@ -2952,5 +2953,30 @@ s = """
             "kutilmagan xato: {}",
             err
         );
+    }
+
+    // Issue #131: crypto battery Flux kodidan ochiq — argumentli chaqiruv
+    // (Call) ham, argument'siz `crypto.uuid` (Field) ham ishlaydi.
+    #[test]
+    fn crypto_battery_flux_kodidan() {
+        run(r#"
+h = crypto.sha256 "abc"
+(h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") | (fail "sha256 buzildi: ${h}")
+sig = crypto.hmac "Jefe" "what do ya want for nothing?"
+(sig == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") | (fail "hmac buzildi: ${sig}")
+((crypto.b64d (crypto.b64 "salom dunyo")) == "salom dunyo") | (fail "b64 roundtrip buzildi")
+((crypto.hex "abz") == "61627a") | (fail "hex buzildi")
+u = crypto.uuid
+((str.len u) == 36) | (fail "uuid uzunligi buzildi: ${u}")
+(u != crypto.uuid) | (fail "uuid takrorlandi")
+"#);
+    }
+
+    // Issue #131: crypto.b64d noto'g'ri kirishda aniq xato (panic emas).
+    #[test]
+    fn crypto_b64d_xato_beradi() {
+        let err = run_source("crypto.b64d \"bu base64 emas!!!\"")
+            .expect_err("yaroqsiz base64 xato berishi kerak");
+        assert!(err.contains("base64"), "kutilmagan xato: {}", err);
     }
 }

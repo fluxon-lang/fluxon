@@ -88,7 +88,7 @@ pub fn install(env: &Env) {
 pub fn is_module(name: &str) -> bool {
     matches!(
         name,
-        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh"
+        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh" | "crypto"
     )
 }
 
@@ -103,6 +103,9 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "io" => io_module(func, args),
         "fs" => fs_module(func, args),
         "sh" => sh_module(func, args),
+        // crypto — toza modul (IO'siz), lekin battery sifatida alohida faylda
+        // (auth bilan bir oilada — kriptografik primitivlar).
+        "crypto" => crate::crypto_mod::crypto_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }
@@ -1485,7 +1488,7 @@ fn arg<'a>(args: &'a [Value], i: usize, who: &str) -> Result<&'a Value, Flow> {
     args.get(i)
         .ok_or_else(|| Flow::err(format!("{}: {}-argument yetishmadi", who, i + 1)))
 }
-fn arg_str(args: &[Value], i: usize, who: &str) -> Result<String, Flow> {
+pub(crate) fn arg_str(args: &[Value], i: usize, who: &str) -> Result<String, Flow> {
     match arg(args, i, who)? {
         Value::Str(s) => Ok(s.clone()),
         Value::Sym(s) => Ok(s.clone()),

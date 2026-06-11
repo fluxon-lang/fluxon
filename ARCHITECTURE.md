@@ -210,6 +210,7 @@ implementatsiya qilingan:
 | `db` | `db_mod.rs` | SQLite, pool, tx, auto-migration (postgres/mysql stub) |
 | `ai` | `ai_mod.rs` | Anthropic Messages API |
 | `auth` | `auth_mod.rs` | JWT HS256 + parol hash (argon2id) |
+| `crypto` | `crypto_mod.rs` | sha256/hmac/b64/hex/uuid (toza modul — call_module orqali) |
 | `ws` | `ws_mod.rs` | websocket server, room/data |
 | `cron` | `cron_mod.rs` | rejalashtirilgan vazifalar |
 | `queue` | `queue_mod.rs` | fon ishlari navbati |
