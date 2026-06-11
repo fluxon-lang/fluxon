@@ -181,7 +181,15 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             if n <= len {
                 return Ok(Value::Str(s));
             }
-            let mut out = String::with_capacity(s.len() + (n - len) * c.len_utf8());
+            // Natija baytlarini checked hisoblaymiz va isize::MAX (Rust
+            // allokatsiya chegarasi) dan oshganini rad qilamiz — aks holda
+            // with_capacity Flux xatosi o'rniga "capacity overflow" panic berardi.
+            let bytes = (n - len)
+                .checked_mul(c.len_utf8())
+                .and_then(|b| b.checked_add(s.len()))
+                .filter(|&b| b <= isize::MAX as usize)
+                .ok_or_else(|| Flow::overflow("str.pad"))?;
+            let mut out = String::with_capacity(bytes);
             for _ in 0..(n - len) {
                 out.push(c);
             }
@@ -197,11 +205,13 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
                     n
                 )));
             }
-            // checked_mul: ulkan n da String::repeat panic o'rniga aniq xato.
-            if s.len().checked_mul(n as usize).is_none() {
-                return Err(Flow::overflow("str.repeat"));
+            // Natija baytlari isize::MAX (Rust allokatsiya chegarasi) dan
+            // oshmasin: usize'ga sig'sa ham String::repeat "capacity overflow"
+            // panic beradi — o'rniga aniq Flux xatosi.
+            match s.len().checked_mul(n as usize) {
+                Some(b) if b <= isize::MAX as usize => Ok(Value::Str(s.repeat(n as usize))),
+                _ => Err(Flow::overflow("str.repeat")),
             }
-            Ok(Value::Str(s.repeat(n as usize)))
         }
         "int" => {
             let s = arg_str(&args, 0, "str.int")?;

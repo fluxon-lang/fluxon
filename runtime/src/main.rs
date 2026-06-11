@@ -775,6 +775,10 @@ log "parts=${parts} joined=${parts.join "-"}"
     fn str_repeat_negative_and_pad_empty_fail() {
         assert!(run_source(r#"str.repeat "a" (0 - 1)"#).is_err());
         assert!(run_source(r#"str.pad "a" 3 """#).is_err());
+        // Baytlar usize'ga sig'sa ham isize::MAX (allokatsiya chegarasi) dan
+        // oshsa — panic emas, Flux xatosi (PR #151 review).
+        assert!(run_source(r#"str.repeat "aa" 4611686018427387904"#).is_err());
+        assert!(run_source(r#"str.pad "x" 4611686018427387904 "🙂""#).is_err());
     }
 
     #[test]
