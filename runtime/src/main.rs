@@ -2991,4 +2991,74 @@ crypto = {sha256: \s -> "meniki ${s}" uuid: 7}
 ((crypto.uuid) == 7) | (fail "lokal crypto.uuid ustun bo'lmadi")
 "#);
     }
+
+    // Issue #132: bytes turi asoslari — of/str/len/slice, tenglik, Display.
+    #[test]
+    fn bytes_turi_asoslari() {
+        run(r#"
+b = bytes.of "salom"
+((bytes.len b) == 5) | (fail "bytes.len buzildi")
+((bytes.str b) == "salom") | (fail "bytes.str buzildi")
+(b == (bytes.of "salom")) | (fail "bytes tenglik buzildi")
+(b != (bytes.of "boshqa")) | (fail "bytes notenglik buzildi")
+qism = bytes.slice b 0 2
+((bytes.str qism) == "sa") | (fail "bytes.slice buzildi")
+("${b}" == "<bytes 5>") | (fail "bytes interpolatsiya ko'rinishi buzildi: ${b}")
+"#);
+    }
+
+    // Issue #132: bytes.len BAYT o'lchaydi, str.len BELGI — diakritikali matnda
+    // farq ko'rinadi (’ U+2019 = 3 bayt, 1 belgi).
+    #[test]
+    fn bytes_len_bayt_str_len_belgi() {
+        run(r#"
+s = "o’zbek"
+((str.len s) == 6) | (fail "str.len belgi sanashi kerak")
+((bytes.len (bytes.of s)) == 8) | (fail "bytes.len bayt sanashi kerak")
+"#);
+    }
+
+    // Issue #132: crypto bilan integratsiya — b64db ikkilik dekodlash, bytes
+    // kirishlar str bilan bir xil natija.
+    #[test]
+    fn bytes_crypto_integratsiya() {
+        run(r#"
+data = crypto.b64db "AP/+iA=="
+((bytes.len data) == 4) | (fail "b64db uzunlik buzildi")
+((crypto.b64 data) == "AP/+iA==") | (fail "bytes b64 aylanasi buzildi")
+((crypto.sha256 (bytes.of "abc")) == (crypto.sha256 "abc")) | (fail "sha256 bytes/str farq qildi")
+"#);
+    }
+
+    // Issue #132: bytes.str UTF-8 bo'lmagan baytlarda aniq xato (jim buzilmaydi).
+    #[test]
+    fn bytes_str_yaroqsiz_utf8_xato() {
+        let err = run_source("bytes.str (crypto.b64db \"//4=\")")
+            .expect_err("yaroqsiz UTF-8 xato berishi kerak");
+        assert!(err.contains("UTF-8"), "kutilmagan xato: {}", err);
+    }
+
+    // Issue #132: fs bilan ikkilik aylana — bytes yoziladi, fs.readb aynan
+    // o'sha baytlarni qaytaradi (rasm/PDF stsenariysi).
+    #[test]
+    fn bytes_fs_integratsiya() {
+        run(r#"
+yol = "/tmp/flux_bytes_it_" + (rand.str 10) + ".bin"
+fs.write yol (crypto.b64db "AP/+iA==")
+b = fs.readb yol
+((bytes.len b) == 4) | (fail "fs.readb uzunlik buzildi")
+((crypto.b64 b) == "AP/+iA==") | (fail "fs ikkilik aylanasi buzildi")
+fs.del yol
+((fs.readb yol) == nil) | (fail "o'chirilgan fayl nil bo'lishi kerak")
+"#);
+    }
+
+    // Issue #132: json.enc bytes'ni base64 matn sifatida kodlaydi (yo'qotishsiz).
+    #[test]
+    fn bytes_json_enc_base64() {
+        run(r#"
+b = crypto.b64db "AP/+iA=="
+((json.enc {fayl:b}) == "{\"fayl\":\"AP/+iA==\"}") | (fail "json.enc bytes buzildi")
+"#);
+    }
 }

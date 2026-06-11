@@ -5,8 +5,12 @@
 //   crypto.hmac key msg    # -> HMAC-SHA256 hex — webhook imzo tekshirish
 //   crypto.b64 s           # -> base64 (standart alifbo, padding bilan)
 //   crypto.b64d s          # -> base64'ni ochish (UTF-8 matn), yoki err
+//   crypto.b64db s         # -> base64'ni ochish (bytes — ikkilik xavfsiz)
 //   crypto.hex s           # -> matn baytlarining hex ko'rinishi
 //   crypto.uuid            # -> UUID v4 (OS CSPRNG)
+//
+// Kirishlar str YOKI bytes (issue #132): fayl baytlarini hash'lash/kodlash
+// uchun alohida funksiya nomi kerak emas — arg_bytes ikkalasini qabul qiladi.
 //
 // Primitivlar runtime ichida allaqachon bor edi (`auth` battery JWT uchun
 // hmac/sha2/base64 ishlatadi) — bu battery ularni foydalanuvchiga ochadi,
@@ -26,7 +30,9 @@ use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STAN
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-use crate::builtins::arg_str;
+use std::sync::Arc;
+
+use crate::builtins::{arg_bytes, arg_str};
 use crate::interp::Flow;
 use crate::value::Value;
 
@@ -49,43 +55,55 @@ const LENIENT_URL: GeneralPurpose = GeneralPurpose::new(
 pub fn crypto_module(func: &str, args: Vec<Value>) -> R {
     match func {
         "sha256" => {
-            let s = arg_str(&args, 0, "crypto.sha256")?;
-            Ok(Value::Str(to_hex(&Sha256::digest(s.as_bytes()))))
+            let b = arg_bytes(&args, 0, "crypto.sha256")?;
+            Ok(Value::Str(to_hex(&Sha256::digest(b.as_slice()))))
         }
         "hmac" => {
-            let key = arg_str(&args, 0, "crypto.hmac")?;
-            let msg = arg_str(&args, 1, "crypto.hmac")?;
-            let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+            let key = arg_bytes(&args, 0, "crypto.hmac")?;
+            let msg = arg_bytes(&args, 1, "crypto.hmac")?;
+            let mut mac = Hmac::<Sha256>::new_from_slice(key.as_slice())
                 .expect("HMAC har xil kalit uzunligini qabul qiladi");
-            mac.update(msg.as_bytes());
+            mac.update(msg.as_slice());
             Ok(Value::Str(to_hex(&mac.finalize().into_bytes())))
         }
         "b64" => {
-            let s = arg_str(&args, 0, "crypto.b64")?;
-            Ok(Value::Str(STANDARD.encode(s.as_bytes())))
+            let b = arg_bytes(&args, 0, "crypto.b64")?;
+            Ok(Value::Str(STANDARD.encode(b.as_slice())))
         }
         "b64d" => {
             let s = arg_str(&args, 0, "crypto.b64d")?;
-            let bytes = LENIENT_STD
-                .decode(s.as_bytes())
-                .or_else(|_| LENIENT_URL.decode(s.as_bytes()))
-                .map_err(|_| Flow::err("crypto.b64d: kirish base64 emas".to_string()))?;
-            // Flux'da bayt turi yo'q — natija matn bo'lishi shart. Ikkilik
-            // ma'lumotni jim buzib qaytarish (lossy) xavfli, aniq xato beramiz.
+            let bytes = decode_lenient(&s, "crypto.b64d")?;
+            // Natija matn bo'lishi shart. Ikkilik ma'lumotni jim buzib qaytarish
+            // (lossy) xavfli, aniq xato beramiz — ikkilik uchun crypto.b64db bor.
             String::from_utf8(bytes)
                 .map(Value::Str)
                 .map_err(|_| Flow::err("crypto.b64d: natija UTF-8 matn emas".to_string()))
         }
+        // b64d'ning ikkilik juftligi (fs.read/fs.readb naqshi, issue #132):
+        // natija bytes — rasm/fayl kabi UTF-8 bo'lmagan yuklamalar uchun.
+        "b64db" => {
+            let s = arg_str(&args, 0, "crypto.b64db")?;
+            Ok(Value::Bytes(Arc::new(decode_lenient(&s, "crypto.b64db")?)))
+        }
         "hex" => {
-            let s = arg_str(&args, 0, "crypto.hex")?;
-            Ok(Value::Str(to_hex(s.as_bytes())))
+            let b = arg_bytes(&args, 0, "crypto.hex")?;
+            Ok(Value::Str(to_hex(b.as_slice())))
         }
         "uuid" => Ok(Value::Str(uuid_v4())),
         _ => Err(Flow::err(format!(
-            "crypto.{} yo'q (sha256/hmac/b64/b64d/hex/uuid)",
+            "crypto.{} yo'q (sha256/hmac/b64/b64d/b64db/hex/uuid)",
             func
         ))),
     }
+}
+
+// Lenient base64 dekodlash (b64d/b64db umumiy yo'li): padding ixtiyoriy,
+// standart alifbo mos kelmasa url-safe bilan ham urinamiz.
+fn decode_lenient(s: &str, who: &str) -> Result<Vec<u8>, Flow> {
+    LENIENT_STD
+        .decode(s.as_bytes())
+        .or_else(|_| LENIENT_URL.decode(s.as_bytes()))
+        .map_err(|_| Flow::err(format!("{}: kirish base64 emas", who)))
 }
 
 // Baytlarni kichik-harf hex matnga aylantiradi.
@@ -226,6 +244,52 @@ mod tests {
             assert!("89ab".contains(&u[19..20]), "variant noto'g'ri: {}", u);
             assert!(seen.insert(u), "takror UUID — CSPRNG buzildi");
         }
+    }
+
+    // bytes kirish (issue #132): bir xil baytlar str bilan bir xil natija beradi —
+    // fayl baytlarini hash'lash matnni hash'lash bilan bitta yo'l.
+    #[test]
+    fn bytes_kirish_str_bilan_bir_xil() {
+        let by = Value::Bytes(Arc::new(b"abc".to_vec()));
+        assert_eq!(
+            out_str(crypto_module("sha256", vec![by.clone()])),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            out_str(crypto_module("b64", vec![by.clone()])),
+            out_str(crypto_module("b64", vec![s("abc")]))
+        );
+        assert_eq!(out_str(crypto_module("hex", vec![by.clone()])), "616263");
+        assert_eq!(
+            out_str(crypto_module("hmac", vec![s("kalit"), by])),
+            out_str(crypto_module("hmac", vec![s("kalit"), s("abc")]))
+        );
+    }
+
+    // b64db: ikkilik xavfsiz dekodlash — UTF-8 bo'lmagan yuklama bytes qaytadi
+    // (b64d shu kirishda ataylab xato beradi).
+    #[test]
+    fn b64db_ikkilik_aylana() {
+        let data = vec![0xff, 0xfe, 0x00, 0x88];
+        let enc = STANDARD.encode(&data);
+        match crypto_module("b64db", vec![s(&enc)]) {
+            Ok(Value::Bytes(b)) => assert_eq!(*b, data),
+            _ => panic!("crypto.b64db bytes qaytarishi kerak"),
+        }
+        // bytes -> b64 -> b64db to'liq aylana.
+        let enc2 = out_str(crypto_module(
+            "b64",
+            vec![Value::Bytes(Arc::new(data.clone()))],
+        ));
+        match crypto_module("b64db", vec![s(&enc2)]) {
+            Ok(Value::Bytes(b)) => assert_eq!(*b, data),
+            _ => panic!("b64 -> b64db aylanasi buzildi"),
+        }
+        // Yaroqsiz base64 — aniq xato.
+        assert!(matches!(
+            crypto_module("b64db", vec![s("bu base64 emas!!!")]),
+            Err(Flow::Error(_))
+        ));
     }
 
     // Argument turi noto'g'ri bo'lsa aniq xato (panic emas).

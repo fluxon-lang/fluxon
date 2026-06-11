@@ -20,6 +20,10 @@ pub enum Value {
     Bool(bool),
     Nil,
     Sym(String),
+    // Ikkilik ma'lumot (issue #132): fayl tarkibi, HTTP binary body, hash
+    // natijalari. Arc — katta fayl klonlashda nusxalanmasin (HTTP javobida
+    // body bir necha marta ko'chadi); Send+Sync invarianti ham saqlanadi.
+    Bytes(Arc<Vec<u8>>),
     List(Vec<Value>),
     // Tartibni barqaror saqlash uchun BTreeMap (chiqishni deterministik qiladi).
     Map(BTreeMap<String, Value>),
@@ -85,6 +89,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Nil => "nil",
             Value::Sym(_) => "sym",
+            Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
             Value::Map(_) => "map",
             // ctx foydalanuvchiga oddiy map ko'rinadi — ichki tipni oshkor qilmaymiz.
@@ -102,6 +107,7 @@ impl Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Sym(a), Value::Sym(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y))
@@ -146,6 +152,9 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Nil => write!(f, "nil"),
             Value::Sym(s) => write!(f, ":{}", s),
+            // Xom baytlarni matnga quyish xavfli (terminal/log buziladi) —
+            // o'lchamli qisqa belgi chiqaramiz. Matn kerak bo'lsa: bytes.str b.
+            Value::Bytes(b) => write!(f, "<bytes {}>", b.len()),
             Value::List(items) => {
                 write!(f, "[")?;
                 for (i, v) in items.iter().enumerate() {

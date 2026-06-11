@@ -18,6 +18,7 @@ log "outside"
 ```
 42 int · 3.14 flt · "hi" str · true bool · nil · :ok sym (enum/tag)
 [1 2 3] list · {a:1 b:2} map        # NO COMMAS, space-separated
+bytes — binary data (no literal; comes from fs.readb / crypto.b64db / bytes.of)
 ```
 Str interpolation: `"$x"` (bare var only) or `"${expr}"` (any expr — `.field`, calls).
 Multi-line str: `"""` block (prompts, SQL, templates). Content starts on the NEXT line;
@@ -332,12 +333,14 @@ crypto.sha256 s        # → SHA-256 hex (lowercase)
 crypto.hmac key msg    # → HMAC-SHA256 hex — verify webhook signatures (Stripe/GitHub/Telegram)
 crypto.b64 s           # → base64 (standard alphabet, padded)
 crypto.b64d s          # → decode base64 (padding optional, url-safe accepted), or err
-crypto.hex s           # → hex of the string's bytes
+crypto.b64db s         # → decode base64 to bytes (binary-safe: images/files)
+crypto.hex s           # → hex of the input's bytes
 crypto.uuid            # → UUID v4 (crypto-secure source)
 ```
 `crypto.hmac`/`crypto.sha256` return lowercase hex — compare directly with the
 signature header a webhook sends. `crypto.b64d` errs on invalid base64 or
-non-UTF-8 output (no silent corruption).
+non-UTF-8 output (no silent corruption) — for binary payloads use `crypto.b64db`.
+Inputs (`sha256`/`hmac`/`b64`/`hex`) take str OR bytes — hash a file the same way.
 
 ### reg (function registry — dynamic dispatch)
 Store/call a function by STRING name (for agent tools — NOT a `match`-switch,
@@ -430,8 +433,9 @@ Naming in `db.*` style (`fs.read`/`fs.del`). On error `Flow::err` (catch with tr
 `fs.read` is the only exception — `nil` if the file is missing:
 ```flux
 fs.read path           # → str, or nil if file missing
-fs.write path content  # overwrites (prior content lost) → :ok
-fs.append path content # appends to end (creates file if missing) → :ok
+fs.readb path          # → bytes (binary read: image/PDF), or nil if missing
+fs.write path content  # overwrites (str OR bytes) → :ok
+fs.append path content # appends to end (str OR bytes; creates file if missing) → :ok
 fs.exists path         # file OR directory exists → bool
 fs.ls path             # names inside a directory (sorted, name only) → [str]
 fs.del path            # file or EMPTY directory → :ok (no recursive delete)
@@ -443,6 +447,21 @@ if !(fs.exists "data")
 fs.write "data/conf.json" (json.enc {port:8080})
 cfg = json.dec (fs.read "data/conf.json")
 ```
+
+### bytes (binary data — core, no use needed)
+For files / HTTP binaries (image, PDF, gzip). No literal syntax — values come
+from `fs.readb`, `crypto.b64db`, `bytes.of`. Logs/interp show `<bytes N>`
+(raw bytes never leak into text).
+```flux
+bytes.of s        # str → bytes (UTF-8); bytes → itself
+bytes.str b       # bytes → str (err if not UTF-8 — no silent corruption)
+bytes.len b       # BYTE count (str.len counts CHARS)
+bytes.slice b a c # sub-bytes [a..c) (clamped, like str.slice)
+```
+- HTTP: `rep 200 b {content_type:"image/png"}` sends raw bytes (default
+  `application/octet-stream`). A non-UTF-8 request/response body (`req.body`,
+  client `res.body`) arrives as bytes; text stays str as before.
+- db: bytes ↔ BLOB column. `json.enc` encodes bytes as base64 text.
 
 ### sh (external shell command)
 Runs a command through the shell (`sh -c` / on Windows `cmd /C`), so `&&`, pipes (`|`),

@@ -1609,6 +1609,8 @@ impl Interp {
             Value::Bool(b) => SqlVal::Int(if *b { 1 } else { 0 }),
             Value::Nil => SqlVal::Null,
             Value::Sym(s) => SqlVal::Text(s.clone()),
+            // bytes -> BLOB (issue #132): SQLite tabiiy ikkilik ustun.
+            Value::Bytes(b) => SqlVal::Blob(b.as_ref().clone()),
             Value::List(_) | Value::Map(_) => {
                 // Yozishda faqat process-ichi tbl registry tekshiriladi.
                 // DB introspeksiyasi o'qish tomoni uchun (json dekod) — shu
@@ -1703,7 +1705,9 @@ fn sqlval_to_value(cell: SqlVal, col_type: Option<&str>) -> Value {
         SqlVal::Int(n) => Value::Int(n),
         SqlVal::Real(x) => Value::Flt(x),
         SqlVal::Text(s) => Value::Str(s),
-        SqlVal::Blob(b) => Value::Str(String::from_utf8_lossy(&b).into_owned()),
+        // BLOB -> bytes (issue #132). Avval lossy matnga buzilardi — endi
+        // ikkilik ma'lumot yo'qotishsiz qaytadi (matn kerak bo'lsa: bytes.str).
+        SqlVal::Blob(b) => Value::Bytes(std::sync::Arc::new(b)),
         SqlVal::Null => Value::Nil,
     };
     match (col_type, &base) {
@@ -1771,6 +1775,7 @@ fn param_to_sqlval(v: &Value) -> Result<SqlVal, Flow> {
         Value::Bool(b) => SqlVal::Int(if *b { 1 } else { 0 }),
         Value::Nil => SqlVal::Null,
         Value::Sym(s) => SqlVal::Text(s.clone()), // symbol -> matn (filter mosligi)
+        Value::Bytes(b) => SqlVal::Blob(b.as_ref().clone()), // bytes -> BLOB (issue #132)
         Value::List(_) | Value::Map(_) => SqlVal::Text(json_encode(v)),
         // ctx — oddiy map kabi JSON matn (snapshot). json_encode buni hal qiladi.
         Value::Ctx(_) => SqlVal::Text(json_encode(v)),

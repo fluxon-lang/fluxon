@@ -374,18 +374,25 @@ fn build_req(
     let body = if body_bytes.is_empty() {
         Value::Nil
     } else {
-        let s = String::from_utf8_lossy(&body_bytes);
-        // Content-Type JSON bo'lsa, YOKI tana `{`/`[` bilan boshlansa — JSON
-        // parse'ga urinamiz. Sabab: `curl -d` standart holda
-        // x-www-form-urlencoded yuboradi, lekin tana ko'rinishidan JSON; agar
-        // Content-Type'ga qat'i bog'lansak, dasturchi sababsiz string oladi va
-        // `body.field` access chalg'ituvchi "str.field metodi" xatosi beradi.
-        let looks_like_json = matches!(s.trim_start().as_bytes().first(), Some(b'{') | Some(b'['));
-        if is_json || looks_like_json {
-            // JSON dekod xato bo'lsa — xom matn sifatida qoldiramiz.
-            json_decode(&s).unwrap_or_else(|_| Value::Str(s.to_string()))
-        } else {
-            Value::Str(s.to_string())
+        match std::str::from_utf8(&body_bytes) {
+            // Content-Type JSON bo'lsa, YOKI tana `{`/`[` bilan boshlansa — JSON
+            // parse'ga urinamiz. Sabab: `curl -d` standart holda
+            // x-www-form-urlencoded yuboradi, lekin tana ko'rinishidan JSON; agar
+            // Content-Type'ga qat'i bog'lansak, dasturchi sababsiz string oladi va
+            // `body.field` access chalg'ituvchi "str.field metodi" xatosi beradi.
+            Ok(s) => {
+                let looks_like_json =
+                    matches!(s.trim_start().as_bytes().first(), Some(b'{') | Some(b'['));
+                if is_json || looks_like_json {
+                    // JSON dekod xato bo'lsa — xom matn sifatida qoldiramiz.
+                    json_decode(s).unwrap_or_else(|_| Value::Str(s.to_string()))
+                } else {
+                    Value::Str(s.to_string())
+                }
+            }
+            // UTF-8 bo'lmagan tana — ikkilik yuklama (rasm, gzip): bytes
+            // (issue #132). Avval lossy o'qish ma'lumotni jim buzardi.
+            Err(_) => Value::Bytes(Arc::new(body_bytes.to_vec())),
         }
     };
 
@@ -623,6 +630,13 @@ fn body_value_to_response(status: u16, body: Value) -> Response<Full<Bytes>> {
             .body(Full::new(Bytes::new()))
             .unwrap(),
         Value::Str(s) => text_response(status, s),
+        // Ikkilik javob (rasm, PDF, arxiv — issue #132). Standart tur
+        // octet-stream; aniq tur 3-arg bilan: rep 200 b {content_type:"image/png"}.
+        Value::Bytes(b) => Response::builder()
+            .status(status_or_500(status))
+            .header("content-type", "application/octet-stream")
+            .body(Full::new(Bytes::from(b.as_ref().clone())))
+            .unwrap(),
         Value::Map(_) | Value::List(_) => json_response(status, json_encode(&body)),
         other => text_response(status, format!("{}", other)),
     }
@@ -1170,11 +1184,15 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
     let opts = parse_client_opts(opts_arg);
 
     // So'rov tanasini bir marta tayyorlaymiz (redirect'larda ham qayta ishlatamiz).
-    let (body_str, is_json) = match &body {
-        Some(Value::Map(_)) | Some(Value::List(_)) => (json_encode(body.as_ref().unwrap()), true),
-        Some(Value::Str(s)) => (s.clone(), false),
-        Some(other) => (format!("{}", other), false),
-        None => (String::new(), false),
+    // bytes body xom holida ketadi (issue #132) — shuning uchun String emas, Bytes.
+    let (body_payload, is_json) = match &body {
+        Some(Value::Map(_)) | Some(Value::List(_)) => {
+            (Bytes::from(json_encode(body.as_ref().unwrap())), true)
+        }
+        Some(Value::Str(s)) => (Bytes::from(s.clone()), false),
+        Some(Value::Bytes(b)) => (Bytes::from(b.as_ref().clone()), false),
+        Some(other) => (Bytes::from(format!("{}", other)), false),
+        None => (Bytes::new(), false),
     };
 
     // Timeout opts'dan alohida olamiz (opts quyida async blokka ko'chiriladi).
@@ -1226,7 +1244,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     builder = builder.header("content-type", "application/json");
                 }
                 let payload = if send_body {
-                    Bytes::from(body_str.clone())
+                    body_payload.clone()
                 } else {
                     Bytes::new()
                 };
@@ -1312,11 +1330,12 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     .await
                     .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
                     .to_bytes();
-                let text = String::from_utf8_lossy(&bytes).to_string();
-                let resp_body = if resp_is_json {
-                    json_decode(&text).unwrap_or(Value::Str(text))
-                } else {
-                    Value::Str(text)
+                let resp_body = match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) if resp_is_json => json_decode(&text).unwrap_or(Value::Str(text)),
+                    Ok(text) => Value::Str(text),
+                    // UTF-8 bo'lmagan javob (rasm, arxiv) — bytes (issue #132).
+                    // Avval lossy o'qish ikkilik ma'lumotni jim buzardi.
+                    Err(e) => Value::Bytes(Arc::new(e.into_bytes())),
                 };
 
                 let mut m = BTreeMap::new();
@@ -1433,6 +1452,63 @@ mod tests {
         h.append("x-forwarded-for", "2.2.2.2".parse().unwrap());
         let m = headers_to_map(&h);
         assert_eq!(hstr(&m, "x-forwarded-for"), "1.1.1.1, 2.2.2.2");
+    }
+
+    // --- bytes (issue #132): ikkilik tana so'rov/javob yo'llarida ---
+
+    // UTF-8 bo'lmagan so'rov tanasi bytes bo'lib keladi (avval lossy buzilardi).
+    #[test]
+    fn build_req_ikkilik_tana_bytes() {
+        let req = build_req(
+            "POST".into(),
+            "/upload".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "1.1.1.1".into(),
+            Bytes::from(vec![0xff, 0xfe, 0x00]),
+            false,
+        );
+        let Value::Map(m) = req else {
+            panic!("req map bo'lishi kerak");
+        };
+        match m.get("body") {
+            Some(Value::Bytes(b)) => assert_eq!(**b, vec![0xff, 0xfe, 0x00]),
+            _ => panic!("ikkilik tana bytes bo'lishi kerak"),
+        }
+    }
+
+    // Matnli tana avvalgidek str (regressiya himoyasi).
+    #[test]
+    fn build_req_matn_tana_str_qoladi() {
+        let req = build_req(
+            "POST".into(),
+            "/t".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "1.1.1.1".into(),
+            Bytes::from("salom"),
+            false,
+        );
+        let Value::Map(m) = req else {
+            panic!("req map bo'lishi kerak");
+        };
+        match m.get("body") {
+            Some(Value::Str(s)) => assert_eq!(s, "salom"),
+            _ => panic!("matn tana str bo'lishi kerak"),
+        }
+    }
+
+    // bytes javob — xom baytlar + application/octet-stream standart turi.
+    #[test]
+    fn bytes_javob_octet_stream() {
+        let resp = body_value_to_response(200, Value::Bytes(Arc::new(vec![1, 2, 3])));
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/octet-stream"
+        );
     }
 
     #[test]
