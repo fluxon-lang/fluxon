@@ -598,6 +598,39 @@ log "keys=${u.keys} hasName=${u.has "name"} age=${u2.age}"
 "#);
     }
 
+    // Issue #129: m.merge other — ikki map'ni birlashtirish (other ustun keladi).
+    #[test]
+    fn map_merge() {
+        run(r#"
+# asosiy naqsh: default config + foydalanuvchi override'i
+defaults = {host:"localhost" port:8080 debug:false}
+user = {port:3000 debug:true}
+cfg = defaults.merge user
+
+# other'dagi kalitlar ustun keladi
+(cfg.port == 3000) | (fail "merge: other kaliti ustun kelmadi: ${cfg.port}")
+(cfg.debug == true) | (fail "merge: debug override bo'lmadi")
+# other'da yo'q kalit asl qiymatda qoladi
+(cfg.host == "localhost") | (fail "merge: host yo'qoldi: ${cfg.host}")
+(cfg.len == 3) | (fail "merge: kalitlar soni noto'g'ri: ${cfg.len}")
+
+# asl map'lar o'zgarmaydi (set/del bilan izchil — yangi map qaytadi)
+(defaults.port == 8080) | (fail "merge: asl map o'zgarib ketdi")
+((user.has "host") == false) | (fail "merge: other map o'zgarib ketdi")
+
+# bo'sh map bilan merge — o'zini qaytaradi
+((defaults.merge {}).len == 3) | (fail "merge: bo'sh map bilan buzildi")
+(({}.merge defaults).port == 8080) | (fail "merge: bo'sh map'dan merge buzildi")
+"#);
+    }
+
+    // map.merge map bo'lmagan argument bilan tushunarli xato qaytaradi.
+    #[test]
+    fn map_merge_notogri_argument() {
+        let e = run_source(r#"({a:1}).merge 42"#).unwrap_err();
+        assert!(e.contains("map.merge"), "kutilmagan xato matni: {}", e);
+    }
+
     // Schema map qiymat pozitsiyasidagi bare tip nomi (`{a:str b:int}`) sym'ga
     // aylanadi — docs (`ai.json {product:str qty:int}`) va'da qilgani. `str` ham
     // modul nomi bo'lgani uchun ilgari "noma'lum nom: str" xatosini berardi.

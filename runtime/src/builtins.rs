@@ -1453,6 +1453,22 @@ fn map_method(m: &BTreeMap<String, Value>, method: &str, args: Vec<Value>) -> R 
             new.remove(&k);
             Ok(Value::Map(new))
         }
+        "merge" => {
+            // other'dagi kalitlar ustun keladi (set semantikasi bilan izchil:
+            // keyin yozilgan g'olib) — default config + override naqshi uchun.
+            let other = match arg(&args, 0, "map.merge")? {
+                Value::Map(o) => o.clone(),
+                other => {
+                    return Err(Flow::err(format!(
+                        "map.merge: argument map bo'lishi kerak, {} berildi",
+                        other.type_name()
+                    )));
+                }
+            };
+            let mut new = m.clone();
+            new.extend(other);
+            Ok(Value::Map(new))
+        }
         _ => Err(Flow::err(format!("map metodi '{}' mavjud emas", method))),
     }
 }

@@ -870,6 +870,7 @@ l.all \x -> x > 0      # hammasi mosmi → bool (birinchi nomosda to'xtaydi)
 ```flux
 m.set k v              # kalit qo'yadi/yangilaydi → yangi map
 m.del k                # kalitni o'chiradi → yangi map
+m.merge other          # ikki map'ni birlashtiradi (other ustun) → yangi map
 m.has k                # kalit bormi → bool
 m.keys                 # kalitlar ro'yxati
 m.vals                 # qiymatlar ro'yxati
