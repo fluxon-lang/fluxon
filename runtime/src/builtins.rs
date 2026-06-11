@@ -257,10 +257,86 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "round" => Ok(Value::Int(x.round() as i64)),
+        // min/max argumentning o'zini qaytaradi — int kirsa int qoladi
+        // (abs bilan bir uslub), aralash int/flt da ham tur yo'qolmaydi.
+        "min" | "max" => {
+            // arg_num ikkinchi argument son ekanini tekshiradi (x birinchini).
+            let y = arg_num(&args, 1, &format!("math.{}", func))?;
+            use std::cmp::Ordering;
+            // Taqqoslash yo'qotishsiz: int f64 ga o'tkazilsa 2^53 dan katta
+            // qo'shni qiymatlar yaxlitlanib teng chiqadi va tie qoidasi
+            // noto'g'ri tomonni qaytaradi. int/int — i64 da, aralash —
+            // cmp_int_flt bilan; faqat flt/flt f64 da qoladi (u aniq).
+            let ord = match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                (Value::Int(a), Value::Flt(b)) => cmp_int_flt(*a, *b),
+                (Value::Flt(a), Value::Int(b)) => cmp_int_flt(*b, *a).reverse(),
+                // NaN tartibsiz — Equal deb olamiz (saralash bilan bir xil).
+                _ => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            };
+            let pick_first = if func == "min" {
+                ord != Ordering::Greater
+            } else {
+                ord != Ordering::Less
+            };
+            Ok(if pick_first {
+                args[0].clone()
+            } else {
+                args[1].clone()
+            })
+        }
+        "pow" => {
+            let y = arg_num(&args, 1, "math.pow")?;
+            match (&args[0], &args[1]) {
+                // int ^ manfiy bo'lmagan int → int (checked: overflow'da panic
+                // emas, Flux xatosi; i64 ga sig'maydigan daraja ham overflow).
+                (Value::Int(a), Value::Int(b)) if *b >= 0 => {
+                    let e = u32::try_from(*b).map_err(|_| Flow::overflow("math.pow"))?;
+                    Ok(Value::Int(
+                        a.checked_pow(e).ok_or_else(|| Flow::overflow("math.pow"))?,
+                    ))
+                }
+                // manfiy daraja yoki flt aralashgan — natija flt.
+                _ => Ok(Value::Flt(x.powf(y))),
+            }
+        }
+        "sqrt" => {
+            // Manfiy sondan ildiz NaN berardi — Flux'da NaN qiymati kutilmaydi,
+            // o'rniga aniq xato.
+            if x < 0.0 {
+                return Err(Flow::err("math.sqrt: manfiy sondan ildiz olib bo'lmaydi"));
+            }
+            Ok(Value::Flt(x.sqrt()))
+        }
         _ => Err(Flow::err(format!(
             "math modulida '{}' funksiyasi yo'q",
             func
         ))),
+    }
+}
+
+// i64 ni f64 bilan yo'qotishsiz taqqoslash: i64→f64 o'tkazish 2^53 dan keyin
+// yaxlitlaydi, shuning uchun f64 tomon i64 chegaralariga solishtiriladi-da,
+// butun va kasr qismlari alohida taqqoslanadi. NaN — Equal (saralashdagi
+// kelishuv bilan bir xil).
+fn cmp_int_flt(a: i64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    if b.is_nan() {
+        return Equal;
+    }
+    // i64::MAX as f64 = 2^63 (yuqoriga yaxlitlangan) — b shu qiymatdan boshlab
+    // har qanday i64 dan katta. i64::MIN as f64 = -2^63 esa aniq ifodalanadi.
+    if b >= i64::MAX as f64 {
+        return Less;
+    }
+    if b < i64::MIN as f64 {
+        return Greater;
+    }
+    // Endi b.trunc() i64 ga sig'adi va cast yo'qotishsiz.
+    match a.cmp(&(b.trunc() as i64)) {
+        Equal if b.fract() > 0.0 => Less,
+        Equal if b.fract() < 0.0 => Greater,
+        ord => ord,
     }
 }
 
@@ -1525,6 +1601,118 @@ mod math_tests {
             math_module("abs", vec![Value::Int(-7)]),
             Ok(Value::Int(7))
         ));
+    }
+
+    // Issue #128: min/max argument turini saqlaydi — int kirsa int chiqadi,
+    // aralash int/flt da g'olibning asl turi qaytadi.
+    #[test]
+    fn min_max_turni_saqlaydi() {
+        assert!(matches!(
+            math_module("min", vec![Value::Int(3), Value::Int(7)]),
+            Ok(Value::Int(3))
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(3), Value::Int(7)]),
+            Ok(Value::Int(7))
+        ));
+        // aralash: flt kichik bo'lsa flt qaytadi, int katta bo'lsa int.
+        assert!(matches!(
+            math_module("min", vec![Value::Int(3), Value::Flt(2.5)]),
+            Ok(Value::Flt(v)) if v == 2.5
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(3), Value::Flt(2.5)]),
+            Ok(Value::Int(3))
+        ));
+        // teng qiymatlarda birinchi argument qaytadi (deterministik).
+        assert!(matches!(
+            math_module("min", vec![Value::Int(5), Value::Flt(5.0)]),
+            Ok(Value::Int(5))
+        ));
+        // 2^53 dan katta qo'shni int'lar f64 da bir xil yaxlitlanadi —
+        // int/int yo'l i64 da aniq taqqoslashi kerak (PR #152 review).
+        assert!(matches!(
+            math_module("min", vec![Value::Int(i64::MAX), Value::Int(i64::MAX - 1)]),
+            Ok(Value::Int(v)) if v == i64::MAX - 1
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(i64::MAX - 1), Value::Int(i64::MAX)]),
+            Ok(Value::Int(v)) if v == i64::MAX
+        ));
+        // Aralash int/flt da ham yaxlitlanish bo'lmasin (PR #152 review):
+        // 2^53+1 (int) f64 ga o'tsa 2^53 ga teng chiqib qolardi.
+        let big = (1i64 << 53) + 1; // 9007199254740993
+        let big_f = (1i64 << 53) as f64; // 9007199254740992.0
+        assert!(matches!(
+            math_module("min", vec![Value::Int(big), Value::Flt(big_f)]),
+            Ok(Value::Flt(v)) if v == big_f
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Flt(big_f), Value::Int(big)]),
+            Ok(Value::Int(v)) if v == big
+        ));
+        // flt i64 oralig'idan tashqarida bo'lsa ham to'g'ri tomon yutadi.
+        assert!(matches!(
+            math_module("max", vec![Value::Int(i64::MAX), Value::Flt(1e19)]),
+            Ok(Value::Flt(v)) if v == 1e19
+        ));
+        assert!(matches!(
+            math_module("min", vec![Value::Int(i64::MIN), Value::Flt(-1e19)]),
+            Ok(Value::Flt(v)) if v == -1e19
+        ));
+        // kasr qismi hal qiluvchi bo'lgan holat: 3 < 3.5, -3 > -3.5.
+        assert!(matches!(
+            math_module("max", vec![Value::Int(3), Value::Flt(3.5)]),
+            Ok(Value::Flt(v)) if v == 3.5
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(-3), Value::Flt(-3.5)]),
+            Ok(Value::Int(-3))
+        ));
+    }
+
+    // Issue #128: int ^ manfiy bo'lmagan int → int (checked), overflow'da
+    // panic emas Flux xatosi; manfiy daraja yoki flt aralashsa flt.
+    #[test]
+    fn pow_int_flt_va_overflow() {
+        assert!(matches!(
+            math_module("pow", vec![Value::Int(2), Value::Int(10)]),
+            Ok(Value::Int(1024))
+        ));
+        assert!(matches!(
+            math_module("pow", vec![Value::Int(2), Value::Int(-1)]),
+            Ok(Value::Flt(v)) if v == 0.5
+        ));
+        assert!(matches!(
+            math_module("pow", vec![Value::Flt(2.0), Value::Int(3)]),
+            Ok(Value::Flt(v)) if v == 8.0
+        ));
+        // 2^63 i64 ga sig'maydi — overflow xatosi.
+        let r = math_module("pow", vec![Value::Int(2), Value::Int(63)]);
+        let Err(Flow::Error(msg)) = r else {
+            panic!("math.pow overflow xato berishi kerak");
+        };
+        assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        // u32 ga sig'maydigan daraja ham overflow (panic emas).
+        assert!(math_module("pow", vec![Value::Int(2), Value::Int(u32::MAX as i64 + 1)]).is_err());
+    }
+
+    // Issue #128: sqrt doim flt qaytaradi; manfiy kirish NaN emas, aniq xato.
+    #[test]
+    fn sqrt_flt_va_manfiy_xato() {
+        assert!(matches!(
+            math_module("sqrt", vec![Value::Int(9)]),
+            Ok(Value::Flt(v)) if v == 3.0
+        ));
+        assert!(matches!(
+            math_module("sqrt", vec![Value::Flt(2.25)]),
+            Ok(Value::Flt(v)) if v == 1.5
+        ));
+        let r = math_module("sqrt", vec![Value::Int(-4)]);
+        let Err(Flow::Error(msg)) = r else {
+            panic!("math.sqrt manfiy son xato berishi kerak");
+        };
+        assert!(msg.contains("manfiy"), "xato matni: {}", msg);
     }
 }
 

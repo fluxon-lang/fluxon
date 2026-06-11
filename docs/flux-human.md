@@ -899,6 +899,10 @@ str.repeat "ab" 3      # repeat → "ababab"
 math.floor 3.7         # → 3
 math.ceil 3.2          # → 4
 math.abs -5            # → 5
+math.min 3 7           # → 3 (ints in, int out)
+math.max 3 7           # → 7
+math.pow 2 10          # → 1024 (int ^ non-negative int → int)
+math.sqrt 9            # → 3.0 (always flt; negative input is an error)
 ```
 
 **`rand` — random:**

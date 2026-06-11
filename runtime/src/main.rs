@@ -2475,6 +2475,18 @@ use math
 "#);
     }
 
+    // Issue #128: math.min/max/pow/sqrt — .fx yuzasidan tekshiruv.
+    #[test]
+    fn math_min_max_pow_sqrt() {
+        run(r#"
+(math.min 3 7 == 3) | (fail "min noto'g'ri")
+(math.max 3 7 == 7) | (fail "max noto'g'ri")
+(math.min 3 2.5 == 2.5) | (fail "aralash min noto'g'ri")
+(math.pow 2 10 == 1024) | (fail "pow noto'g'ri")
+(math.sqrt 9 == 3.0) | (fail "sqrt noto'g'ri")
+"#);
+    }
+
     // `each i in inf` — cheksiz loop. `stop` chiqaradi, `i` 0 dan ortadi.
     // REPL/event-loop uchun (issue #27): oldin model 1..1000 hiylasiga murojaat
     // qilardi; endi tabiiy cheksiz takror bor.
