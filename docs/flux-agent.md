@@ -20,6 +20,15 @@ log "outside"
 [1 2 3] list · {a:1 b:2} map        # NO COMMAS, space-separated
 ```
 Str interpolation: `"$x"` (bare var only) or `"${expr}"` (any expr — `.field`, calls).
+Multi-line str: `"""` block (prompts, SQL, templates). Content starts on the NEXT line;
+common indentation is stripped; closing `"""` on its own line → no trailing `\n`.
+Interpolation and escapes work as in `"..."`; `"` needs no escape inside.
+```flux
+prompt = """
+  Extract intent from: ${text}
+  Answer as JSON: {"intent": "..."}
+  """
+```
 Symbol→text (interp, `str.str`, `+`, `log`) drops the `:` prefix: `str.str :ok` → `"ok"`. Inside a list/map it keeps `:` (`[:a]` → `[:a]`).
 Truthy: only `nil`/`false` are false.
 

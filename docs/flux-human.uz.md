@@ -111,6 +111,19 @@ log "Jami: ${price * qty} so'm"   # ifoda ham bo'ladi
 Oddiy o'zgaruvchi uchun qisqartirib `"$name"` ham yozsa bo'ladi, lekin ifoda
 uchun `${...}` shart.
 
+**Ko'p qatorli matn (blok satr).** Uzun prompt, SQL yoki shablon uchun `"""`
+ishlatiladi. Kontent keyingi qatordan boshlanadi, qatorlarning umumiy
+chekinishi avtomatik kesiladi — blok kod ichida tabiiy joylashadi:
+```flux
+prompt = """
+  Sen yordamchi agentsan.
+  Foydalanuvchi savoli: ${savol}
+  """
+```
+Yopuvchi `"""` o'z qatorida tursa, matn oxirida `\n` qolmaydi. Interpolatsiya
+va `\n`/`\t` escape'lar oddiy satrdagidek ishlaydi; `"` belgisi esa
+escape'siz erkin yoziladi (JSON/HTML parchalari uchun qulay).
+
 **Belgilar (symbols) — enum o'rniga.** Holatlarni ifodalash uchun matn
 o'rniga belgi ishlating. `:new`, `:confirmed` — bu `"new"` matnidan token
 arzonroq va aniqroq:

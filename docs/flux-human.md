@@ -109,6 +109,20 @@ log "Total: ${price * qty} so'm"   # an expression also works
 For a simple variable you can shorten it to `"$name"`, but for an expression
 `${...}` is required.
 
+**Multi-line text (block strings).** For long prompts, SQL, or templates use
+`"""`. Content starts on the next line, and the common indentation of the
+lines is stripped automatically — so the block sits naturally inside indented
+code:
+```flux
+prompt = """
+  You are a helpful agent.
+  User question: ${question}
+  """
+```
+If the closing `"""` is on its own line, the text has no trailing `\n`.
+Interpolation and `\n`/`\t` escapes work as in normal strings; `"` can be
+written freely without escaping (handy for JSON/HTML fragments).
+
 **Symbols — instead of enums.** To represent states, use a symbol instead of
 text. `:new`, `:confirmed` — these are cheaper in tokens and clearer than the
 text `"new"`:
