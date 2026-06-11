@@ -468,6 +468,99 @@ b = names.index "billing"
 "#);
     }
 
+    // Issue #127: list.sort — argumentsiz tabiiy tartib (son/matn), komparator
+    // bilan ixtiyoriy tartib. Asl list o'zgarmaydi (immutable qiymatlar).
+    #[test]
+    fn list_sort() {
+        run(r#"
+nums = [3 1 4 1 5]
+s = nums.sort
+(s == [1 1 3 4 5]) | (fail "tabiiy sort: ${s}")
+(nums == [3 1 4 1 5]) | (fail "sort asl list'ni o'zgartirdi: ${nums}")
+
+# komparator: son qaytaradi (manfiy: a oldin) — kamayish tartibi
+d = nums.sort \a b -> b - a
+(d == [5 4 3 1 1]) | (fail "komparator sort: ${d}")
+
+# matnlar leksikografik
+names = ["banan" "olma" "anor"].sort
+(names == ["anor" "banan" "olma"]) | (fail "str sort: ${names}")
+
+# int/flt aralash son tartibi
+mixed = [2 1.5 1].sort
+(mixed == [1 1.5 2]) | (fail "aralash son sort: ${mixed}")
+
+# chekka holatlar
+([].sort == []) | (fail "bo'sh list sort")
+([7].sort == [7]) | (fail "bitta element sort")
+"#);
+    }
+
+    // Issue #127: komparatorli sort stable — teng elementlar asl tartibda qoladi
+    // (bir nechta manbadan yig'ilgan map-yozuvlarni maydon bo'yicha saralash).
+    #[test]
+    fn list_sort_stable_va_maplar() {
+        run(r#"
+items = [{n:"b" p:2} {n:"a" p:1} {n:"c" p:1}]
+sorted = items.sort \a b -> a.p - b.p
+ns = sorted.map \x -> x.n
+(ns == ["a" "c" "b"]) | (fail "stable map sort: ${ns}")
+"#);
+    }
+
+    // Issue #127: sort xato yo'llari — aralash tiplar komparatorsiz, komparator
+    // son qaytarmasa, zip argumenti list bo'lmasa.
+    #[test]
+    fn list_sort_zip_xatolari() {
+        let e = run_source(r#"x = [1 "a"].sort"#).unwrap_err();
+        assert!(e.contains("taqqoslab bo'lmaydi"), "kutilmagan xato: {}", e);
+
+        let e = run_source(r#"x = [1 2].sort \a b -> "x""#).unwrap_err();
+        assert!(e.contains("son qaytarishi kerak"), "kutilmagan xato: {}", e);
+
+        let e = run_source("x = [1 2].zip 5").unwrap_err();
+        assert!(e.contains("list bo'lishi kerak"), "kutilmagan xato: {}", e);
+    }
+
+    // Issue #127: reverse/uniq/flat/zip — sof list metodlari.
+    #[test]
+    fn list_reverse_uniq_flat_zip() {
+        run(r#"
+([1 2 3].reverse == [3 2 1]) | (fail "reverse ishlamadi")
+([1 2 1 3 2].uniq == [1 2 3]) | (fail "uniq ishlamadi")
+
+# flat bir daraja tekislaydi; list bo'lmagan element o'z holicha qoladi
+([[1 2] [3] 4].flat == [1 2 3 4]) | (fail "flat ishlamadi")
+
+# zip qisqasi tugaganda to'xtaydi
+z = [1 2 3].zip ["a" "b"]
+(z == [[1 "a"] [2 "b"]]) | (fail "zip ishlamadi: ${z}")
+"#);
+    }
+
+    // Issue #127: any/all predikat metodlari — filter+len aylanma yo'l o'rniga.
+    #[test]
+    fn list_any_all() {
+        run(r#"
+nums = [1 2 3]
+a1 = nums.any \x -> x > 2
+a1 | (fail "any mos elementda true bermadi")
+a2 = nums.any \x -> x > 9
+(a2 == false) | (fail "any mos kelmasa false bermadi")
+
+b1 = nums.all \x -> x > 0
+b1 | (fail "all hammasi mosda true bermadi")
+b2 = nums.all \x -> x > 1
+(b2 == false) | (fail "all nomos elementda false bermadi")
+
+# bo'sh list: any false, all true (vacuous)
+e1 = [].any \x -> x
+(e1 == false) | (fail "bo'sh any false emas")
+e2 = [].all \x -> x
+e2 | (fail "bo'sh all true emas")
+"#);
+    }
+
     // Hisoblangan indeks: `xs.(ifoda)` va `xs[ifoda]` ikkalasi ham ishlashi kerak.
     // Issue #64 — pagination/oxirgi element olish uchun literal emas, ifoda-indeks.
     #[test]

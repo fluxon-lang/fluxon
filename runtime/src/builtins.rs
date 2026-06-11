@@ -1163,15 +1163,124 @@ fn list_method(xs: &[Value], method: &str, args: Vec<Value>) -> R {
             }
             Ok(Value::List(xs[a..b].to_vec()))
         }
-        // filter/map/reduce — funksiya argument oladi; interp uni shu yerda
-        // chaqira olmaydi (apply Interp'da). Shuning uchun bu metodlar maxsus
-        // ishlov talab qiladi — pastdagi izohga qarang.
-        "filter" | "map" | "reduce" => Err(Flow::err(format!(
+        // Argumentsiz sort — tabiiy tartib (son/matn). Komparatorli varianti
+        // funksiya argument olgani uchun interp'dagi list_hof orqali keladi.
+        "sort" => sort_default(xs),
+        "reverse" => {
+            let mut new = xs.to_vec();
+            new.reverse();
+            Ok(Value::List(new))
+        }
+        "uniq" => {
+            // Birinchi uchragan nusxa qoladi (tartib saqlanadi). Value hash'siz,
+            // shuning uchun equals bilan chiziqli qidiruv — list'lar kichik.
+            let mut out: Vec<Value> = Vec::new();
+            for x in xs {
+                if !out.iter().any(|v| v.equals(x)) {
+                    out.push(x.clone());
+                }
+            }
+            Ok(Value::List(out))
+        }
+        "flat" => {
+            // Bir daraja tekislaydi: ichki list elementlari ochiladi, qolganlar
+            // o'z holicha — chuqur rekursiya kerak bo'lsa flat'ni zanjirlash mumkin.
+            let mut out = Vec::new();
+            for x in xs {
+                match x {
+                    Value::List(inner) => out.extend(inner.iter().cloned()),
+                    other => out.push(other.clone()),
+                }
+            }
+            Ok(Value::List(out))
+        }
+        "zip" => {
+            let other = arg(&args, 0, "list.zip")?;
+            let Value::List(ys) = other else {
+                return Err(Flow::err(format!(
+                    "list.zip: argument list bo'lishi kerak, {} berildi",
+                    other.type_name()
+                )));
+            };
+            // Qisqasi tugaganda to'xtaydi — ortiqcha elementlar tashlanadi.
+            Ok(Value::List(
+                xs.iter()
+                    .zip(ys)
+                    .map(|(a, b)| Value::List(vec![a.clone(), b.clone()]))
+                    .collect(),
+            ))
+        }
+        // filter/map/reduce/find/any/all — funksiya argument oladi; interp uni
+        // shu yerda chaqira olmaydi (apply Interp'da). Shuning uchun bu metodlar
+        // maxsus ishlov talab qiladi — pastdagi izohga qarang.
+        "filter" | "map" | "reduce" | "find" | "any" | "all" => Err(Flow::err(format!(
             "ichki: list.{} alohida yo'l bilan ishlov beriladi",
             method
         ))),
         _ => Err(Flow::err(format!("list metodi '{}' mavjud emas", method))),
     }
+}
+
+// Tabiiy tartibda saralash: son (int/flt aralash) va matn/sym bir jinsli
+// bo'lsa ishlaydi; aralash tiplar uchun komparator berish talab qilinadi.
+pub fn sort_default(xs: &[Value]) -> R {
+    let sorted = sort_values(xs.to_vec(), &mut |a, b| {
+        use std::cmp::Ordering;
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
+            // NaN tartibsiz — Equal deb olamiz (saralash yiqilmasin).
+            (Value::Flt(x), Value::Flt(y)) => Ok(x.partial_cmp(y).unwrap_or(Ordering::Equal)),
+            (Value::Int(x), Value::Flt(y)) => {
+                Ok((*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal))
+            }
+            (Value::Flt(x), Value::Int(y)) => {
+                Ok(x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal))
+            }
+            (Value::Str(x), Value::Str(y)) => Ok(x.cmp(y)),
+            (Value::Sym(x), Value::Sym(y)) => Ok(x.cmp(y)),
+            (a, b) => Err(Flow::err(format!(
+                "list.sort: {} va {} ni taqqoslab bo'lmaydi — komparator bering: l.sort \\a b -> ...",
+                a.type_name(),
+                b.type_name()
+            ))),
+        }
+    })?;
+    Ok(Value::List(sorted))
+}
+
+// Stable merge sort — std sort_by o'rniga, chunki komparator Flux funksiyasi
+// bo'lganda xato (Flow) qaytishi mumkin: std sort xato yo'lida Equal qaytarsak
+// "total order buzildi" deb panic qilishi mumkin. Bu yo'l xatoni toza ko'taradi.
+pub fn sort_values<F>(mut xs: Vec<Value>, cmp: &mut F) -> Result<Vec<Value>, Flow>
+where
+    F: FnMut(&Value, &Value) -> Result<std::cmp::Ordering, Flow>,
+{
+    let len = xs.len();
+    if len <= 1 {
+        return Ok(xs);
+    }
+    let right = xs.split_off(len / 2);
+    let left = sort_values(xs, cmp)?;
+    let right = sort_values(right, cmp)?;
+    let mut out = Vec::with_capacity(len);
+    let mut li = left.into_iter().peekable();
+    let mut ri = right.into_iter().peekable();
+    loop {
+        match (li.peek(), ri.peek()) {
+            // Teng bo'lsa chap (asl tartibda oldingi) birinchi — stable.
+            (Some(a), Some(b)) => {
+                if cmp(a, b)? == std::cmp::Ordering::Greater {
+                    out.push(ri.next().unwrap());
+                } else {
+                    out.push(li.next().unwrap());
+                }
+            }
+            (Some(_), None) => out.push(li.next().unwrap()),
+            (None, Some(_)) => out.push(ri.next().unwrap()),
+            (None, None) => break,
+        }
+    }
+    Ok(out)
 }
 
 fn map_method(m: &BTreeMap<String, Value>, method: &str, args: Vec<Value>) -> R {

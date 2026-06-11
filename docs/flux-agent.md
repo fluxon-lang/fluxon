@@ -329,8 +329,12 @@ reg.has "calc"   ·   reg.names
 l.len · l.push x · l.filter \x->x>0 · l.map \x->x*2 · l.has x · l.0
 l.slice a b · l.join ", " · l.reduce 0 \acc x -> acc + x
 l.index x → birinchi indeks yoki -1 · l.find \x->x>4 → birinchi mos element yoki nil
+l.sort → natural order (nums/strs) · l.sort \a b -> a.p - b.p (comparator → number: neg = a first)
+l.reverse · l.uniq (first kept) · l.flat (one level) · l.zip other → [[a b] ...]
+l.any \x->x>4 → bool (short-circuit) · l.all \x->x>0 → bool
 ```
 Build a list: `l.push x` (NOT `+[x]`). Build a string: `l.join sep`.
+Sort in memory: `l.sort` (NOT a `db.order` round-trip).
 
 ### map methods (.method)
 ```flux

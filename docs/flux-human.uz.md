@@ -841,6 +841,14 @@ l.0  l.1               # indeks bo'yicha element
 l.slice a b            # a..b oralig'i (b kirmaydi) → yangi ro'yxat
 l.join ", "            # → matn: [1 2 3].join "," → "1,2,3"
 l.reduce 0 \acc x -> acc + x   # yig'ish: (boshlang'ich qiymat, funksiya)
+l.sort                 # tabiiy tartib (son yoki matn) → yangi ro'yxat
+l.sort \a b -> a.p - b.p   # komparator son qaytaradi: manfiy → a oldin
+l.reverse              # teskari tartib → yangi ro'yxat
+l.uniq                 # takrorlarni olib tashlaydi (birinchisi qoladi)
+l.flat                 # bir daraja tekislaydi: [[1 2] [3]] → [1 2 3]
+l.zip other            # juftlash: [1 2].zip ["a" "b"] → [[1 "a"] [2 "b"]]
+l.any \x -> x > 4      # birortasi mosmi → bool (birinchi mosda to'xtaydi)
+l.all \x -> x > 0      # hammasi mosmi → bool (birinchi nomosda to'xtaydi)
 ```
 
 > **Muhim:** ro'yxat qurish uchun `l.push x` ishlating, `l + [x]` **emas**.

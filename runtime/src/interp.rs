@@ -1593,7 +1593,7 @@ impl Interp {
             // chunki builtins Interp'ga kira olmaydi.
             if let Value::List(xs) = &recv {
                 match name.as_str() {
-                    "filter" | "map" | "reduce" | "find" => {
+                    "filter" | "map" | "reduce" | "find" | "any" | "all" | "sort" => {
                         return self.list_hof(xs, name, argv);
                     }
                     _ => {}
@@ -1605,7 +1605,8 @@ impl Interp {
         self.apply(f, argv)
     }
 
-    // list.filter/map/reduce — funksiya argumentini har element uchun chaqiradi.
+    // Yuqori tartibli list metodlari (filter/map/reduce/find/any/all/sort) —
+    // funksiya argumentini element(lar) uchun chaqiradi.
     fn list_hof(&self, xs: &[Value], method: &str, args: Vec<Value>) -> EvalResult {
         match method {
             "filter" => {
@@ -1658,6 +1659,53 @@ impl Interp {
                     }
                 }
                 Ok(Value::Nil)
+            }
+            "any" => {
+                // Birinchi mosda to'xtaydi (short-circuit) — filter+len aylanma
+                // yo'lidan farqli, qolgan elementlar uchun predikat chaqirilmaydi.
+                let f = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Flow::err("list.any: funksiya argumenti kerak"))?;
+                for x in xs {
+                    if self.apply(f.clone(), vec![x.clone()])?.truthy() {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                // Birinchi nomosda to'xtaydi; bo'sh list uchun true (vacuous).
+                let f = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Flow::err("list.all: funksiya argumenti kerak"))?;
+                for x in xs {
+                    if !self.apply(f.clone(), vec![x.clone()])?.truthy() {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            "sort" => {
+                // Komparatorli sort: \a b -> son (manfiy: a oldin, musbat: b
+                // oldin, 0: teng) — JS uslubi. Argumentsiz `l.sort` Field bo'lib
+                // builtins'dagi tabiiy tartibga tushadi; bu yerga faqat Call
+                // (argumentli) keladi, lekin bo'sh argv ham defensive qo'llanadi.
+                let Some(f) = args.into_iter().next() else {
+                    return crate::builtins::sort_default(xs);
+                };
+                let sorted = crate::builtins::sort_values(xs.to_vec(), &mut |a, b| match self
+                    .apply(f.clone(), vec![a.clone(), b.clone()])?
+                {
+                    Value::Int(n) => Ok(n.cmp(&0)),
+                    Value::Flt(x) => Ok(x.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)),
+                    other => Err(Flow::err(format!(
+                        "list.sort: komparator son qaytarishi kerak (manfiy/0/musbat), {} qaytardi",
+                        other.type_name()
+                    ))),
+                })?;
+                Ok(Value::List(sorted))
             }
             _ => unreachable!(),
         }

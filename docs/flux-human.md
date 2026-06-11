@@ -832,6 +832,14 @@ l.0  l.1               # element by index
 l.slice a b            # the a..b range (b excluded) → a new list
 l.join ", "            # → text: [1 2 3].join "," → "1,2,3"
 l.reduce 0 \acc x -> acc + x   # accumulate: (initial value, function)
+l.sort                 # natural order (numbers or strings) → a new list
+l.sort \a b -> a.p - b.p   # comparator returns a number: negative → a first
+l.reverse              # reversed order → a new list
+l.uniq                 # removes duplicates (first occurrence kept)
+l.flat                 # flattens one level: [[1 2] [3]] → [1 2 3]
+l.zip other            # pairs up: [1 2].zip ["a" "b"] → [[1 "a"] [2 "b"]]
+l.any \x -> x > 4      # does any match → bool (stops at first match)
+l.all \x -> x > 0      # do all match → bool (stops at first mismatch)
 ```
 
 > **Important:** to build a list use `l.push x`, **not** `l + [x]`. To filter, use
