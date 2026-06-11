@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -330,6 +331,161 @@ fn prefix_matches(pat: &str, path: &str) -> bool {
         // Shablonsiz — aniq yo'l mosligi.
         pat == path
     }
+}
+
+// --- static fayl mount (issue #134) ---
+
+// `http.static prefiks katalog` mount'i. Prefiks segmentlarga bo'lib saqlanadi
+// ("/assets" -> ["assets"], "/" -> []) — moslik segment chegarasida tekshiriladi
+// ("/assetsx" "/assets" mount'iga tushmasin). `dir` registratsiya paytida
+// canonicalize qilingan mutlaq yo'l (skript katalogiga nisbatan hal qilinadi).
+#[derive(Clone)]
+pub struct StaticMount {
+    pub prefix: Vec<String>,
+    pub dir: PathBuf,
+    // SPA fallback: prefiks ostidagi yo'l faylga mos kelmasa `dir/index.html`
+    // qaytadi (frontend router o'zi hal qiladi).
+    pub spa: bool,
+}
+
+// "/assets/img" -> ["assets", "img"]; "/" -> []. Bo'sh segmentlar tashlanadi.
+fn parse_static_prefix(prefix: &str) -> Vec<String> {
+    prefix
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+// Mount prefiksi so'rov segmentlarining boshiga mosmi? Mos bo'lsa prefiksdan
+// keyingi qism (fayl yo'li) qaytadi.
+fn strip_mount_prefix<'a>(prefix: &[String], segs: &'a [String]) -> Option<&'a [String]> {
+    if segs.len() < prefix.len() {
+        return None;
+    }
+    if prefix.iter().zip(segs).all(|(a, b)| a == b) {
+        Some(&segs[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+// Segmentlarni mount katalogiga MAJBURIY traversal himoyasi bilan ulaydi.
+// Har segment percent-dekoddan KEYIN tekshiriladi (shu sabab `%2e%2e` ham
+// ushlanadi): faqat oddiy nom (Component::Normal) bo'lishi shart — `..`, `.`,
+// bo'sh, mutlaq yoki Windows prefiks (`C:`) segmentlari rad etiladi. Qo'shimcha
+// `\`/NUL tekshiruvi: bunday nom fayl tizimida baribir kutilmagan, jim 404.
+fn safe_join(dir: &Path, rest: &[String]) -> Option<PathBuf> {
+    let mut p = dir.to_path_buf();
+    for seg in rest {
+        if seg.contains('\\') || seg.contains('\0') {
+            return None;
+        }
+        let mut comps = Path::new(seg).components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(_)), None) => {}
+            _ => return None,
+        }
+        p.push(seg);
+    }
+    Some(p)
+}
+
+// Kengaytmadan Content-Type (issue talabi: avtomatik). Ro'yxatda yo'q kengaytma
+// -> octet-stream (brauzer yuklab oladi, lekin mazmun buzilmaydi).
+fn mime_for(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("json") | Some("map") => "application/json",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml",
+        Some("csv") => "text/csv; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("wasm") => "application/wasm",
+        Some("pdf") => "application/pdf",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mp3") => "audio/mpeg",
+        Some("gz") => "application/gzip",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+// So'rov yo'lini mount'lar bo'yicha faylga aylantiradi. Uzun prefiks ustun
+// ("/assets" mount'i "/" mount'idan oldin tekshiriladi) — eng aniq mount yutadi.
+// Ikki bosqich: (1) aniq fayl (katalog so'ralsa ichidagi index.html);
+// (2) topilmasa — prefiksi mos SPA mount'larning `index.html` fallback'i.
+async fn resolve_static(mounts: &[StaticMount], path: &str) -> Option<(PathBuf, &'static str)> {
+    // Segmentlar percent-dekod qilinadi (brauzer non-ASCII nomni encode qiladi);
+    // `keep_path_seps=true` — `%2F` xom qoladi, dekoddan yangi `/` tug'ilmaydi.
+    let segs: Vec<String> = path_segments(path)
+        .iter()
+        .map(|s| percent_decode(s, true))
+        .collect();
+
+    let mut order: Vec<&StaticMount> = mounts.iter().collect();
+    order.sort_by_key(|m| std::cmp::Reverse(m.prefix.len()));
+
+    for m in &order {
+        let Some(rest) = strip_mount_prefix(&m.prefix, &segs) else {
+            continue;
+        };
+        let Some(mut p) = safe_join(&m.dir, rest) else {
+            continue;
+        };
+        match tokio::fs::metadata(&p).await {
+            // Katalog so'raldi (yoki prefiksning o'zi) — index.html'ga urinish.
+            Ok(md) if md.is_dir() => {
+                p.push("index.html");
+                if matches!(tokio::fs::metadata(&p).await, Ok(md2) if md2.is_file()) {
+                    let mime = mime_for(&p);
+                    return Some((p, mime));
+                }
+            }
+            Ok(md) if md.is_file() => {
+                let mime = mime_for(&p);
+                return Some((p, mime));
+            }
+            _ => {}
+        }
+    }
+
+    for m in &order {
+        if !m.spa || strip_mount_prefix(&m.prefix, &segs).is_none() {
+            continue;
+        }
+        let p = m.dir.join("index.html");
+        if matches!(tokio::fs::metadata(&p).await, Ok(md) if md.is_file()) {
+            return Some((p, "text/html; charset=utf-8"));
+        }
+    }
+    None
+}
+
+// Static fayl javobi: 200 + kengaytmadan aniqlangan Content-Type.
+fn static_response(data: Vec<u8>, mime: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", mime)
+        .body(Full::new(Bytes::from(data)))
+        .unwrap()
 }
 
 // --- rate-limit (issue #79) ---
@@ -984,6 +1140,7 @@ impl Interp {
             "use" => self.http_use(args),
             "before" => self.http_before(args),
             "cors" => self.http_cors(args),
+            "static" => self.http_static(args),
             "limit" => self.http_limit(args),
             "serve" => self.http_serve(args),
             "get" => http_client("GET", args, false),
@@ -1140,6 +1297,67 @@ impl Interp {
         Ok(Value::Nil)
     }
 
+    // http.static prefiks katalog [opts]  — papkadan static fayl tarqatish (#134).
+    //
+    //   http.static "/assets" "./public"        # /assets/app.css -> ./public/app.css
+    //   http.static "/" "./dist" {spa: true}    # topilmasa -> ./dist/index.html
+    //
+    // Katalog skript fayli katalogiga nisbatan hal qilinadi (`use ./fayl` bilan
+    // bir xil qoida) va registratsiyada canonicalize qilinadi — yo'q katalog
+    // start'dayoq xato beradi (deploy paytida jim 404 o'rniga fail fast).
+    // Content-Type kengaytmadan avtomatik; `../` traversal (percent-encoded ham)
+    // majburiy bloklanadi; route prioriteti: aniq route > static.
+    fn http_static(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        let prefix = match args.first() {
+            Some(Value::Str(s)) => s.clone(),
+            _ => {
+                return Err(Flow::err(
+                    "http.static: 1-argument prefiks (str) bo'lishi kerak, masalan \"/assets\"",
+                ));
+            }
+        };
+        let dir = match args.get(1) {
+            Some(Value::Str(s)) => s.clone(),
+            _ => {
+                return Err(Flow::err(
+                    "http.static: 2-argument katalog (str) bo'lishi kerak, masalan \"./public\"",
+                ));
+            }
+        };
+        let spa = match args.get(2) {
+            None | Some(Value::Nil) => false,
+            Some(Value::Map(m)) => !matches!(
+                m.get("spa"),
+                None | Some(Value::Nil) | Some(Value::Bool(false))
+            ),
+            _ => {
+                return Err(Flow::err(
+                    "http.static: 3-argument opsiyalar map'i bo'lishi kerak ({spa: true})",
+                ));
+            }
+        };
+        let p = PathBuf::from(&dir);
+        let resolved = if p.is_absolute() {
+            p
+        } else {
+            self.base_dir().join(p)
+        };
+        let canon = std::fs::canonicalize(&resolved)
+            .map_err(|e| Flow::err(format!("http.static: '{}' katalogi ochilmadi: {}", dir, e)))?;
+        if !canon.is_dir() {
+            return Err(Flow::err(format!(
+                "http.static: '{}' katalog emas (fayl ko'rsatilgan)",
+                dir
+            )));
+        }
+        self.statics.lock().unwrap().push(StaticMount {
+            prefix: parse_static_prefix(&prefix),
+            dir: canon,
+            spa,
+        });
+        Ok(Value::Nil)
+    }
+
     // http.limit [path] N :sec|:min|:hr \req -> kalit  — deklarativ rate-limit (#79).
     //
     //   http.limit 100 :min \req -> req.ctx.tenant_id          # per-tenant, barcha yo'l
@@ -1288,6 +1506,132 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: us
     }
 }
 
+// Middleware zanjirini ishlatadi (sinxron — spawn_blocking ichida chaqiriladi).
+// Har middleware req klonini oladi (ctx Arc ulashilgan). Natija:
+//   - Ok(Some(v)) — biri javob qaytardi (`rep` yoki limit 429), zanjir to'xtadi,
+//     handler CHAQIRILMAYDI; aks holda auth `rep 401` e'tiborsiz qolardi.
+//   - Ok(None)   — hammasi o'tdi (ctx yozish, log), handler davom etadi.
+//   - Err(flow)  — `fail`/xato, zanjir to'xtadi.
+// Route handler'lari ham, static fayllar ham (issue #134) SHU zanjir orqali
+// o'tadi — http.before auth static papkani ham himoya qiladi.
+fn run_middleware_chain(
+    interp: &Interp,
+    chain: Vec<Middleware>,
+    request_value: &Value,
+) -> Result<Option<Value>, Flow> {
+    for mw in chain {
+        match mw.kind {
+            // Oddiy middleware (use/before): handler'ni chaqiramiz.
+            MwKind::Fn => match interp.apply(mw.handler, vec![request_value.clone()]) {
+                Ok(v) if is_resp(&v) => return Ok(Some(v)), // rep -> javob, zanjir to'xta
+                Ok(_) => {}                                 // davom (ctx/log)
+                Err(flow) => return Err(flow),              // fail/xato -> to'xta
+            },
+            // Rate-limit (http.limit): kalit funksiyasini chaqirib mijozni
+            // aniqlaymiz, keyin hisobgichni tekshiramiz. Oshsa 429 -> zanjir to'xta.
+            MwKind::Limit {
+                limit,
+                window_secs,
+                state,
+            } => {
+                let key = match interp.apply(mw.handler, vec![request_value.clone()]) {
+                    // nil -> mijoz IP'siga qaytamiz (kalitsiz so'rovni ham cheklash).
+                    Ok(Value::Nil) => client_fallback_key(request_value),
+                    Ok(v) => {
+                        let t = v.to_text();
+                        if t.is_empty() {
+                            client_fallback_key(request_value)
+                        } else {
+                            t
+                        }
+                    }
+                    Err(flow) => return Err(flow), // kalit fn xato berdi -> to'xta
+                };
+                if let Some(retry) = check_and_count(&state, &key, limit, window_secs) {
+                    return Ok(Some(rate_limited_response(retry)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+// Static fayl urinishi (issue #134) — faqat aniq route topilmaganda chaqiriladi
+// (route prioriteti). None — static mos kelmadi, chaqiruvchi 404 qaytaradi.
+// Faqat GET/HEAD (fayl o'qish idempotent; boshqa metodlar API semantikasi).
+// Middleware zanjiri bu yerda ham ishlaydi — `http.before "/admin/*"` auth
+// static papkani ham himoya qilsin (zanjir javob qaytarsa fayl o'qilmaydi).
+async fn try_serve_static(
+    interp: &Arc<Interp>,
+    method: &str,
+    path: &str,
+    query: String,
+    headers: BTreeMap<String, Value>,
+    client_ip: String,
+) -> Option<Response<Full<Bytes>>> {
+    if method != "get" && method != "head" {
+        return None;
+    }
+    let mounts: Vec<StaticMount> = interp.statics.lock().unwrap().clone();
+    if mounts.is_empty() {
+        return None;
+    }
+    let (file, mime) = resolve_static(&mounts, path).await?;
+
+    // Bu yo'lga mos middleware'lar (handle_request'dagi filter bilan bir xil).
+    let chain: Vec<Middleware> = interp
+        .middlewares
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|mw| match &mw.scope {
+            None => true,
+            Some(pat) => prefix_matches(pat, path),
+        })
+        .cloned()
+        .collect();
+    if !chain.is_empty() {
+        // GET/HEAD tanasi bo'sh — body o'qilmaydi (route yo'lidan farqli).
+        let ctx = Arc::new(Mutex::new(BTreeMap::new()));
+        let request_value = with_ctx(
+            build_req(
+                method.to_string(),
+                path.to_string(),
+                query,
+                headers,
+                BTreeMap::new(),
+                client_ip,
+                Bytes::new(),
+                false,
+                None,
+            ),
+            ctx,
+        );
+        let interp2 = interp.clone();
+        let mw_result = tokio::task::spawn_blocking(move || {
+            run_middleware_chain(&interp2, chain, &request_value)
+        })
+        .await;
+        match mw_result {
+            Ok(Ok(None)) => {} // zanjir o'tdi — faylni beramiz
+            Ok(Ok(Some(v))) => return Some(value_to_response(v)),
+            Ok(Err(flow)) => return Some(flow_to_response(flow)),
+            Err(join_err) => {
+                return Some(flow_to_response(Flow::Error(format!(
+                    "middleware panic: {}",
+                    join_err
+                ))));
+            }
+        }
+    }
+    match tokio::fs::read(&file).await {
+        Ok(data) => Some(static_response(data, mime)),
+        // metadata fayl deb ko'rsatdi, lekin o'qish baribir xato (race/ruxsat) —
+        // jim 404 ga tushamiz (fayl mavjudligi haqida ma'lumot sizdirmaymiz).
+        Err(_) => None,
+    }
+}
+
 // Bitta so'rovni boshqaradi: marshrut topish -> req qurish -> handler'ni
 // spawn_blocking'da (sinxron interp) chaqirish -> javob.
 async fn handle_request(
@@ -1353,6 +1697,20 @@ async fn handle_request(
     let (route, params) = match matched {
         Some(x) => x,
         None => {
+            // Aniq route topilmadi — static mount'lardan urinamiz (issue #134).
+            // Route prioriteti: aniq route > static (static faqat shu yerda).
+            if let Some(resp) = try_serve_static(
+                &interp,
+                &method,
+                &path,
+                query.clone(),
+                headers.clone(),
+                client_ip.clone(),
+            )
+            .await
+            {
+                return Ok(cors_finalize(resp, &cors, req_origin.as_deref()));
+            }
             let mut m = BTreeMap::new();
             m.insert(
                 "error".to_string(),
@@ -1456,48 +1814,11 @@ async fn handle_request(
     // Sinxron interp ishini blocking thread'da bajaramiz — tokio worker'ini
     // bloklamaydi, har request alohida thread'da -> haqiqiy parallel.
     let result = tokio::task::spawn_blocking(move || {
-        // Middleware zanjiri handler'dan OLDIN ishlaydi. Har biri req klonini
-        // oladi (ctx Arc ulashilgan). To'xtatish shartlari:
-        //   - `fail`/xato -> Err(flow), zanjir to'xtaydi.
-        //   - `rep` -> Ok({__resp:true ...}) MUVAFFAQIYATLI qaytadi (Flow emas),
-        //     shuning uchun bu javobni ALOHIDA aniqlab to'xtatamiz; aks holda
-        //     auth `rep 401` e'tiborsiz qolib, handler baribir ishlardi.
-        //   - boshqa Ok(_) (ctx yozish, log) -> zanjir davom etadi.
-        for mw in chain {
-            match mw.kind {
-                // Oddiy middleware (use/before): handler'ni chaqiramiz.
-                MwKind::Fn => match interp.apply(mw.handler, vec![request_value.clone()]) {
-                    Ok(v) if is_resp(&v) => return Ok(v), // rep -> javob, zanjir to'xta
-                    Ok(_) => {}                           // davom (ctx/log)
-                    Err(flow) => return Err(flow),        // fail/xato -> to'xta
-                },
-                // Rate-limit (http.limit): kalit funksiyasini chaqirib mijozni
-                // aniqlaymiz, keyin hisobgichni tekshiramiz. Oshsa 429 -> zanjir to'xta.
-                MwKind::Limit {
-                    limit,
-                    window_secs,
-                    state,
-                } => {
-                    let key = match interp.apply(mw.handler, vec![request_value.clone()]) {
-                        // nil -> mijoz IP'siga qaytamiz (kalitsiz so'rovni ham cheklash).
-                        Ok(Value::Nil) => client_fallback_key(&request_value),
-                        Ok(v) => {
-                            let t = v.to_text();
-                            if t.is_empty() {
-                                client_fallback_key(&request_value)
-                            } else {
-                                t
-                            }
-                        }
-                        Err(flow) => return Err(flow), // kalit fn xato berdi -> to'xta
-                    };
-                    if let Some(retry) = check_and_count(&state, &key, limit, window_secs) {
-                        return Ok(rate_limited_response(retry));
-                    }
-                }
-            }
+        match run_middleware_chain(&interp, chain, &request_value) {
+            Ok(Some(v)) => Ok(v), // middleware javob qaytardi (rep/429) -> handler chaqirilmaydi
+            Ok(None) => interp.apply(handler, vec![request_value]),
+            Err(flow) => Err(flow),
         }
-        interp.apply(handler, vec![request_value])
     })
     .await;
 
@@ -3301,5 +3622,155 @@ mod tests {
         let h = resp.headers();
         assert_eq!(hv(h, "access-control-allow-origin"), None);
         assert_eq!(hv(h, "access-control-allow-methods"), None);
+    }
+
+    // --- http.static (issue #134) ---
+
+    fn segv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn static_prefix_parse_va_moslik() {
+        // "/" -> bo'sh prefiks (hamma yo'lga mos); "/assets" segment chegarasida
+        // tekshiriladi — "/assetsx" mos EMAS.
+        assert!(parse_static_prefix("/").is_empty());
+        assert_eq!(parse_static_prefix("/assets"), segv(&["assets"]));
+        assert_eq!(parse_static_prefix("/a/b/"), segv(&["a", "b"]));
+
+        let pref = parse_static_prefix("/assets");
+        assert!(strip_mount_prefix(&pref, &segv(&["assets", "app.css"])).is_some());
+        assert!(strip_mount_prefix(&pref, &segv(&["assets"])).is_some());
+        assert!(strip_mount_prefix(&pref, &segv(&["assetsx", "a.css"])).is_none());
+        assert!(strip_mount_prefix(&pref, &segv(&["boshqa"])).is_none());
+        // Qolgan qism — prefiksdan keyingi fayl yo'li.
+        assert_eq!(
+            strip_mount_prefix(&pref, &segv(&["assets", "img", "a.png"])).unwrap(),
+            segv(&["img", "a.png"])
+        );
+    }
+
+    #[test]
+    fn static_safe_join_traversalni_bloklaydi() {
+        // Traversal himoyasi MAJBURIY (issue #134): "..", ".", bo'sh, mutlaq va
+        // backslash/NUL segmentlari rad etiladi — katalogdan tashqariga chiqib
+        // bo'lmaydi. Percent-dekod chaqiruvchida bo'ladi, shuning uchun bu yerga
+        // `%2e%2e` allaqachon ".." bo'lib keladi va shu tekshiruvga ilinadi.
+        let dir = Path::new("/srv/public");
+        assert!(safe_join(dir, &segv(&["..", "secret"])).is_none());
+        assert!(safe_join(dir, &segv(&["a", "..", "b"])).is_none());
+        assert!(safe_join(dir, &segv(&["."])).is_none());
+        assert!(safe_join(dir, &segv(&[""])).is_none());
+        assert!(safe_join(dir, &segv(&["a\\b"])).is_none());
+        assert!(safe_join(dir, &segv(&["a\0b"])).is_none());
+        assert!(safe_join(dir, &segv(&["/etc", "passwd"])).is_none());
+        // Oddiy nomlar — ulanadi.
+        let p = safe_join(dir, &segv(&["img", "a.png"])).unwrap();
+        assert_eq!(p, PathBuf::from("/srv/public/img/a.png"));
+        // Bo'sh rest (prefiksning o'zi so'ralgan) — katalogning o'zi.
+        assert_eq!(safe_join(dir, &[]).unwrap(), PathBuf::from("/srv/public"));
+    }
+
+    #[test]
+    fn static_mime_kengaytmadan() {
+        // Content-Type kengaytmadan avtomatik; noma'lum -> octet-stream.
+        assert_eq!(
+            mime_for(Path::new("a/index.html")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(mime_for(Path::new("app.CSS")), "text/css; charset=utf-8");
+        assert_eq!(
+            mime_for(Path::new("app.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(mime_for(Path::new("logo.svg")), "image/svg+xml");
+        assert_eq!(mime_for(Path::new("a.png")), "image/png");
+        assert_eq!(mime_for(Path::new("font.woff2")), "font/woff2");
+        assert_eq!(mime_for(Path::new("data.bin")), "application/octet-stream");
+        assert_eq!(
+            mime_for(Path::new("kengaytmasiz")),
+            "application/octet-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_resolve_uzun_prefiks_yutadi() {
+        // "/" va "/assets" mount'lari birga: /assets/a.css uzunroq prefiksdagi
+        // papkadan olinadi (eng aniq mount ustun).
+        let root = std::env::temp_dir().join("fluxon_static_unit_1");
+        let dist = root.join("dist");
+        let public = root.join("public");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(dist.join("a.css"), "dist css").unwrap();
+        std::fs::write(public.join("a.css"), "public css").unwrap();
+        std::fs::write(dist.join("index.html"), "<h1>spa</h1>").unwrap();
+
+        let mounts = vec![
+            StaticMount {
+                prefix: vec![],
+                dir: dist.clone(),
+                spa: true,
+            },
+            StaticMount {
+                prefix: vec!["assets".to_string()],
+                dir: public.clone(),
+                spa: false,
+            },
+        ];
+        // /assets/a.css -> public (uzun prefiks), /a.css -> dist (root mount).
+        let (p, mime) = resolve_static(&mounts, "/assets/a.css").await.unwrap();
+        assert_eq!(p, public.join("a.css"));
+        assert_eq!(mime, "text/css; charset=utf-8");
+        let (p, _) = resolve_static(&mounts, "/a.css").await.unwrap();
+        assert_eq!(p, dist.join("a.css"));
+        // Katalog so'ralganda index.html.
+        let (p, mime) = resolve_static(&mounts, "/").await.unwrap();
+        assert_eq!(p, dist.join("index.html"));
+        assert_eq!(mime, "text/html; charset=utf-8");
+        // Topilmagan yo'l — SPA fallback (root mount spa:true).
+        let (p, _) = resolve_static(&mounts, "/yo/q/sahifa").await.unwrap();
+        assert_eq!(p, dist.join("index.html"));
+        // /assets ostida topilmagan fayl: assets mount spa emas, lekin root SPA
+        // mount prefiksi baribir mos — fallback unga tushadi.
+        let (p, _) = resolve_static(&mounts, "/assets/yoq.css").await.unwrap();
+        assert_eq!(p, dist.join("index.html"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn static_resolve_traversal_404() {
+        // `..` (xom yoki percent-encoded) mount katalogidan tashqariga olib
+        // chiqmaydi — None (404), sirli fayl o'qilmaydi.
+        let root = std::env::temp_dir().join("fluxon_static_unit_2");
+        let public = root.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(public.join("ok.txt"), "ok").unwrap();
+        std::fs::write(root.join("secret.txt"), "sir").unwrap();
+
+        let mounts = vec![StaticMount {
+            prefix: vec!["assets".to_string()],
+            dir: public.clone(),
+            spa: false,
+        }];
+        assert!(
+            resolve_static(&mounts, "/assets/../secret.txt")
+                .await
+                .is_none()
+        );
+        assert!(
+            resolve_static(&mounts, "/assets/%2e%2e/secret.txt")
+                .await
+                .is_none()
+        );
+        assert!(
+            resolve_static(&mounts, "/assets/..%2Fsecret.txt")
+                .await
+                .is_none()
+        );
+        assert!(resolve_static(&mounts, "/assets/ok.txt").await.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
