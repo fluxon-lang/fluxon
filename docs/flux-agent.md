@@ -341,6 +341,7 @@ Sort in memory: `l.sort` (NOT a `db.order` round-trip).
 ### map methods (.method)
 ```flux
 m.set k v · m.del k · m.has k · m.keys · m.vals · m.k · m[k]
+m.merge other → new map, other's keys win (defaults + override)
 ```
 Write to a map: `m.set k v` (`m[k]` is READ only). Shared state via this.
 

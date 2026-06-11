@@ -861,6 +861,7 @@ l.all \x -> x > 0      # do all match → bool (stops at first mismatch)
 ```flux
 m.set k v              # sets/updates a key → a new map
 m.del k                # removes a key → a new map
+m.merge other          # merges two maps (other's keys win) → a new map
 m.has k                # is the key present → bool
 m.keys                 # a list of keys
 m.vals                 # a list of values
