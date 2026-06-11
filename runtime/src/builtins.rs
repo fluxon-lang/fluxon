@@ -143,6 +143,76 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             let sub = arg_str(&args, 1, "str.has")?;
             Ok(Value::Bool(s.contains(&sub)))
         }
+        "trim" => Ok(Value::Str(
+            arg_str(&args, 0, "str.trim")?.trim().to_string(),
+        )),
+        "replace" => {
+            let s = arg_str(&args, 0, "str.replace")?;
+            let old = arg_str(&args, 1, "str.replace")?;
+            let new = arg_str(&args, 2, "str.replace")?;
+            // Bo'sh pattern bilan Rust replace har belgi orasiga qo'shadi —
+            // bu hech kim kutmaydigan natija, shuning uchun s o'zgarmaydi.
+            if old.is_empty() {
+                return Ok(Value::Str(s));
+            }
+            Ok(Value::Str(s.replace(&old, &new)))
+        }
+        "starts" => {
+            let s = arg_str(&args, 0, "str.starts")?;
+            let pre = arg_str(&args, 1, "str.starts")?;
+            Ok(Value::Bool(s.starts_with(&pre)))
+        }
+        "ends" => {
+            let s = arg_str(&args, 0, "str.ends")?;
+            let suf = arg_str(&args, 1, "str.ends")?;
+            Ok(Value::Bool(s.ends_with(&suf)))
+        }
+        // str.pad s n ch — chapdan ch bilan n uzunlikka to'ldiradi (padStart):
+        // raqam formatlash ("7" → "007") asosiy ehtiyoj. Uzunlik str.len bilan
+        // bir xil o'lchovda (chars), bayt emas. n <= len bo'lsa s o'zgarmaydi.
+        "pad" => {
+            let s = arg_str(&args, 0, "str.pad")?;
+            let n = arg_int(&args, 1, "str.pad")?.max(0) as usize;
+            let ch = arg_str(&args, 2, "str.pad")?;
+            let Some(c) = ch.chars().next() else {
+                return Err(Flow::err("str.pad: 3-argument bo'sh bo'lmasligi kerak"));
+            };
+            let len = s.chars().count();
+            if n <= len {
+                return Ok(Value::Str(s));
+            }
+            // Natija baytlarini checked hisoblaymiz va isize::MAX (Rust
+            // allokatsiya chegarasi) dan oshganini rad qilamiz — aks holda
+            // with_capacity Flux xatosi o'rniga "capacity overflow" panic berardi.
+            let bytes = (n - len)
+                .checked_mul(c.len_utf8())
+                .and_then(|b| b.checked_add(s.len()))
+                .filter(|&b| b <= isize::MAX as usize)
+                .ok_or_else(|| Flow::overflow("str.pad"))?;
+            let mut out = String::with_capacity(bytes);
+            for _ in 0..(n - len) {
+                out.push(c);
+            }
+            out.push_str(&s);
+            Ok(Value::Str(out))
+        }
+        "repeat" => {
+            let s = arg_str(&args, 0, "str.repeat")?;
+            let n = arg_int(&args, 1, "str.repeat")?;
+            if n < 0 {
+                return Err(Flow::err(format!(
+                    "str.repeat: takror soni manfiy bo'lmasligi kerak ({})",
+                    n
+                )));
+            }
+            // Natija baytlari isize::MAX (Rust allokatsiya chegarasi) dan
+            // oshmasin: usize'ga sig'sa ham String::repeat "capacity overflow"
+            // panic beradi — o'rniga aniq Flux xatosi.
+            match s.len().checked_mul(n as usize) {
+                Some(b) if b <= isize::MAX as usize => Ok(Value::Str(s.repeat(n as usize))),
+                _ => Err(Flow::overflow("str.repeat")),
+            }
+        }
         "int" => {
             let s = arg_str(&args, 0, "str.int")?;
             match s.trim().parse::<i64>() {

@@ -348,6 +348,8 @@ Write to a map: `m.set k v` (`m[k]` is READ only). Shared state via this.
 ```flux
 str.len s · str.slice s a b · str.up s · str.low s · str.split s sep → list
 str.has s sub → bool · str.int s · str.str x
+str.trim s · str.replace s old new · str.starts s pre → bool · str.ends s suf → bool
+str.pad s n ch → pads LEFT to n chars ("7"→"007") · str.repeat s n
 math.floor x · math.ceil x · math.abs x · rand.int a b · rand.str n
 ```
 List length `l.len` (member), string length `str.len s` (module).

@@ -881,6 +881,12 @@ str.split s ","        # split → a list: "a,b" → ["a" "b"]
 str.has s "part"       # is it inside → bool
 str.int "42"           # text → number
 str.str 42             # number → text
+str.trim "  s  "       # strips leading/trailing whitespace → "s"
+str.replace s "-" "+"  # replaces every "-" with "+"
+str.starts s "/api"    # starts with prefix → bool
+str.ends s ".fx"       # ends with suffix → bool
+str.pad "7" 3 "0"      # pads on the LEFT → "007"
+str.repeat "ab" 3      # repeat → "ababab"
 ```
 
 > **Why is `str.len s` different from `list.len` on a list?** List length is a

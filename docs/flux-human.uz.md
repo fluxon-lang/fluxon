@@ -890,6 +890,12 @@ str.split s ","        # ajratish → ro'yxat: "a,b" → ["a" "b"]
 str.has s "qism"       # ichida bormi → bool
 str.int "42"           # matn → son
 str.str 42             # son → matn
+str.trim "  s  "       # bosh/oxir bo'shliqni kesadi → "s"
+str.replace s "-" "+"  # hamma "-" ni "+" ga almashtiradi
+str.starts s "/api"    # prefiks bilan boshlanadimi → bool
+str.ends s ".fx"       # suffiks bilan tugaydimi → bool
+str.pad "7" 3 "0"      # CHAPdan to'ldiradi → "007"
+str.repeat "ab" 3      # takrorlash → "ababab"
 ```
 
 > **Nega `str.len s` ro'yxatdagi `list.len` dan farqli?** Ro'yxat uzunligi —
