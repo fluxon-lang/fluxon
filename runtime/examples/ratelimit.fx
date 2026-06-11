@@ -6,7 +6,7 @@
 # Limit oshsa avtomatik 429 + Retry-After (oyna tugashigacha soniya). Kalit
 # funksiyasi nil qaytarsa req.ip'ga qaytadi (kalitsiz so'rovni ham cheklash uchun).
 #
-# Ishga tushirish:  flux run examples/ratelimit.fx
+# Ishga tushirish:  fluxon run examples/ratelimit.fx
 # Sinash (4-so'rov 429 qaytaradi):
 #   for i in 1 2 3 4; do curl -i -H "x-api-key: demo" localhost:8080/api/ping; done
 #   curl -i localhost:8080/api/ping        # kalitsiz -> IP bo'yicha cheklanadi

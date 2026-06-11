@@ -2,7 +2,7 @@
 #
 # Ishga tushirishdan oldin $AI_KEY ni belgilang (OS env yoki .env faylda):
 #   export AI_KEY=sk-ant-...
-#   flux run examples/ai_demo.fx
+#   fluxon run examples/ai_demo.fx
 #
 # Model: $AI_MODEL ?? "claude-opus-4-8". Boshqa model uchun:
 #   export AI_MODEL=claude-sonnet-4-6
@@ -13,7 +13,7 @@
 use ai reg
 
 # 1) ai.ask — oddiy savol, matn javob.
-javob = ai.ask "Bir jumlada: Flux tili nima uchun yaxshi?"
+javob = ai.ask "Bir jumlada: Fluxon tili nima uchun yaxshi?"
 log "ask: ${javob}"
 
 # 2) ai.json — strukturalangan chiqish. Schema map beriladi, model unga MOS
@@ -33,7 +33,7 @@ else
   log "past ishonch -> odamga uzatish"
 
 # 3) ai.run — tool-loop'ning BIR qadami. Tool'ni model O'ZI bajarmaydi:
-#    loop sizniki (log/narx/tasdiq nazorati). Tool'ni reg.call orqali Flux
+#    loop sizniki (log/narx/tasdiq nazorati). Tool'ni reg.call orqali Fluxon
 #    tomonda chaqirasiz, natijani msgs'ga qo'shasiz.
 
 # Tool funksiyasini registrga qo'shamiz (reg dinamik dispatch).
@@ -57,7 +57,7 @@ each i in 1..10
   if r.kind == :final
     log "yakuniy javob: ${r.text}"
     ret r.text
-  # r.kind == :call -> model tool chaqirmoqchi, uni Flux tomonda bajaramiz.
+  # r.kind == :call -> model tool chaqirmoqchi, uni Fluxon tomonda bajaramiz.
   log "tool chaqiruvi: ${r.tool} args=${r.args}"
   natija = reg.call r.tool r.args
   # Model javobini (tool_use) va tool natijasini tarixga qo'shamiz.

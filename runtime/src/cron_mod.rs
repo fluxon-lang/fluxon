@@ -1,4 +1,4 @@
-// Flux cron battery — rejalashtirilgan fon vazifalari.
+// Fluxon cron battery — rejalashtirilgan fon vazifalari.
 //
 // Til API (docs):
 //   cron.on 0 * * * * check_prices     # daqiqa soat kun oy hafta-kuni; nomli funksiya
@@ -61,7 +61,7 @@ impl Default for CronState {
 
 // `cron` ifodasi (str) -> Schedule.
 //
-// Flux standart Unix 5-maydonli format (daqiqa soat kun oy hafta-kuni) ishlatadi,
+// Fluxon standart Unix 5-maydonli format (daqiqa soat kun oy hafta-kuni) ishlatadi,
 // `cron` crate esa 6-7 maydonli (sekund bilan) kutadi — oldiga "0 " (sekund=0)
 // qo'shamiz. Yana bir nomuvofiqlik: Unix cron'da hafta-kuni `0`=yakshanba (va `7`
 // ham yakshanba), `cron` crate esa faqat `1-7`/`SUN-SAT` qabul qiladi (`0` xato).

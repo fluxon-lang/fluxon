@@ -1,6 +1,6 @@
 ## Spec Gaps I Hit
 
-This job board platform (9 Flux files, 2200+ LOC) revealed 15 minor ambiguities in the spec—all resolvable by reasonable inference, but not explicitly documented:
+This job board platform (9 Fluxon files, 2200+ LOC) revealed 15 minor ambiguities in the spec—all resolvable by reasonable inference, but not explicitly documented:
 
 ### Critical Gaps (Feature Usability)
 None. All core features (transactions, AI, WebSocket, cron, schema) work as spec describes.
@@ -33,7 +33,7 @@ None. All core features (transactions, AI, WebSocket, cron, schema) work as spec
 
 7. **JSON Column Type Usage**
    - Spec mentions auto-encoding but shows no schema example.
-   - Assumption: Transparent—pass Flux map/list, auto-serialize/deserialize.
+   - Assumption: Transparent—pass Fluxon map/list, auto-serialize/deserialize.
 
 8. **Router Precedence for Dynamic Segments**
    - Spec says "literal paths are prioritized" but doesn't clarify /companies/:id/jobs vs /jobs/:id.
@@ -79,7 +79,7 @@ The compressed spec (1 page, 263 lines) successfully encodes a production platfo
 
 Total Implementation
 ---
-- 10 Flux files (.fx)
+- 10 Fluxon files (.fx)
 - 2268 lines of code
 - 8 REST endpoints for companies, candidates, jobs, applications
 - AI-powered candidate matching with confidence scoring

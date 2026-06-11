@@ -1,6 +1,6 @@
 // HTTP rate-limit (http.limit) end-to-end testi (issue #79).
 //
-// `flux` binary'ni subprocess sifatida ishga tushirib, real HTTP so'rovlar bilan
+// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP so'rovlar bilan
 // to'liq oqimni tekshiramiz:
 //   - http.limit N :min \req -> kalit  — N so'rovdan keyin 429 + Retry-After
 //   - har kalit (tenant/api-key) alohida sanaydi
@@ -13,19 +13,19 @@ use std::io::Write;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-// Skriptni vaqtinchalik faylga yozib, flux serverini ishga tushiradi.
+// Skriptni vaqtinchalik faylga yozib, fluxon serverini ishga tushiradi.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
-    let path = std::env::temp_dir().join(format!("flux_rl_test_{}.fx", port));
+    let path = std::env::temp_dir().join(format!("fluxon_rl_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
     f.write_all(script.as_bytes()).expect("temp fx yozish");
     drop(f);
 
-    let bin = env!("CARGO_BIN_EXE_flux");
+    let bin = env!("CARGO_BIN_EXE_fluxon");
     let child = Command::new(bin)
         .arg("run")
         .arg(&path)
         .spawn()
-        .expect("flux serverini ishga tushirish");
+        .expect("fluxon serverini ishga tushirish");
     (child, path)
 }
 

@@ -8,8 +8,8 @@ agent bir o'qishda eng to'g'ri va kam tokenli yozishini o'lchadik.
 
 - Bitta og'ir PRD (`PRD.md`): multi-tenant booking + 4 analitika endpoint
   (IN-filtr, vaqt-range, GROUP BY, sum/avg, order+limit+offset, race-safe tx).
-- 5 variant — har biri uchun **to'liq `flux-agent.md`**, faqat `db` bo'limi
-  almashtirilgan (`specs/flux-agent.v*.md`).
+- 5 variant — har biri uchun **to'liq `fluxon-agent.md`**, faqat `db` bo'limi
+  almashtirilgan (`specs/fluxon-agent.v*.md`).
 - Har variant uchun bitta **haiku** agent spec'ni o'qib `.fx` yozdi
   (`runs/*.fx`) + o'z-hisobot (qaysi qism qiyin, xom SQL'ga qochdimi).
 - Bitta tahlilchi 5 natijani yonma-yon baholadi (`runs/judge.json`).
@@ -29,7 +29,7 @@ agent bir o'qishda eng to'g'ri va kam tokenli yozishini o'lchadik.
 | variant | correctness | token | readability | escape-hatch |
 |---------|:--:|:--:|:--:|--|
 | v0-baseline | 7.5 | **3** | 4.5 | hamma o'qish xom SQL (dizayn) |
-| v1-nested-map | 7.0 | 7.5 | 8.0 | overview'ni `limit:999999` + Flux-loop bilan buzdi |
+| v1-nested-map | 7.0 | 7.5 | 8.0 | overview'ni `limit:999999` + Fluxon-loop bilan buzdi |
 | v2-suffix | 6.0 | **8** | 7.5 | `db.agg` to'g'ri; lekin xom SQL ichiga `:sym` yozdi (BUG) |
 | v3-string-dsl | 5.5 | 6.5 | 6.5 | `db.one` ga named param berdi (BUG); `/api/` prefiks PRD'dan chetladi |
 | **v4-builder** | **8.5** | 7.0 | **8.5** | intizomli — xom SQL faqat JOIN/CASE/date'da, $1 to'g'ri |
@@ -51,7 +51,7 @@ agent bir o'qishda eng to'g'ri va kam tokenli yozishini o'lchadik.
    `/stats/overview` (status bo'yicha sanoq + `:done` revenue + avg_guests) —
    bironta variant ham buni faqat-deklarativ qila olmadi. v4 buni bitta xom
    `SUM(CASE WHEN...)` round-trip bilan eng aqlli yechdi; v0/v3 esa 6 ta alohida
-   `db.one` qildi; v1 butun jadvalni yuklab Flux'da sanadi (eng yomon).
+   `db.one` qildi; v1 butun jadvalni yuklab Fluxon'da sanadi (eng yomon).
 
 4. **Status-string→symbol konversiyasi og'riq nuqtasi.** v0/v2/v3 da
    `json.dec ("\":" + s + "\"")` hack, v4 da uzun `if/elif` zanjiri ko'rindi.
@@ -79,7 +79,7 @@ ni **xom SQL'siz** yozadi; `db.q` faqat ko'p-jadvalli JOIN va `date()` uchun qol
 ## Fayllar
 - `PRD.md` — test task
 - `variants/v*.md` — har dizaynning db bo'limi
-- `specs/flux-agent.v*.md` — har variant uchun to'liq spec
+- `specs/fluxon-agent.v*.md` — har variant uchun to'liq spec
 - `runs/*.fx` — agent yozgan kodlar
 - `runs/judge.json` — to'liq baholash
 - `run-experiment.mjs` — workflow skripti (args embed'siz manba)

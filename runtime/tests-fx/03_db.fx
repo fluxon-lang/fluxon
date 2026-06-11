@@ -1,5 +1,5 @@
 # 03 — db battery (SQLite). Ishga tushirish:
-#   DATABASE_URL=sqlite::memory: ./target/release/flux run tests-fx/03_db.fx
+#   DATABASE_URL=sqlite::memory: ./target/release/fluxon run tests-fx/03_db.fx
 
 use db
 
@@ -15,8 +15,8 @@ fn eq got want label
 tbl users
   id     serial pk
   name   str
-  role   sym          # DB: matn, Flux: symbol
-  prefs  json         # DB: matn, Flux: map
+  role   sym          # DB: matn, Fluxon: symbol
+  prefs  json         # DB: matn, Fluxon: map
   hits   int
 
 # --- ins: RETURNING * → to'liq qator ---

@@ -1,7 +1,7 @@
-# Flux — Design Notes & Tradeoffs
+# Fluxon — Design Notes & Tradeoffs
 
 ## Language Name
-**Flux** (`.fx`) — reflects flow, pipelines, and the idea that data moves through the program.
+**Fluxon** (`.fx`) — reflects flow, pipelines, and the idea that data moves through the program.
 
 ---
 
@@ -21,7 +21,7 @@ Sigil only appears on **first write** — not on reads. This avoids sigil noise 
 
 ### 2. One loop form: `each`
 
-`for`, `while`, `do-while`, `forEach`, `loop` all do the same thing conceptually: repeat while some condition holds. **Flux unifies them under `each`:**
+`for`, `while`, `do-while`, `forEach`, `loop` all do the same thing conceptually: repeat while some condition holds. **Fluxon unifies them under `each`:**
 
 - `each x in list` — iterate a list/map
 - `each #i in 1..10` — numeric range
@@ -37,7 +37,7 @@ This eliminates 3 keywords and 2 syntax forms. The tradeoff: `each ?cond` for wh
 
 This shaves 2 tokens per call — in a program with 50 function calls that's 100 characters of pure syntax noise eliminated.
 
-**Tradeoff**: parsing ambiguity. `f a b` — is that `f(a, b)` or `f(a)(b)`? Flux treats it as `f(a, b)`. Chained calls need parens: `f(g(x))`. This is the same tradeoff ML/Haskell makes, and it works well once internalized.
+**Tradeoff**: parsing ambiguity. `f a b` — is that `f(a, b)` or `f(a)(b)`? Fluxon treats it as `f(a, b)`. Chained calls need parens: `f(g(x))`. This is the same tradeoff ML/Haskell makes, and it works well once internalized.
 
 ---
 
@@ -60,7 +60,7 @@ const server = http.createServer((req, res) => { res.end('hi') })
 server.listen(3000)
 ```
 
-*Flux:*
+*Fluxon:*
 ```
 use http
 http.get "/" fn req res -> res.send "hi"
@@ -75,7 +75,7 @@ The `use` statement doesn't need a string path for stdlib modules — just the n
 
 ### 6. `try/catch` over result types
 
-Flux uses `try/catch` rather than `Result<T, E>` or `Option<T>` types. Reasoning: result types require significant type system machinery (generics, monadic binding, etc.) which contradicts "learnable in one look." `try/catch` is universally understood and needs no explanation. The `!` suffix on potentially-failing calls (`db.query!`, `fs.read!`) acts as a visible warning without requiring the caller to handle it immediately.
+Fluxon uses `try/catch` rather than `Result<T, E>` or `Option<T>` types. Reasoning: result types require significant type system machinery (generics, monadic binding, etc.) which contradicts "learnable in one look." `try/catch` is universally understood and needs no explanation. The `!` suffix on potentially-failing calls (`db.query!`, `fs.read!`) acts as a visible warning without requiring the caller to handle it immediately.
 
 **Tradeoff**: less safe than forced result types. But the `!` convention provides visibility, and `try/catch` is zero-boilerplate.
 
@@ -97,7 +97,7 @@ For the concurrency story, `go` for spawning and `lock/unlock` for mutual exclus
 
 ## Token Efficiency Analysis
 
-Flux eliminates these tokens vs typical languages:
+Fluxon eliminates these tokens vs typical languages:
 
 | Eliminated token | Saves per use | Typical uses in project |
 |-----------------|---------------|------------------------|

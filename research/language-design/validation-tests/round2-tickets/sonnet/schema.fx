@@ -1,4 +1,4 @@
-# schema.flux — database table definitions
+# schema.fluxon — database table definitions
 
 tbl tickets
   id            serial pk

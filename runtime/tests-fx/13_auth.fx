@@ -1,5 +1,5 @@
 # 13 — auth battery (JWT + parol hash, issue #69).
-# Ishga: AUTH_SECRET=sirli-kalit ./target/release/flux run tests-fx/13_auth.fx
+# Ishga: AUTH_SECRET=sirli-kalit ./target/release/fluxon run tests-fx/13_auth.fx
 #
 # auth.jwt {payload} [{exp:N}] -> imzolangan JWT (HS256).
 # auth.verify token            -> payload map (imzo + exp avto tekshirilgan), yoki err.

@@ -1,5 +1,5 @@
 # Yadro tilning namoyishi — batteries'siz, lekin to'liq mantiq.
-# Ishga tushirish:  flux run examples/demo.fx
+# Ishga tushirish:  fluxon run examples/demo.fx
 
 fn fib n
   if n < 2

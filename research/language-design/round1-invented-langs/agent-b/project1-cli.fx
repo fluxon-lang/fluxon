@@ -1,5 +1,5 @@
--- Flux TODO Manager
--- Usage: flux todo <add|list|done|del> [args]
+-- Fluxon TODO Manager
+-- Usage: fluxon todo <add|list|done|del> [args]
 
 use fs
 use json

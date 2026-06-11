@@ -1,4 +1,4 @@
-# messages.flux — message persistence, history (paginated), reactions.
+# messages.fluxon — message persistence, history (paginated), reactions.
 use db
 use ./moderation as mod
 

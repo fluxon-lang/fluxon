@@ -1,5 +1,5 @@
 # 14 — crypto battery (issue #131).
-# Ishga: ./target/release/flux run tests-fx/14_crypto.fx
+# Ishga: ./target/release/fluxon run tests-fx/14_crypto.fx
 #
 # crypto.sha256 s     -> SHA-256 hex (kichik harf)
 # crypto.hmac key msg -> HMAC-SHA256 hex (webhook imzo tekshirish)

@@ -1,7 +1,7 @@
-// Flux lexer — manba matnni tokenlar oqimiga aylantiradi.
+// Fluxon lexer — manba matnni tokenlar oqimiga aylantiradi.
 //
 // Eng muhim mas'uliyat: indentation'ni INDENT/DEDENT tokenlariga aylantirish.
-// Flux bloklari 2-bo'shliqli chekinish bilan ochiladi (`{}` yo'q). Lexer har
+// Fluxon bloklari 2-bo'shliqli chekinish bilan ochiladi (`{}` yo'q). Lexer har
 // mazmunli qator boshida joriy chekinishni stack bilan solishtiradi:
 //   - chuqurroq  -> Indent
 //   - sayozroq   -> har pog'ona uchun bitta Dedent
@@ -105,7 +105,7 @@ impl<'a> Lexer<'a> {
                     }
                     b'\t' => {
                         return Err(format!(
-                            "{}-qatorda tab ishlatilgan; Flux faqat bo'shliq qabul qiladi",
+                            "{}-qatorda tab ishlatilgan; Fluxon faqat bo'shliq qabul qiladi",
                             self.line
                         ));
                     }

@@ -1,7 +1,7 @@
 # fraud.fx — fraud and limit checks for transfers
 #
 # Daily per-account transfer limit in cents (e.g. 1,000,000 = $10,000.00)
-# SPEC GAP: No typed constants or config system in Flux beyond env vars.
+# SPEC GAP: No typed constants or config system in Fluxon beyond env vars.
 # We read from env with a fallback.
 
 use db ai env

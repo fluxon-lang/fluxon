@@ -1,21 +1,21 @@
-# db_demo.flux — db battery namoyishi (SQLite, zero-setup).
+# db_demo.fluxon — db battery namoyishi (SQLite, zero-setup).
 # Ishga tushirish (in-memory, hech narsa o'rnatmasdan):
 #   DATABASE_URL=sqlite::memory: cargo run -- run examples/db_demo.fx
 # yoki fayl bilan:
-#   DATABASE_URL=sqlite:/tmp/flux.db cargo run -- run examples/db_demo.fx
+#   DATABASE_URL=sqlite:/tmp/fluxon.db cargo run -- run examples/db_demo.fx
 
 use db
 
-# tbl — schema e'loni va YAGONA MANBA. db ochilganda Flux `tbl` ni DB joriy
+# tbl — schema e'loni va YAGONA MANBA. db ochilganda Fluxon `tbl` ni DB joriy
 # holati bilan solishtiradi (diff) va kerakli DDL'ni o'zi bajaradi: yangi
 # ustun → ADD COLUMN, olib tashlangan ustun → DROP COLUMN (backup bilan),
 # index qo'shilsa/olinsa → CREATE/DROP INDEX. Siz faqat oxirgi ko'rinishni
 # yozasiz — migration SQL yozish shart emas, qayta-deploy idempotent.
 tbl tickets
   id       serial pk
-  category sym          # DB: matn, Flux: symbol
+  category sym          # DB: matn, Fluxon: symbol
   status   sym index    # tez-tez filtrlanadi → index (auto nom: idx_tickets_status)
-  meta     json         # DB: matn, Flux: map/list
+  meta     json         # DB: matn, Fluxon: map/list
 
   index(category status)   # ko'p-ustunli index (bo'shliq bilan, vergulsiz)
 

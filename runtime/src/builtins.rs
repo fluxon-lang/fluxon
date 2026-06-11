@@ -1,4 +1,4 @@
-// Flux yadro kutubxonasi (batteries'siz qism).
+// Fluxon yadro kutubxonasi (batteries'siz qism).
 //
 // Uch xil chaqiruv:
 //   - global funksiyalar (log) — Env'ga o'rnatiladi (`install`)
@@ -184,7 +184,7 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             }
             // Natija baytlarini checked hisoblaymiz va isize::MAX (Rust
             // allokatsiya chegarasi) dan oshganini rad qilamiz — aks holda
-            // with_capacity Flux xatosi o'rniga "capacity overflow" panic berardi.
+            // with_capacity Fluxon xatosi o'rniga "capacity overflow" panic berardi.
             let bytes = (n - len)
                 .checked_mul(c.len_utf8())
                 .and_then(|b| b.checked_add(s.len()))
@@ -208,7 +208,7 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             }
             // Natija baytlari isize::MAX (Rust allokatsiya chegarasi) dan
             // oshmasin: usize'ga sig'sa ham String::repeat "capacity overflow"
-            // panic beradi — o'rniga aniq Flux xatosi.
+            // panic beradi — o'rniga aniq Fluxon xatosi.
             match s.len().checked_mul(n as usize) {
                 Some(b) if b <= isize::MAX as usize => Ok(Value::Str(s.repeat(n as usize))),
                 _ => Err(Flow::overflow("str.repeat")),
@@ -336,7 +336,7 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             let y = arg_num(&args, 1, "math.pow")?;
             match (&args[0], &args[1]) {
                 // int ^ manfiy bo'lmagan int → int (checked: overflow'da panic
-                // emas, Flux xatosi; i64 ga sig'maydigan daraja ham overflow).
+                // emas, Fluxon xatosi; i64 ga sig'maydigan daraja ham overflow).
                 (Value::Int(a), Value::Int(b)) if *b >= 0 => {
                     let e = u32::try_from(*b).map_err(|_| Flow::overflow("math.pow"))?;
                     Ok(Value::Int(
@@ -348,7 +348,7 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "sqrt" => {
-            // Manfiy sondan ildiz NaN berardi — Flux'da NaN qiymati kutilmaydi,
+            // Manfiy sondan ildiz NaN berardi — Fluxon'da NaN qiymati kutilmaydi,
             // o'rniga aniq xato.
             if x < 0.0 {
                 return Err(Flow::err("math.sqrt: manfiy sondan ildiz olib bo'lmaydi"));
@@ -1461,7 +1461,7 @@ pub fn sort_default(xs: &[Value]) -> R {
     Ok(Value::List(sorted))
 }
 
-// Stable merge sort — std sort_by o'rniga, chunki komparator Flux funksiyasi
+// Stable merge sort — std sort_by o'rniga, chunki komparator Fluxon funksiyasi
 // bo'lganda xato (Flow) qaytishi mumkin: std sort xato yo'lida Equal qaytarsak
 // "total order buzildi" deb panic qilishi mumkin. Bu yo'l xatoni toza ko'taradi.
 pub fn sort_values<F>(mut xs: Vec<Value>, cmp: &mut F) -> Result<Vec<Value>, Flow>
@@ -1687,7 +1687,7 @@ mod math_tests {
     use super::*;
 
     // Issue #89: i64::MIN.abs() panic berardi (musbat juftligi i64 ga sig'maydi).
-    // Endi Flux xatosi; oddiy qiymatlar avvalgidek ishlaydi.
+    // Endi Fluxon xatosi; oddiy qiymatlar avvalgidek ishlaydi.
     #[test]
     fn abs_min_is_error_not_panic() {
         let r = math_module("abs", vec![Value::Int(i64::MIN)]);
@@ -1770,7 +1770,7 @@ mod math_tests {
     }
 
     // Issue #128: int ^ manfiy bo'lmagan int → int (checked), overflow'da
-    // panic emas Flux xatosi; manfiy daraja yoki flt aralashsa flt.
+    // panic emas Fluxon xatosi; manfiy daraja yoki flt aralashsa flt.
     #[test]
     fn pow_int_flt_va_overflow() {
         assert!(matches!(
@@ -2003,7 +2003,7 @@ mod time_tests {
     }
 
     // Issue #89: n * secs ko'paytmasi (yoki yakuniy yig'indi) i64 dan toshsa
-    // panic/jim wrap emas, Flux xatosi qaytadi — to'rttala offset funksiyada.
+    // panic/jim wrap emas, Fluxon xatosi qaytadi — to'rttala offset funksiyada.
     #[test]
     fn time_offsets_overflow_is_error() {
         let big = Value::Int(i64::MAX / 2);
@@ -2193,7 +2193,7 @@ mod fs_tests {
     // Process pid + test nomi yetarli noyob — testlar parallel ishlasa ham.
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("flux_fs_test_{}_{}", std::process::id(), tag));
+        p.push(format!("fluxon_fs_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&p); // oldingi qoldiqni tozalash
         std::fs::create_dir_all(&p).expect("tmp dir yaratilmadi");
         p

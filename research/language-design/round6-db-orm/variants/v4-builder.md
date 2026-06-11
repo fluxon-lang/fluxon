@@ -1,5 +1,5 @@
 ### db (Postgres, $DATABASE_URL auto)
-```flux
+```fluxon
 row  = db.ins "orders" {cust:5 status::new}          # → full row (with id)
 db.up "orders" {total:1500} {id:oid}                 # {set} {where}
 db.del "cart_items" {id:iid}                          # {where}
@@ -8,19 +8,19 @@ db.put "memory" {val:v} {agent:a key:k}               # UPSERT (atomic)
 
 Reads — a query builder, piped with `|>`. `db.from "t"` starts it; `db.all`
 runs it → list, `db.first` → one row or nil. No raw SQL:
-```flux
+```fluxon
 rows = db.from "bookings" |> db.eq {tenant_id:tid} |> db.all
 one  = db.from "bookings" |> db.eq {id:bid tenant_id:tid} |> db.first
 ```
 Stages (each takes the query, returns the query — chain freely):
-```flux
+```fluxon
 db.eq {col:val ...}        # equality, AND-ed. A list value → IN (...)
 db.cmp :col :ge t          # one comparison: op ∈ :gt :ge :lt :le :ne :like
 db.order :col              #   ascending
 db.order :col :desc        #   descending
 db.limit n   ·   db.offset n
 ```
-```flux
+```fluxon
 db.from "bookings"
   |> db.eq {tenant_id:tid status:[:pending :confirmed]}   # status IN (..)
   |> db.cmp :start_at :ge t0
@@ -30,7 +30,7 @@ db.from "bookings"
   |> db.all
 ```
 Aggregation — builder stages that set output columns, then `db.agg` runs it:
-```flux
+```fluxon
 db.from "bookings"
   |> db.eq {tenant_id:tid status:[:done :confirmed]}
   |> db.group :resource_id
@@ -44,12 +44,12 @@ Agg stages: `db.count :out`, `db.sum :col :out` / `db.avg :col :out` /
 summary row. For a raw expression (`date(created)`) use `db.q`.
 
 `db.q "raw SQL" [params]` / `db.one` stay as a full escape hatch:
-```flux
+```fluxon
 db.q "select date(created) day, count(*) n from bookings where tenant_id=$1 group by day order by day" [tid]
 ```
 
 Transaction — atomic, rollback on `fail`/`!`, returns a value:
-```flux
+```fluxon
 res = db.tx \->
   ord = db.ins "orders" {cust:c total:t}
   each it in items
@@ -60,7 +60,7 @@ res = db.tx \->
 `uniq` column + ins inside tx (duplicate → rollback).
 
 Schema = `tbl`:
-```flux
+```fluxon
 tbl products
   id    serial pk
   owner int ref:users.id
@@ -70,4 +70,4 @@ tbl products
 Types: serial int flt str bool json now sym money (`int` 64-bit). Modifiers:
 `pk uniq null ref:tbl.col`. Multi-column: `uniq(agent, key)`.
 `json` column: auto map/list on read, auto-encode on write.
-`sym` column: text in DB, symbol in Flux (`db.eq {status::pending}` filters fine).
+`sym` column: text in DB, symbol in Fluxon (`db.eq {status::pending}` filters fine).

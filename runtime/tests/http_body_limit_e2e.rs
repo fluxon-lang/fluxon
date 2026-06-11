@@ -4,7 +4,7 @@
 // ulkan body yuborib server xotirasini to'ldira olardi (DoS). Endi `http.serve`
 // default 10 MiB chegara qo'yadi va `{max_body: N}` bilan sozlanadi; oshsa 413.
 //
-// `flux` binary'ni subprocess sifatida ishga tushirib, real HTTP POST bilan
+// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP POST bilan
 // tekshiramiz:
 //   - chegaradan kichik body  -> 200
 //   - chegaradan katta body (to'g'ri Content-Length)  -> 413 (tez yo'l)
@@ -18,17 +18,17 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
-    let path = std::env::temp_dir().join(format!("flux_body_test_{}.fx", port));
+    let path = std::env::temp_dir().join(format!("fluxon_body_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
     f.write_all(script.as_bytes()).expect("temp fx yozish");
     drop(f);
 
-    let bin = env!("CARGO_BIN_EXE_flux");
+    let bin = env!("CARGO_BIN_EXE_fluxon");
     let child = Command::new(bin)
         .arg("run")
         .arg(&path)
         .spawn()
-        .expect("flux serverini ishga tushirish");
+        .expect("fluxon serverini ishga tushirish");
     (child, path)
 }
 

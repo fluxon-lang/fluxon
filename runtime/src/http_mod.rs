@@ -1,6 +1,6 @@
-// Flux HTTP battery — server (http.on/http.serve/rep) va klient (http.get/post).
+// Fluxon HTTP battery — server (http.on/http.serve/rep) va klient (http.get/post).
 //
-// Server tokio + hyper ustida quriladi. Flux handler'lari sinxron tree-walking
+// Server tokio + hyper ustida quriladi. Fluxon handler'lari sinxron tree-walking
 // bo'lgani uchun har request `spawn_blocking` ichida bajariladi — bu CPU ishini
 // tokio worker'larini bloklamasdan HAQIQIY PARALLEL qiladi (Value: Send+Sync,
 // thread-safety refactor shuni ta'minlaydi).
@@ -612,7 +612,7 @@ fn with_ctx(req: Value, ctx: Arc<Mutex<BTreeMap<String, Value>>>) -> Value {
 
 // --- Value/Flow -> hyper::Response ---
 
-// Flux `Int` statusni (rep/fail) yaroqli HTTP status u16'ga aylantiradi.
+// Fluxon `Int` statusni (rep/fail) yaroqli HTTP status u16'ga aylantiradi.
 // Tekshiruv ASL i64 ustida bo'lishi shart: `as u16` cast oldin wrap qiladi —
 // `rep 65736` u16'da 200 ga, ba'zi manfiy qiymatlar 3xx/4xx ga tushib jim
 // muvaffaqiyatga aldardi (issue #108). Diapazondan tashqari yoki HTTP bo'lmagan
@@ -621,7 +621,7 @@ fn checked_status(n: i64) -> u16 {
     match u16::try_from(n) {
         Ok(s) if StatusCode::from_u16(s).is_ok() => s,
         _ => {
-            eprintln!("Flux HTTP: noto'g'ri status kodi {} → 500", n);
+            eprintln!("Fluxon HTTP: noto'g'ri status kodi {} → 500", n);
             500
         }
     }
@@ -632,7 +632,7 @@ fn checked_status(n: i64) -> u16 {
 // kutilmagan holatda panic o'rniga 500 qaytaradi.
 fn status_or_500(status: u16) -> StatusCode {
     StatusCode::from_u16(status).unwrap_or_else(|_| {
-        eprintln!("Flux HTTP: noto'g'ri status kodi {} → 500", status);
+        eprintln!("Fluxon HTTP: noto'g'ri status kodi {} → 500", status);
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
@@ -736,7 +736,7 @@ fn apply_headers(
 // turdagi sarlavhalar body'ning standart sarlavhasini bosib o'tadi (append
 // emas, insert): canonical body sarlavhasi ustidan dasturchi niyati ustun.
 //
-// Kalitda `_` → `-` ga aylanadi: Flux map kalitida defis bo'lolmaydi
+// Kalitda `_` → `-` ga aylanadi: Fluxon map kalitida defis bo'lolmaydi
 // (`content-type` uchta token sifatida parse bo'ladi), shuning uchun
 // `{content_type:"..."}` yoziladi. Bu o'qish bilan simmetrik — server
 // req.headers'da ham `-` → `_` qiladi (build_req), AI bitta naqshni o'rganadi.
@@ -779,7 +779,7 @@ fn apply_headers_mut(hmap: &mut hyper::HeaderMap, headers: Option<&Value>) {
     }
 }
 
-// HeaderMap -> Flux header map (kalitlar lowercase). O'qish tomonidagi yagona
+// HeaderMap -> Fluxon header map (kalitlar lowercase). O'qish tomonidagi yagona
 // yo'l — server req.headers ham, klient res.headers ham shu orqali quriladi.
 //
 // Bir nomli takror header'lar yo'qolmasligi uchun (issue #101) qiymatlar
@@ -1037,7 +1037,7 @@ pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     TcpListener::bind(addr)
         .await
-        .map_err(|e| Flow::err(format!("Flux HTTP port {} bind xatosi: {}", port, e)))
+        .map_err(|e| Flow::err(format!("Fluxon HTTP port {} bind xatosi: {}", port, e)))
 }
 
 // Bitta HTTP server uchun accept loop — umumiy event-loop ichida spawn qilinadi
@@ -1045,7 +1045,7 @@ pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
 // oldin ko'tariladi).
 pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: usize) {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
-    eprintln!("Flux HTTP server: http://localhost:{}", port);
+    eprintln!("Fluxon HTTP server: http://localhost:{}", port);
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -1095,7 +1095,7 @@ async fn handle_request(
     let query = uri.query().unwrap_or("").to_string();
 
     // Sarlavhalarni map'ga yig'amiz (kalitlar lowercase, '-' -> '_' shunda
-    // Flux'da req.headers.x_user_id sifatida o'qiladi). Takror nomlar
+    // Fluxon'da req.headers.x_user_id sifatida o'qiladi). Takror nomlar
     // headers_to_map ichida birlashtiriladi (issue #101).
     let headers: BTreeMap<String, Value> = headers_to_map(req.headers())
         .into_iter()
@@ -1263,7 +1263,7 @@ type ClientBody = Full<Bytes>;
 // faqat https sxemada faollashadi, plaintext so'rovlar avvalgidek ishlaydi.
 type PooledHttpClient = Client<HttpsConnector<HttpConnector>, ClientBody>;
 
-// Klient so'rovlari uchun bir martalik global runtime (Flux skripti sinxron).
+// Klient so'rovlari uchun bir martalik global runtime (Fluxon skripti sinxron).
 // pub(crate): `ai` battery ham shu runtime/poolni qayta ishlatadi (LLM API ham
 // oddiy https POST), takror tokio runtime/pool qurmaslik uchun.
 pub(crate) fn client_runtime() -> &'static tokio::runtime::Runtime {

@@ -1,4 +1,4 @@
-# schema.flux — Barcha tbl ta'riflari
+# schema.fluxon — Barcha tbl ta'riflari
 # Ushbu fayl faqat schema ta'riflari. Boshqa fayllar use ./schema orqali import qiladi.
 
 use db

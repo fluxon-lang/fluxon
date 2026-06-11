@@ -4,7 +4,7 @@
 # auth natijasi (tenant/role) req.ctx orqali handler'ga uzatiladi — har handler'da
 # qayta hisoblanmaydi.
 #
-# Ishga tushirish:  flux run examples/middleware.fx
+# Ishga tushirish:  fluxon run examples/middleware.fx
 # Sinash:
 #   curl localhost:8080/health                       # auth shart emas -> 200
 #   curl localhost:8080/api/me                       # auth yo'q -> 401

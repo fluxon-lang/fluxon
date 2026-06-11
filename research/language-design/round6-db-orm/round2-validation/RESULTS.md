@@ -3,7 +3,7 @@
 1-bosqichda dizayn tanlandi (builder), keyin `db_mod.rs`/`lexer.rs`/`interp.rs`
 ga **haqiqatan implementatsiya qilindi**. Bu bosqich: haiku agent yangilangan
 (ishlaydigan) spec bilan booking+analytics PRD'ni yozadi va kod **haqiqiy
-`flux` binary'da run** qilinadi (1-bosqich faqat statik o'qigan edi).
+`fluxon` binary'da run** qilinadi (1-bosqich faqat statik o'qigan edi).
 
 ## Natija
 
@@ -22,11 +22,11 @@ butun CRUD + overview deklarativ builder bilan, **bironta qo'lda SQL string'siz*
 
 ## Haqiqiy run
 
-Kod `DATABASE_URL=sqlite::memory: flux run` bilan tekshirildi (server'siz, faqat
+Kod `DATABASE_URL=sqlite::memory: fluxon run` bilan tekshirildi (server'siz, faqat
 yuklash/eval). **Bitta haqiqiy xato** bor edi:
 
 - **Ko'p-qatorli string literal** (302-qator): agent JOIN SQL'ni ko'p qatorga
-  yoyib yozdi, lekin Flux string'lari bir qatorda bo'lishi kerak. Bu builder
+  yoyib yozdi, lekin Fluxon string'lari bir qatorda bo'lishi kerak. Bu builder
   qismida EMAS — escape-hatch'dagi string formatlashda.
 
 O'sha xom-SQL string'ларни bir qatorga siqib (boshqa hech narsa o'zgartirmasdan)
@@ -35,7 +35,7 @@ O'sha xom-SQL string'ларни bir qatorga siqib (boshqa hech narsa o'zgartirma
 
 > Eslatma: workflow ichidagi haiku "run-check" agenti `ok:true` deb noto'g'ri
 > xabar berdi (run natijasini noto'g'ri talqin qildi). Haqiqiy holatni asosiy
-> agent o'zi `flux` binary'da tasdiqladi — sub-agent run-natijasiga ishonib
+> agent o'zi `fluxon` binary'da tasdiqladi — sub-agent run-natijasiga ishonib
 > bo'lmaydi.
 
 ## Topilmalar → keyingi ish
@@ -50,6 +50,6 @@ O'sha xom-SQL string'ларни bir qatorga siqib (boshqa hech narsa o'zgartirma
    verifikatsiya qilishi shart.
 
 ## Fayllar
-- `flux-agent.builder.md` — agentga berilgan yangilangan spec
+- `fluxon-agent.builder.md` — agentga berilgan yangilangan spec
 - `agent-output.fx` — agent yozgan to'liq backend (1 string-xatosi bilan)
 - `validate.mjs` — validatsiya workflow manbai

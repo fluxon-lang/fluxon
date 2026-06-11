@@ -1,4 +1,4 @@
-# schema.flux — database schemas for the realtime chat platform
+# schema.fluxon — database schemas for the realtime chat platform
 # All tables for the chat backend. Loaded once; tbl declarations register
 # the schema with the db battery.
 use db

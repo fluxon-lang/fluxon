@@ -1,9 +1,9 @@
-// Flux tokenlari — lexer chiqaradigan eng kichik ma'noli birliklar.
+// Fluxon tokenlari — lexer chiqaradigan eng kichik ma'noli birliklar.
 //
-// Flux indentation-sezgir til, shuning uchun lexer oddiy belgilardan tashqari
+// Fluxon indentation-sezgir til, shuning uchun lexer oddiy belgilardan tashqari
 // blok boshlanishi/tugashini bildiruvchi sun'iy `Indent`/`Dedent` tokenlarini
 // ham chiqaradi (xuddi Python kabi). Statement chegarasi `Newline` bilan
-// belgilanadi — Flux'da `;` yo'q.
+// belgilanadi — Fluxon'da `;` yo'q.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
@@ -65,7 +65,7 @@ pub enum Tok {
     RBracket,  // ]
     LBrace,    // {  (map ochuvchi)
     RBrace,    // }
-    Comma,     // , (Flux'da rasman yo'q, lekin xatoni aniqlash uchun ushlanadi)
+    Comma,     // , (Fluxon'da rasman yo'q, lekin xatoni aniqlash uchun ushlanadi)
     Spread,    // ... (map/list spread — round3 da qo'shilgan)
 
     // Tuzilma

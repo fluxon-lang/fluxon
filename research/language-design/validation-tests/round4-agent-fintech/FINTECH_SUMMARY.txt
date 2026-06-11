@@ -1,11 +1,11 @@
 ================================================================================
-FLUX LANGUAGE VALIDATION TEST: FINTECH BACKEND (ROUND 4 - AGENT)
+FLUXON LANGUAGE VALIDATION TEST: FINTECH BACKEND (ROUND 4 - AGENT)
 ================================================================================
 
 PROJECT COMPLETION SUMMARY
 ==========================
 
-TASK: Write a large, realistic fintech backend in Flux (a brand new AI-native
+TASK: Write a large, realistic fintech backend in Fluxon (a brand new AI-native
 language), learned ONLY from its specification, to test:
   1. Specification completeness for a correctness-critical domain
   2. Language expressiveness for production systems
@@ -19,14 +19,14 @@ COMPLEXITY: Financial systems are among the hardest software to get right:
   - Idempotency (prevent double-charging on retries)
   - Audit trails (compliance, debugging)
 
-OUTCOME: Successfully completed. 1,129 lines of Flux across 9 modules.
-Production-ready IF Flux spec guarantees hold; CRITICAL RISKS if they don't.
+OUTCOME: Successfully completed. 1,129 lines of Fluxon across 9 modules.
+Production-ready IF Fluxon spec guarantees hold; CRITICAL RISKS if they don't.
 
 ================================================================================
 FILES CREATED
 ================================================================================
 
-Location: /Users/whoami/Documents/files/draft-project/flux-lang/research/
+Location: /Users/whoami/Documents/files/draft-project/fluxon-lang/research/
           language-design/validation-tests/round4-agent-fintech/fintech/haiku/
 
 Schema & Core Logic:
@@ -52,7 +52,7 @@ Documentation:
   [~500 lines] README.md         — Architecture, API docs, design decisions
   [~400 lines] SPEC_GAPS.md      — Detailed gap analysis (13 major gaps)
 
-TOTAL: 1,129 lines of Flux code + comprehensive documentation
+TOTAL: 1,129 lines of Fluxon code + comprehensive documentation
 
 ================================================================================
 ARCHITECTURE OVERVIEW
@@ -213,7 +213,7 @@ SPEC GAPS IDENTIFIED (13 Critical/Major)
     Risk: MEDIUM (requires good UUID generation, documented)
 
 See SPEC_GAPS.md for 13-page detailed analysis, severity ratings, and
-recommendations for Flux v2.
+recommendations for Fluxon v2.
 
 ================================================================================
 CORRECTNESS ANALYSIS
@@ -234,10 +234,10 @@ CRITICAL RISK IF (worst case):
   ✗ Errors silently ignored → corrupt state undetected
 
 PRODUCTION READINESS: ~85%
-  (pending Flux spec clarifications on tx/concurrency/types/errors)
+  (pending Fluxon spec clarifications on tx/concurrency/types/errors)
 
 ================================================================================
-WHAT FLUX DOES WELL
+WHAT FLUXON DOES WELL
 ================================================================================
 
 1. ✓ Pipe operator (|>) — data flow readable and concise
@@ -252,7 +252,7 @@ WHAT FLUX DOES WELL
 10. ✓ Native database tx — no ORM friction
 
 ================================================================================
-RECOMMENDATIONS FOR FLUX v2
+RECOMMENDATIONS FOR FLUXON v2
 ================================================================================
 
 CRITICAL (for correctness-critical domains):
@@ -356,7 +356,7 @@ ESTIMATED METRICS
 ================================================================================
 
 Code Size:
-  - Flux code: 1,129 lines across 9 modules
+  - Fluxon code: 1,129 lines across 9 modules
   - Documentation: ~900 lines (README + SPEC_GAPS)
   - Total: ~2,000 lines
 
@@ -366,7 +366,7 @@ Complexity:
   - Fraud: fraud.fx (91 lines) — moderate (rule engine)
 
 Readability:
-  - Flux syntax is clean, Python-like
+  - Fluxon syntax is clean, Python-like
   - Early return (ret) reduces nesting
   - Pipe operator (|>) helps data flow
   - Comments explain domain concepts
@@ -381,23 +381,23 @@ Confidence Level:
 CONCLUSION
 ================================================================================
 
-Successfully wrote a PRODUCTION-GRADE fintech backend in Flux without prior
+Successfully wrote a PRODUCTION-GRADE fintech backend in Fluxon without prior
 knowledge of the language. The spec is MOSTLY COMPLETE for basic operations,
 but has CRITICAL GAPS for correctness-critical domains (atomicity, idempotency,
 type safety, error handling).
 
 KEY FINDINGS:
-  1. Flux is EXCELLENT for batteries-included development (http, db, ai)
+  1. Fluxon is EXCELLENT for batteries-included development (http, db, ai)
   2. Spec is CLEAR for happy paths but AMBIGUOUS for edge cases
   3. Fintech systems require UNAMBIGUOUS guarantees (atomicity, types, errors)
   4. Current spec gaps are FIXABLE with v2 clarifications
 
-OVERALL: Flux has strong potential for AI-native backend development, but
+OVERALL: Fluxon has strong potential for AI-native backend development, but
 correctness-critical domains need more spec rigor. With recommendations from
-SPEC_GAPS.md implemented, Flux would be production-ready for fintech.
+SPEC_GAPS.md implemented, Fluxon would be production-ready for fintech.
 
 Files location:
-  /Users/whoami/Documents/files/draft-project/flux-lang/research/
+  /Users/whoami/Documents/files/draft-project/fluxon-lang/research/
   language-design/validation-tests/round4-agent-fintech/fintech/haiku/
 
 Files created:

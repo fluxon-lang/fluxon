@@ -1,4 +1,4 @@
-# Flux
+# Fluxon
 
 > 🌐 **Til:** O'zbek (joriy) · [English](README.md)
 
@@ -11,7 +11,7 @@ yo'l bilan qilish mumkin, sintaksis qulay lekin token-isrofgar, va eng oddiy
 narsa ham qo'shimcha paket talab qiladi. AI agent uchun bu — shovqin: har
 "tanlov nuqtasi" potensial xato, har ortiqcha belgi sarflangan kontekst.
 
-Flux boshqacha qurilgan — AI nimani oson va ishonchli yozishini o'lchab, tilni
+Fluxon boshqacha qurilgan — AI nimani oson va ishonchli yozishini o'lchab, tilni
 shunga moslab.
 
 ```fx
@@ -42,7 +42,7 @@ Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
    tanlov yo'q, xato kam.
 
 2. **Kam token, lekin tushunarli.** Sintaksis qisqa, lekin shifrli emas.
-   Kalit so'zlar to'liq (`each`, `match`, `else`) — Flux'ni birinchi marta
+   Kalit so'zlar to'liq (`each`, `match`, `else`) — Fluxon'ni birinchi marta
    ko'rgan AI ham darhol tushunadi.
 
 3. **Batteries included.** `http`, `db` (tranzaksiya + concurrency kafolati),
@@ -61,7 +61,7 @@ Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
 
 ## Bu til qanday dizayn qilindi (metodologiya)
 
-Flux **stress-test orqali** qurildi — taxmin bilan emas, dalil bilan:
+Fluxon **stress-test orqali** qurildi — taxmin bilan emas, dalil bilan:
 
 1. **Tadqiqot:** AI qaysi kod-naqshlarni eng ishonchli va kam token bilan
    yozishini o'rgandik (deklarativ DSL'lar, canonical form, batteries —
@@ -69,7 +69,7 @@ Flux **stress-test orqali** qurildi — taxmin bilan emas, dalil bilan:
 2. **Ixtiro:** turli AI modellariga "AI uchun til ixtiro qil" topshirig'i
    berildi. Mustaqil ravishda bir nechta model bir xil g'oyalarga keldi —
    konvergensiya "to'g'ri" dizayn borligini ko'rsatdi.
-3. **Sinov:** Flux spec'i tilni **hech ko'rmagan** AI modellariga berilib
+3. **Sinov:** Fluxon spec'i tilni **hech ko'rmagan** AI modellariga berilib
    (opus, sonnet, haiku), real loyihalar yozdirildi. Har model topgan
    "spec bo'shliqlari" tilning haqiqiy kamchiligini ko'rsatdi.
 4. **Sayqal:** topilgan bo'shliqlar yopildi, qayta sinaldi. Bir necha raundda
@@ -83,11 +83,11 @@ Bu jarayon `research/` papkasida to'liq saqlangan.
 ## Repo tuzilishi
 
 ```
-flux-lang/
+fluxon-lang/
 ├── docs/
-│   ├── flux-human.md      # batafsil qo'llanma (odamlar uchun, inglizcha)
-│   ├── flux-human.uz.md   # batafsil qo'llanma (odamlar uchun, o'zbekcha)
-│   ├── flux-agent.md      # ixcham spec (AI agent uchun — ~2700 token)
+│   ├── fluxon-human.md      # batafsil qo'llanma (odamlar uchun, inglizcha)
+│   ├── fluxon-human.uz.md   # batafsil qo'llanma (odamlar uchun, o'zbekcha)
+│   ├── fluxon-agent.md      # ixcham spec (AI agent uchun — ~2700 token)
 │   └── ROADMAP.md         # haqiqiy tilga yo'l xaritasi (fazalar, ochiq ishlar)
 ├── examples/              # ishlaydigan misol loyihalar
 │   ├── support-tickets/   # AI klassifikatsiya + confidence routing
@@ -97,7 +97,7 @@ flux-lang/
     └── language-design/
         ├── round1-invented-langs/   # AI'lar til ixtiro qiladi
         ├── round2-whatsapp/         # real loyiha bilan ixtiro
-        └── validation-tests/        # Flux'ni toza AI'larda sinash
+        └── validation-tests/        # Fluxon'ni toza AI'larda sinash
 ```
 
 ---
@@ -118,10 +118,10 @@ Loyiha qayerga ketayotgani va fazalar: [`docs/ROADMAP.md`](docs/ROADMAP.md).
   (JWT + parol hash), **`ws`** (websocket), **`cron`**, **`queue`**, **`reg`**
   (tool registry).
 
-`docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar mavjud. Bitta
+`docs/fluxon-agent.md` da spetsifikatsiyalangan barcha batareyalar mavjud. Bitta
 eslatma: `db` battery hozircha faqat **SQLite** backend bilan ishlaydi — spec
 uni Postgres deb sarlavhalagan bo'lsa-da, `postgres:`/`mysql:` `DATABASE_URL`
-sxemalari hali stub (xato qaytaradi). Flux `db.*` kodi backend-neytral, shuning
+sxemalari hali stub (xato qaytaradi). Fluxon `db.*` kodi backend-neytral, shuning
 uchun bu backendlar foydalanuvchi kodini o'zgartirmasdan qo'shiladi.
 
 Ishga tushirish:
@@ -135,7 +135,7 @@ cargo run -- run examples/demo.fx
 
 ## Hissa qo'shish
 
-Flux ochiq manba — yordamingizni kutamiz.
+Fluxon ochiq manba — yordamingizni kutamiz.
 
 - **Odam contributor'lar:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, build,
   test, PR jarayoni.
@@ -151,6 +151,6 @@ MIT
 
 ---
 
-> **Eslatma.** Flux mavjud global dasturlash tillarini almashtirish yoki
+> **Eslatma.** Fluxon mavjud global dasturlash tillarini almashtirish yoki
 > ulardan o'tib ketish uchun yaratilmayapti. Maqsad bitta: **AI eng yaxshi
 > biladigan va yoqtiradigan dasturlash tili** bo'lish.

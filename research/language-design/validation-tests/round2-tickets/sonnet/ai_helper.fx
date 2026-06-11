@@ -1,4 +1,4 @@
-# ai_helper.flux — AI classification and auto-reply helpers
+# ai_helper.fluxon — AI classification and auto-reply helpers
 
 use ai
 

@@ -1,6 +1,6 @@
-# Research — Flux qanday dizayn qilindi
+# Research — Fluxon qanday dizayn qilindi
 
-Bu papka Flux tilining **dizayn jarayonini** saqlaydi. Til taxmin bilan emas,
+Bu papka Fluxon tilining **dizayn jarayonini** saqlaydi. Til taxmin bilan emas,
 AI modellarini stress-test qilish orqali qurildi.
 
 ## `language-design/`
@@ -14,10 +14,10 @@ Har biri o'z tilini ixtiro qilib, 3 ta loyiha (CLI, web API, realtime) yozdi.
 ### `round2-whatsapp/`
 Xuddi shu, lekin real, murakkab loyiha bilan: WhatsApp-native AI biznes
 yordamchisi. Til real yukda sinaldi. Opus versiyasi eng kam token + eng izchil
-chiqdi → Flux shu asosga qurildi.
+chiqdi → Fluxon shu asosga qurildi.
 
 ### `validation-tests/`
-Flux spec'i tilni **hech ko'rmagan** modellarga (opus/sonnet/haiku) berilib,
+Fluxon spec'i tilni **hech ko'rmagan** modellarga (opus/sonnet/haiku) berilib,
 real loyihalar yozdirildi. Har model topgan "spec bo'shliqlari" tilning haqiqiy
 kamchiligini ko'rsatdi, keyin yopildi.
 

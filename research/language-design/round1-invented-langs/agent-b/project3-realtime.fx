@@ -1,4 +1,4 @@
--- Flux Live Chat Server (WebSocket)
+-- Fluxon Live Chat Server (WebSocket)
 -- Clients connect, join rooms, broadcast messages, see who's online
 --
 -- Protocol (JSON messages from client):

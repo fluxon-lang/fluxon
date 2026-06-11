@@ -1,8 +1,8 @@
-# AI Agent Platform — Flux Implementation
+# AI Agent Platform — Fluxon Implementation
 
 ## Project Summary
 
-A **complete, production-scale AI agent platform backend** written entirely in Flux. The system enables users to:
+A **complete, production-scale AI agent platform backend** written entirely in Fluxon. The system enables users to:
 
 - Create AI agents with custom system prompts and models
 - Configure tools (built-in and custom webhooks) per agent
@@ -15,7 +15,7 @@ A **complete, production-scale AI agent platform backend** written entirely in F
 ## Key Stats
 
 - **9 database tables** (agents, tools, conversations, messages, tool_invocations, agent_memory, agent_usage)
-- **8 Flux source files** (~2000 lines total)
+- **8 Fluxon source files** (~2000 lines total)
 - **20+ REST endpoints** (agent CRUD, tool registration, conversation management, memory access)
 - **1 agentic loop** (manual multi-turn tool-calling orchestrator)
 - **7 built-in tools** (web_search, calculator, get_memory, set_memory, plus dispatch helpers)
@@ -207,7 +207,7 @@ See **IMPLEMENTATION.md** for detailed analysis. Key issues:
 
 4. **Mutable Persistent State**
    - Mutable bindings (`<-`) aren't persisted across restarts
-   - Agent memory uses DB, not Flux state
+   - Agent memory uses DB, not Fluxon state
 
 5. **Error Handling**
    - No try/catch, just `fail` (nuclear option)
@@ -240,10 +240,10 @@ See **IMPLEMENTATION.md** for detailed analysis. Key issues:
 Requirements:
 - PostgreSQL (`$DATABASE_URL`)
 - Anthropic API key (`$AI_KEY`)
-- Flux runtime/compiler
+- Fluxon runtime/compiler
 
 ```bash
-flux run main.fx
+fluxon run main.fx
 # Server listens on http://localhost:8080
 ```
 
@@ -278,7 +278,7 @@ DB setup:
 
 ## Conclusion
 
-This implementation **fully exercises Flux for a hard, real-world domain**: multi-turn conversational AI with dynamic tool routing, persistent state management, and complex orchestration. The language handles it **well overall**, but exposes critical gaps in:
+This implementation **fully exercises Fluxon for a hard, real-world domain**: multi-turn conversational AI with dynamic tool routing, persistent state management, and complex orchestration. The language handles it **well overall**, but exposes critical gaps in:
 
 - Reflection/dynamic dispatch
 - Agentic loop semantics  
@@ -287,7 +287,7 @@ This implementation **fully exercises Flux for a hard, real-world domain**: mult
 
 These gaps would become painful at scale (100+ tools, millions of messages). The spec is strong for **synchronous, database-driven backends**, but **weak for dynamic, agent-like systems** where dispatch and orchestration dominate.
 
-**Recommendation:** Flux is production-ready for typical CRUD backends. For agentic systems, add:
+**Recommendation:** Fluxon is production-ready for typical CRUD backends. For agentic systems, add:
 1. Function pointers / reflection API
 2. Clear tool-loop semantics in `ai.run`
 3. Persistent sessions / state stores

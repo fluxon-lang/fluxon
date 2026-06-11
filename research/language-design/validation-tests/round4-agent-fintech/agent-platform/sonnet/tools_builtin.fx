@@ -1,5 +1,5 @@
 # tools_builtin.fx — built-in tools every agent can invoke by name
-# Exported as plain Flux functions; the runtime dispatches to them by name.
+# Exported as plain Fluxon functions; the runtime dispatches to them by name.
 
 use http db
 use ./memory
@@ -61,7 +61,7 @@ exp fn builtin_set_memory input
   ret {ok:true stored:true}
 
 # ── Master dispatch table (name → fn) ─────────────────────────────────────────
-# SPEC GAP: Flux has no first-class function map / function references in a map.
+# SPEC GAP: Fluxon has no first-class function map / function references in a map.
 # We model the dispatch table as a plain data map keyed by tool name string,
 # but since map values must be literals (not fn refs), we use a helper fn
 # that switches on the name. See tools_dispatch below.

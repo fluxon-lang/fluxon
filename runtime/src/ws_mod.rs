@@ -1,7 +1,7 @@
-// Flux WS battery — WebSocket server (realtime).
+// Fluxon WS battery — WebSocket server (realtime).
 //
 // `http` so'rov-javob bo'lsa, `ws` doimiy ikki tomonlama ulanish. Server
-// tokio + tokio-tungstenite ustida quriladi. Flux handler'lari (`:connect`,
+// tokio + tokio-tungstenite ustida quriladi. Fluxon handler'lari (`:connect`,
 // `:message`, `:disconnect`) sinxron tree-walking bo'lgani uchun har biri
 // `spawn_blocking` ichida chaqiriladi — http battery bilan bir xil model
 // (Value: Send+Sync, haqiqiy parallel).
@@ -45,7 +45,7 @@ use crate::value::Value;
 const SEND_BUFFER: usize = 256;
 // Davriy ping oralig'i — o'lik (half-open TCP) ulanishlarni aniqlash uchun.
 // Ping yuborilgach keyingi tick'gacha pong kelmasa ulanish o'lik deb yopiladi
-// (ya'ni javobsiz qolish chegarasi ~PING_INTERVAL). `FLUX_WS_PING_SECS` env
+// (ya'ni javobsiz qolish chegarasi ~PING_INTERVAL). `FLUXON_WS_PING_SECS` env
 // bilan sozlanadi (ops tuning + integratsion test) — `ping_interval_dur`.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 // reader loop tugagach writer-task'ni kutish muddati. TCP yozma buferi to'lib
@@ -138,14 +138,14 @@ impl WsState {
 
 // --- conn helper ---
 
-// Rust id -> Flux conn map: {id:"c7"}. Handler shu map'ni oladi.
+// Rust id -> Fluxon conn map: {id:"c7"}. Handler shu map'ni oladi.
 fn conn_value(id: &str) -> Value {
     let mut m = BTreeMap::new();
     m.insert("id".to_string(), Value::Str(id.to_string()));
     Value::Map(m)
 }
 
-// Flux conn map'idan id'ni ajratib oladi (`ws.send`/`room.join` argumenti).
+// Fluxon conn map'idan id'ni ajratib oladi (`ws.send`/`room.join` argumenti).
 fn conn_id(v: &Value, ctx: &str) -> Result<String, Flow> {
     match v {
         Value::Map(m) => match m.get("id") {
@@ -340,11 +340,11 @@ impl Interp {
     }
 }
 
-// Ping oralig'ini aniqlaydi: standart PING_INTERVAL, `FLUX_WS_PING_SECS` env
+// Ping oralig'ini aniqlaydi: standart PING_INTERVAL, `FLUXON_WS_PING_SECS` env
 // (musbat butun son, sekund) bilan override qilinadi. Noto'g'ri/0 qiymat —
 // standart. Test va deploy sozlash uchun.
 fn ping_interval_dur() -> Duration {
-    match std::env::var("FLUX_WS_PING_SECS")
+    match std::env::var("FLUXON_WS_PING_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
     {
@@ -360,14 +360,14 @@ pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     TcpListener::bind(addr)
         .await
-        .map_err(|e| Flow::err(format!("Flux WS port {} bind xatosi: {}", port, e)))
+        .map_err(|e| Flow::err(format!("Fluxon WS port {} bind xatosi: {}", port, e)))
 }
 
 // Bitta WS server uchun accept loop — umumiy event-loop ichida spawn qilinadi.
 // Listener oldindan `bind` bilan ochilgan.
 pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener) {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
-    eprintln!("Flux WS server: ws://localhost:{}", port);
+    eprintln!("Fluxon WS server: ws://localhost:{}", port);
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -459,7 +459,7 @@ async fn handle_conn(interp: Arc<Interp>, stream: tokio::net::TcpStream) {
                                     .await;
                             }
                             Message::Binary(b) => {
-                                // Binary'ni lossy matn sifatida uzatamiz (Flux str-markazli).
+                                // Binary'ni lossy matn sifatida uzatamiz (Fluxon str-markazli).
                                 let t = String::from_utf8_lossy(&b).to_string();
                                 fire_handler(&interp, Event::Message, &id, Some(t)).await;
                             }

@@ -1,8 +1,8 @@
-# realtime.flux — WebSocket realtime layer: rooms, presence, broadcast,
+# realtime.fluxon — WebSocket realtime layer: rooms, presence, broadcast,
 # typing indicators, and the connect/message/disconnect lifecycle.
 #
 # ============================ SPEC GAP WARNING =============================
-# The Flux spec does NOT define a websocket battery. It gives http (request/
+# The Fluxon spec does NOT define a websocket battery. It gives http (request/
 # response only) and queue (queue.push / queue.on). I therefore INVENT a `ws`
 # battery whose surface mirrors the http battery's style as closely as the spec
 # allows. Every `ws.*` call below is improvised and is documented in the gaps

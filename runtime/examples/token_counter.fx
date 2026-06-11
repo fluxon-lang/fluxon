@@ -1,11 +1,11 @@
 # Token hisoblagich — docs va misollar Claude uchun qancha token sarflashini O'LCHAYDI.
 #
-# Nega: character-base taxmin (char/4) aniq emas — Flux docs'ida (o'zbekcha matn +
+# Nega: character-base taxmin (char/4) aniq emas — Fluxon docs'ida (o'zbekcha matn +
 # kod) char/token nisbati ~1.9, ya'ni char/4 taxmini qariyb 2 baravar past
 # ko'rsatadi. Aniq raqam uchun Anthropic'ning count_tokens API'si kerak (bepul,
 # faqat RPM limiti bor).
 #
-# Bu tool Flux'ning o'zida yozilgan (dogfooding): fs.read/fs.ls + http.post +
+# Bu tool Fluxon'ning o'zida yozilgan (dogfooding): fs.read/fs.ls + http.post +
 # custom header (x-api-key). HTTPS, fs va so'rov header'lari batareyalardan keladi.
 #
 # Ishga tushirish (runtime/ ichida):

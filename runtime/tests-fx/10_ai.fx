@@ -1,7 +1,7 @@
 # 10 — ai battery (LLM primitiv). TARMOQSIZ test: haqiqiy API chaqirmaymiz
 # (token sarflamaslik + CI'da kalit yo'q). Faqat shu narsalarni sinaymiz:
 #   - `ai` modul nomi o'zgaruvchi bilan SHADOW qilinsa, oddiy map sifatida o'qiladi
-#   - tool-loop'ning FLUX TOMONI (reg.call bilan tool bajarish) ishlaydi
+#   - tool-loop'ning FLUXON TOMONI (reg.call bilan tool bajarish) ishlaydi
 #
 # ai.ask/ai.json/ai.run ning haqiqiy chaqiruvi $AI_KEY talab qiladi va tarmoqqa
 # chiqadi — uni examples/ai_demo.fx qo'lda sinaydi (kalit bilan).
@@ -28,7 +28,7 @@ if ai.model == "yo'q"
 else
   bad "ai.model got=${ai.model}"
 
-# --- tool-loop FLUX tomoni: ai.run :call qadamini simulyatsiya ---
+# --- tool-loop FLUXON tomoni: ai.run :call qadamini simulyatsiya ---
 # ai.run model bilan {kind::call tool args id} qaytaradi. Loop tool'ni reg.call
 # bilan bajarib, natijani msgs'ga qo'shadi. Bu yerda model javobini QO'LDA yasab,
 # reg.call + msgs.push mantig'ini sinaymiz (tarmoqsiz).

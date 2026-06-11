@@ -6,7 +6,7 @@ use ./replies_handler
 use ./cron_jobs
 
 # Initialize database schemas (assumes tables exist or auto-created)
-# In production, run schema.flux separately
+# In production, run schema.fluxon separately
 
 # Wire up HTTP endpoints
 http.on :post "/tickets" \req -> create_ticket req

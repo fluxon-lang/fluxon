@@ -1,6 +1,6 @@
-# Polls/Survey API with AI — Flux Implementation
+# Polls/Survey API with AI — Fluxon Implementation
 
-A complete, production-grade polls API built in Flux demonstrating the language's full feature set.
+A complete, production-grade polls API built in Fluxon demonstrating the language's full feature set.
 
 ## Files
 
@@ -72,7 +72,7 @@ curl -X POST http://localhost:8080/polls \
   -d '{
     "owner": "user@example.com",
     "question": "Favorite language?",
-    "options": ["Flux", "Python", "Go", "Rust"]
+    "options": ["Fluxon", "Python", "Go", "Rust"]
   }'
 
 # Get poll
@@ -107,11 +107,11 @@ curl "http://localhost:8080/polls?status=open"
 ## Spec Validation
 
 - **Learning method:** Read spec once, code from memory
-- **Lines of Flux code:** 283 total (excludes documentation)
+- **Lines of Fluxon code:** 283 total (excludes documentation)
 - **Language features:** 28/28 core features used
 - **Battery coverage:** 9/11 stdlib modules (http, db, ai, time, log, cron, str, json, log)
 - **Gaps identified:** 12 spec ambiguities documented in SPEC_GAPS.md
 
 ## Conclusion
 
-This implementation demonstrates that the Flux spec (after recent compression) is **learnable and largely complete** for building real-world backend services. All essential features covered; minor gaps are mostly edge cases around module resolution and cron signatures.
+This implementation demonstrates that the Fluxon spec (after recent compression) is **learnable and largely complete** for building real-world backend services. All essential features covered; minor gaps are mostly edge cases around module resolution and cron signatures.

@@ -1,4 +1,4 @@
-# ai_features.flux — AI qo'shimcha funksiyalar: kanal xulasasi
+# ai_features.fluxon — AI qo'shimcha funksiyalar: kanal xulasasi
 
 use http db
 use ai as ai_svc

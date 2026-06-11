@@ -1,6 +1,6 @@
-# Polls API with AI Summary — Flux Implementation
+# Polls API with AI Summary — Fluxon Implementation
 
-Complete polls/survey API with AI-powered result summarization, written in Flux.
+Complete polls/survey API with AI-powered result summarization, written in Fluxon.
 
 ## Database Schema
 
@@ -22,7 +22,7 @@ Content-Type: application/json
 {
   "owner": "user@example.com",
   "question": "What is your favorite language?",
-  "options": ["Flux", "Python", "Go", "Rust"]
+  "options": ["Fluxon", "Python", "Go", "Rust"]
 }
 ```
 
@@ -51,7 +51,7 @@ Response (200):
   "status": "open",
   "created": "2026-06-05T10:00:00Z",
   "options": [
-    {"id": 1, "poll_id": 1, "text": "Flux", "votes": 5, "created": "..."},
+    {"id": 1, "poll_id": 1, "text": "Fluxon", "votes": 5, "created": "..."},
     {"id": 2, "poll_id": 1, "text": "Python", "votes": 3, "created": "..."},
     {"id": 3, "poll_id": 1, "text": "Go", "votes": 2, "created": "..."},
     {"id": 4, "poll_id": 1, "text": "Rust", "votes": 4, "created": "..."}
@@ -109,7 +109,7 @@ Response (200):
 {
   "poll_id": 1,
   "question": "What is your favorite language?",
-  "summary": "Flux was the clear winner with 5 votes (36%), followed by Rust with 4 votes (29%), Python with 3 votes (21%), and Go with 2 votes (14%)."
+  "summary": "Fluxon was the clear winner with 5 votes (36%), followed by Rust with 4 votes (29%), Python with 3 votes (21%), and Go with 2 votes (14%)."
 }
 ```
 
@@ -154,7 +154,7 @@ HOURLY STATS: 3 active polls, 42 total votes at 2026-06-05T11:30:00Z
 1. **Validation** — All input validated; returns 400 for missing/invalid fields
 2. **Transactions** — Vote casting uses `db.tx` to atomically insert response and increment vote count
 3. **Error Handling** — Proper HTTP status codes (404 for not found, 422 for poll closed, 400 for validation)
-4. **Symbols** — Poll status stored as DB symbol, auto-converted between text (DB) and symbol (Flux)
+4. **Symbols** — Poll status stored as DB symbol, auto-converted between text (DB) and symbol (Fluxon)
 5. **AI Integration** — `ai.ask` generates natural language summaries of poll results
 6. **Cron Jobs** — Automatic hourly statistics logging
 7. **Module Organization** — Split into schema, models, API, AI, and cron tasks

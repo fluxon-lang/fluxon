@@ -1,4 +1,4 @@
-// Flux crypto battery — kriptografik primitivlar (issue #131).
+// Fluxon crypto battery — kriptografik primitivlar (issue #131).
 //
 // Til API:
 //   crypto.sha256 s        # -> SHA-256 hex (kichik harf)

@@ -1,4 +1,4 @@
-# schema.fx — Flux tbl schemas for the AI agent platform.
+# schema.fx — Fluxon tbl schemas for the AI agent platform.
 # All persistent state lives here. JSON columns hold tool schemas,
 # tool-call lists, tool I/O, and agent memory values.
 

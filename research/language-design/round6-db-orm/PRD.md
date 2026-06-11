@@ -1,6 +1,6 @@
 # PRD — "Resly" multi-tenant booking + analytics backend
 
-Sen Flux tilida (`.fx`) backend yozasan. Sintaksis va batareyalar uchun berilgan
+Sen Fluxon tilida (`.fx`) backend yozasan. Sintaksis va batareyalar uchun berilgan
 til spetsifikatsiyasiga **qat'iy amal qil** — bu o'sha tilning yagona manbai.
 Faqat bitta `.fx` fayl yoz. Tashqi kutubxona yo'q — hammasi batareyalar ichida.
 

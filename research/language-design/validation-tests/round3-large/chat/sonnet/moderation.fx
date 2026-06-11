@@ -1,4 +1,4 @@
-# moderation.flux — AI avtomatik moderatsiya
+# moderation.fluxon — AI avtomatik moderatsiya
 # Har bir xabar yuborilganda toxicity/spam tekshiruvi o'tkaziladi.
 
 use ai as ai_mod
@@ -54,7 +54,7 @@ exp fn moderate_message body channel_id user_id
   # Hammasi yaxshi
   ret {allowed:true action::ok reason:"" confidence:confidence}
 
-# Moderatsiya jadvali (tbl ta'rifi shu yerda — schema.flux'dan alohida, chunki
+# Moderatsiya jadvali (tbl ta'rifi shu yerda — schema.fluxon'dan alohida, chunki
 # bu modul ichki logga bog'liq)
 tbl moderation_logs
   id         serial pk

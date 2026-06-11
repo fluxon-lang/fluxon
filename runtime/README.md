@@ -1,7 +1,7 @@
-# Flux Runtime
+# Fluxon Runtime
 
-Flux tilining interpretatori (Rust, tree-walking). **Til yadrosi** va
-`docs/flux-agent.md` da spetsifikatsiyalangan **barcha batareyalar** ishlaydi:
+Fluxon tilining interpretatori (Rust, tree-walking). **Til yadrosi** va
+`docs/fluxon-agent.md` da spetsifikatsiyalangan **barcha batareyalar** ishlaydi:
 `http` (server + klient), `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`.
 (`db` hozircha faqat SQLite backend; `postgres`/`mysql` stub.)
 
@@ -11,14 +11,14 @@ Flux tilining interpretatori (Rust, tree-walking). **Til yadrosi** va
 cargo build --release
 cargo run -- run examples/demo.fx
 # yoki
-./target/release/flux run examples/demo.fx
+./target/release/fluxon run examples/demo.fx
 ```
 
 ### Buyruqlar
 
-- `flux run <fayl.fx>` — faylni bajaradi (lex → parse → interp). Parse yoki
+- `fluxon run <fayl.fx>` — faylni bajaradi (lex → parse → interp). Parse yoki
   runtime xato → `exit 1`.
-- `flux check <fayl.fx>` — faqat sintaksisni tekshiradi (lex + parse, kodni
+- `fluxon check <fayl.fx>` — faqat sintaksisni tekshiradi (lex + parse, kodni
   **bajarmaydi** → side-effect yo'q). To'g'ri → `exit 0`; parse/lex xato →
   `exit 2`. Bu `run`ning `exit 1`idan farqli, shuning uchun chaqiruvchi qaysi
   bosqichda yiqilganini bila oladi (AI self-repair gate uchun qulay).
@@ -45,7 +45,7 @@ auto-migration va ustun tip konversiyasi uchun ishlatiladi.
 
 ### `http` battery (server + klient)
 
-```flux
+```fluxon
 use http
 http.on :get "/health" \req -> rep 200 {ok:true}
 http.on :get "/notes/:id" \req -> rep 200 {id:req.params.id}
@@ -76,7 +76,7 @@ global scope `http.serve` paytida lock-free snapshot'ga muzlatiladi. Misol:
 `examples/server.fx` (`curl localhost:8080/health` bilan sinaladi). Klient
 API soddaligi va pool reuse uchun `examples/http_client_pool.fx` lokal serverga
 ketma-ket `http.get` qiladi; fayl boshidagi `for ... & ... wait` komandasi shu
-Flux klientini parallel ishga tushirib ham tekshiradi.
+Fluxon klientini parallel ishga tushirib ham tekshiradi.
 
 ## Arxitektura
 
@@ -113,7 +113,7 @@ cargo test
 Hozir ~197 ta test bor: modul ichidagi Rust unit testlari (`builtins.rs`,
 `interp.rs`, `db_mod.rs` va h.k.) + `src/main.rs::mod tests` dagi integratsiya
 testlari (`.fx` kodini run qilib natijani tekshirish). Bundan tashqari
-`tests-fx/` da Flux'ning o'zida yozilgan e2e testlar (`run_all.sh`).
+`tests-fx/` da Fluxon'ning o'zida yozilgan e2e testlar (`run_all.sh`).
 
 ## Keyingi qadam
 

@@ -1,4 +1,4 @@
-# schema.flux — barcha jadval sxemalari (tbl)
+# schema.fluxon — barcha jadval sxemalari (tbl)
 # E-commerce backend uchun ma'lumotlar modeli.
 use db
 

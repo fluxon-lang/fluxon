@@ -1,4 +1,4 @@
-# tickets.flux — HTTP route handlers for the ticket system
+# tickets.fluxon — HTTP route handlers for the ticket system
 
 use http db
 use ./ai_helper

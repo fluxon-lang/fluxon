@@ -1,7 +1,7 @@
 # Job Board Platform — File Index
 
 ## Overview
-Production-grade job matching + hiring platform in Flux. 564 lines across 9 modules + schema. Demonstrates transactions, AI integration, WebSocket realtime, cron scheduling, and modular Flux architecture.
+Production-grade job matching + hiring platform in Fluxon. 564 lines across 9 modules + schema. Demonstrates transactions, AI integration, WebSocket realtime, cron scheduling, and modular Fluxon architecture.
 
 ## Files
 
@@ -105,7 +105,7 @@ Production-grade job matching + hiring platform in Flux. 564 lines across 9 modu
 ## Key Technical Features Demonstrated
 
 ### 1. Transactions (db.tx)
-```flux
+```fluxon
 result = db.tx \->
   app = db.ins "applications" {...}
   db.one "check duplicate" ...!
@@ -117,7 +117,7 @@ result = db.tx \->
 - Serializable isolation (no locks needed)
 
 ### 2. AI Integration (ai.json + confidence)
-```flux
+```fluxon
 match_result = ai.json prompt {score:flt reasons:str}
 if match_result._.conf > 0.85
   status = :shortlisted
@@ -127,7 +127,7 @@ if match_result._.conf > 0.85
 - Metadata tracking (tokens, cost, latency)
 
 ### 3. WebSocket Rooms (realtime broadcast)
-```flux
+```fluxon
 ws.room.join conn "user:5"
 ws.room.send "user:5" msg
 ```
@@ -136,26 +136,26 @@ ws.room.send "user:5" msg
 - JSON serialization automatic
 
 ### 4. Cron Scheduling (cron.dy)
-```flux
+```fluxon
 cron.dy 9 0 \day hour minute -> ...
 ```
 - Daily recurring jobs
 - Aggregation queries in cron
 
 ### 5. Symbol Enums (type-safe statuses)
-```flux
+```fluxon
 tbl jobs
   status sym
 match status
   :open -> ...
   :closed -> ...
 ```
-- Auto-convert DB string ↔ Flux symbol
+- Auto-convert DB string ↔ Fluxon symbol
 - Pattern matching on symbols
 - Filter queries with symbol params
 
 ### 6. Money Type (currency in cents)
-```flux
+```fluxon
 salary_min money
 salary_max money
 ```
@@ -163,14 +163,14 @@ salary_max money
 - Safe for financial calculations
 
 ### 7. Schema Relations (foreign keys)
-```flux
+```fluxon
 job_id int ref:jobs.id
 ```
 - Declarative references
 - ! operator validates existence on read
 
 ### 8. Modular Imports (namespace management)
-```flux
+```fluxon
 use ./matching as match_mod
 use ./realtime as rt
 match_mod.score_match job candidate
@@ -258,8 +258,8 @@ rt.create_notification user_id msg
 ## Compilation & Execution
 
 ```bash
-# Assumes Flux compiler installed
-flux build -o job-board main.fx
+# Assumes Fluxon compiler installed
+fluxon build -o job-board main.fx
 
 # Set environment
 export DATABASE_URL="postgres://..."
@@ -273,4 +273,4 @@ export AI_KEY="sk-..."
 
 ---
 
-See **README.md** for feature overview and **SPEC_GAPS.txt** for Flux specification validation.
+See **README.md** for feature overview and **SPEC_GAPS.txt** for Fluxon specification validation.

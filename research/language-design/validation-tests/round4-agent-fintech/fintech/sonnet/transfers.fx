@@ -7,13 +7,13 @@
 #   4. db.tx: debit source, credit destination, update both balance caches,
 #      record the transfer row, write audit log — all atomic.
 #
-# SPEC GAP (concurrency): Flux does NOT expose SELECT FOR UPDATE or any row
+# SPEC GAP (concurrency): Fluxon does NOT expose SELECT FOR UPDATE or any row
 # locking primitive. The balance check (sufficient funds?) and the balance
 # update both happen inside db.tx, but without an explicit row lock the
 # database may allow two concurrent transactions to read the same balance
 # before either commits. Under high concurrency this can allow overdrafts.
 # The risk is mitigated by the DB's serializable isolation (if configured),
-# but Flux gives us no way to request it explicitly.
+# but Fluxon gives us no way to request it explicitly.
 
 use db
 use ./ledger as ledger_mod

@@ -1,4 +1,4 @@
-# products.flux — mahsulot endpointlari
+# products.fluxon — mahsulot endpointlari
 # list (filter + pagination), get one, create, update stock.
 use http db
 

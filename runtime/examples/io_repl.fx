@@ -6,8 +6,8 @@
 #   io.read_line    — stdin'dan bitta satr → str (EOF → nil)
 #   io.print s      — \n SIZ chiqarish (prompt qurish uchun)
 #
-# Ishga tushirish:  flux run examples/io_repl.fx
-# Sinash (quvur):   printf 'Aziza\n5\n' | flux run examples/io_repl.fx
+# Ishga tushirish:  fluxon run examples/io_repl.fx
+# Sinash (quvur):   printf 'Aziza\n5\n' | fluxon run examples/io_repl.fx
 
 # --- Bir martalik wizard: ism + yosh so'raymiz ---
 ism = io.prompt "Isming: "

@@ -1,5 +1,5 @@
 # HTTP battery namoyishi.
-# Ishga tushirish:  flux run examples/server.fx
+# Ishga tushirish:  fluxon run examples/server.fx
 # Sinash (boshqa terminalda):
 #   curl -s localhost:8080/health
 #   curl -s -X POST localhost:8080/notes -H 'Content-Type: application/json' -d '{"title":"salom"}'

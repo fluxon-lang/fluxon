@@ -1,9 +1,9 @@
-// Flux runtime — buyruq qatori interfeysi.
+// Fluxon runtime — buyruq qatori interfeysi.
 //
 // Foydalanish:
-//   flux run <fayl.fx>     — Flux faylini bajaradi
-//   flux <fayl.fx>         — xuddi shu (qisqartma)
-//   flux check <fayl.fx>   — faqat lex+parse (bajarmaydi); parse xato -> exit 2
+//   fluxon run <fayl.fx>     — Fluxon faylini bajaradi
+//   fluxon <fayl.fx>         — xuddi shu (qisqartma)
+//   fluxon check <fayl.fx>   — faqat lex+parse (bajarmaydi); parse xato -> exit 2
 
 // mimalloc — parallel'da system malloc'dan ancha kam contention beradi.
 // Interpreter qisqa umrli scope allokatsiyalarini ko'p qiladi (tree-walking).
@@ -43,7 +43,7 @@ fn main() -> ExitCode {
     let cmd = match parse_args(&args) {
         Some(c) => c,
         None => {
-            eprintln!("Foydalanish: flux run <fayl.fx>  |  flux check <fayl.fx>");
+            eprintln!("Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>");
             return ExitCode::from(2);
         }
     };
@@ -65,7 +65,7 @@ fn main() -> ExitCode {
         Command::Run(_) => match run_source_at(&src, std::path::Path::new(&path)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("Flux xato: {}", e);
+                eprintln!("Fluxon xato: {}", e);
                 ExitCode::from(1)
             }
         },
@@ -75,7 +75,7 @@ fn main() -> ExitCode {
         Command::Check(_) => match check_source(&src) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("Flux xato: {}", e);
+                eprintln!("Fluxon xato: {}", e);
                 ExitCode::from(2)
             }
         },
@@ -196,7 +196,7 @@ fn g x -> x + 1
     }
 
     // Issue #89: int arifmetika overflow'da panic (debug) / jim wrap (release)
-    // o'rniga ikkala rejimda ham bir xil Flux xatosi qaytadi.
+    // o'rniga ikkala rejimda ham bir xil Fluxon xatosi qaytadi.
     #[test]
     fn int_overflow_xato_panic_emas() {
         // + overflow (debug'da panic berardi)
@@ -334,7 +334,7 @@ msg = "son " + (if n % 2 == 0 "juft" else "toq")
     }
 
     // rep'ning ixtiyoriy 3-argument headers map'i (issue #16). rep shunchaki
-    // {__resp:true status body headers} map qaytaradi — Flux'da kalitlarini
+    // {__resp:true status body headers} map qaytaradi — Fluxon'da kalitlarini
     // o'qib tekshiramiz (haqiqiy header yozish http_mod testlarida).
     #[test]
     fn rep_headers_argumenti() {
@@ -810,7 +810,7 @@ log "parts=${parts} joined=${parts.join "-"}"
         assert!(run_source(r#"str.repeat "a" (0 - 1)"#).is_err());
         assert!(run_source(r#"str.pad "a" 3 """#).is_err());
         // Baytlar usize'ga sig'sa ham isize::MAX (allokatsiya chegarasi) dan
-        // oshsa — panic emas, Flux xatosi (PR #151 review).
+        // oshsa — panic emas, Fluxon xatosi (PR #151 review).
         assert!(run_source(r#"str.repeat "aa" 4611686018427387904"#).is_err());
         assert!(run_source(r#"str.pad "x" 4611686018427387904 "🙂""#).is_err());
     }
@@ -906,7 +906,7 @@ back = time.fmt s "HH:mm" "America/New_York"
     #[test]
     fn keyword_as_field_name() {
         // `.` dan keyin kalit so'z field nomi bo'la oladi (time.in shu tufayli ishlaydi).
-        // Map kaliti kalit so'z bo'lsa ham `.in`/`.match` bilan o'qiladi — bu Flux
+        // Map kaliti kalit so'z bo'lsa ham `.in`/`.match` bilan o'qiladi — bu Fluxon
         // falsafasi: member pozitsiyasida kalit so'zning grammatik ma'nosi yo'q.
         run(r#"
 m = {in: 1 match: 2 each: 3}
@@ -919,15 +919,15 @@ m = {in: 1 match: 2 each: 3}
     #[test]
     fn env_member_access() {
         // env.NOM -> std::env. Yo'q bo'lsa nil -> `??` default. Bor bo'lsa qiymat.
-        // FLUX_TEST_VAR'ni o'rnatib o'qiymiz (DB_TEST_LOCK kerak emas — boshqa env).
-        unsafe { std::env::set_var("FLUX_TEST_VAR", "salom") };
+        // FLUXON_TEST_VAR'ni o'rnatib o'qiymiz (DB_TEST_LOCK kerak emas — boshqa env).
+        unsafe { std::env::set_var("FLUXON_TEST_VAR", "salom") };
         run(r#"
-v = env.FLUX_TEST_VAR
+v = env.FLUXON_TEST_VAR
 (v == "salom") | (fail "env o'qish: ${v}")
-miss = env.FLUX_NONEXISTENT_XYZ ?? "default"
+miss = env.FLUXON_NONEXISTENT_XYZ ?? "default"
 (miss == "default") | (fail "yo'q env nil -> default emas: ${miss}")
 "#);
-        unsafe { std::env::remove_var("FLUX_TEST_VAR") };
+        unsafe { std::env::remove_var("FLUXON_TEST_VAR") };
     }
 
     #[test]
@@ -1344,7 +1344,7 @@ syms = (str.split "pending,confirmed" ",").map \s -> str.sym s
         // tbl'ga yangi ustun qo'shilsa -> ADD COLUMN; eski qatorlar saqlanadi;
         // qayta-deploy idempotent (yiqilmaydi).
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_mig_addcol.db");
+        let path = setup_db("fluxon_mig_addcol.db");
 
         // Deploy 1: ikki ustunli jadval + bitta qator.
         run_source("use db\ntbl t\n  id serial pk\n  a int\ndb.ins \"t\" {a:1}\n")
@@ -1377,10 +1377,10 @@ db.ins "t" {a:2 b:"hi"}
 
     #[test]
     fn migrate_drop_column_with_backup() {
-        // tbl'dan ustun olib tashlansa -> DROP COLUMN + _flux_bak_* backup jadval
+        // tbl'dan ustun olib tashlansa -> DROP COLUMN + _fluxon_bak_* backup jadval
         // eski ma'lumot bilan qoladi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_mig_dropcol.db");
+        let path = setup_db("fluxon_mig_dropcol.db");
 
         run_source(
             "use db\ntbl t\n  id serial pk\n  a int\n  b str\ndb.ins \"t\" {a:1 b:\"keep\"}\n",
@@ -1396,7 +1396,7 @@ tbl t
   id serial pk
   a  int
 # b ustuni endi yo'q -> DROP COLUMN
-baks = db.q "select name from sqlite_master where type='table' and name like '_flux_bak_t_%'"
+baks = db.q "select name from sqlite_master where type='table' and name like '_fluxon_bak_t_%'"
 (baks.len >= 1) | (fail "backup jadval yaratilishi kerak")
 "#,
         )
@@ -1411,13 +1411,13 @@ baks = db.q "select name from sqlite_master where type='table' and name like '_f
     }
 
     #[test]
-    fn migrate_drop_table_only_flux_managed() {
+    fn migrate_drop_table_only_fluxon_managed() {
         // tbl source'dan butunlay olib tashlansa -> DROP TABLE + backup, lekin
-        // FAQAT Flux yaratgan jadval (_flux_schema'da). Flux yaratmagan jadval saqlanadi.
+        // FAQAT Fluxon yaratgan jadval (_fluxon_schema'da). Fluxon yaratmagan jadval saqlanadi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_mig_droptbl.db");
+        let path = setup_db("fluxon_mig_droptbl.db");
 
-        // Deploy 1: Flux `a` jadvalini yaratadi + qo'lda Flux-bo'lmagan `manual` jadval.
+        // Deploy 1: Fluxon `a` jadvalini yaratadi + qo'lda Fluxon-bo'lmagan `manual` jadval.
         run_source(
             r#"
 use db
@@ -1441,9 +1441,9 @@ tbl b
 gone = db.q "select name from sqlite_master where type='table' and name='a'"
 (gone.len == 0) | (fail "a jadvali DROP bo'lishi kerak")
 kept = db.q "select name from sqlite_master where type='table' and name='manual'"
-(kept.len == 1) | (fail "manual jadval saqlanishi kerak (Flux yaratmagan)")
+(kept.len == 1) | (fail "manual jadval saqlanishi kerak (Fluxon yaratmagan)")
 (db.one "select x from manual").x == 42 | (fail "manual ma'lumot saqlanishi kerak")
-baks = db.q "select name from sqlite_master where type='table' and name like '_flux_bak_a_%'"
+baks = db.q "select name from sqlite_master where type='table' and name like '_fluxon_bak_a_%'"
 (baks.len >= 1) | (fail "a uchun backup yaratilishi kerak")
 "#,
         )
@@ -1457,7 +1457,7 @@ baks = db.q "select name from sqlite_master where type='table' and name like '_f
         // Index e'loni -> CREATE INDEX; olib tashlansa -> DROP INDEX. uniq(a b) ->
         // duplicate insert xato. sqlite_autoindex_* tegilmaydi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_mig_index.db");
+        let path = setup_db("fluxon_mig_index.db");
 
         // Deploy 1: single index + multi unique.
         run_source(
@@ -1524,7 +1524,7 @@ kept = db.q "select name from sqlite_master where type='index' and name='uniq_bo
         // holatlarida DROP COLUMN "error in index ... no such column" bilan rad
         // etiladi va deploy migrate qila olmaydi. Single va kompozit index ikkalasi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_mig_dropidxcol.db");
+        let path = setup_db("fluxon_mig_dropidxcol.db");
 
         // Deploy 1: index'li `status` ustun + kompozit index(a status).
         run_source(
@@ -1568,7 +1568,7 @@ cols = db.q "select name from pragma_table_info('t') where name='status'"
         // `email str index|uniq` -> bitta UNIQUE index yaratiladi (uniq subsume
         // qiladi), duplicate insert xato beradi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_mig_pipe.db");
+        let path = setup_db("fluxon_mig_pipe.db");
 
         run_source(
             r#"
@@ -1681,7 +1681,7 @@ db.ins "posts" {owner:999 title:"yetim"}
         // declaration bilan solishtirib, farqda jadval rebuild qilinadi. Ma'lumot
         // saqlanadi, autoincrement davom etadi, FK enforce qilinadi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_fk_rebuild.db");
+        let path = setup_db("fluxon_fk_rebuild.db");
 
         // Deploy 1: posts FK'siz, ma'lumot bilan.
         run_source(
@@ -1747,10 +1747,10 @@ db.ins "posts" {owner:404 title:"yetim"}
     #[test]
     fn migrate_drop_column_and_add_fk_same_deploy() {
         // Codex revyu: bitta migration ham ustun DROP qilsa, ham mavjud ustunga
-        // ref qo'shsa — DROP COLUMN backup'i (`_flux_bak_<t>_<ts>`) bilan rebuild
+        // ref qo'shsa — DROP COLUMN backup'i (`_fluxon_bak_<t>_<ts>`) bilan rebuild
         // backup'i NOM TO'QNASHMASLIGI kerak (rebuild `_fk` suffiks ishlatadi).
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_drop_and_fk.db");
+        let path = setup_db("fluxon_drop_and_fk.db");
 
         // Deploy 1: `old` ustuni bor, ref yo'q.
         run_source(
@@ -1799,7 +1799,7 @@ cols = db.q "select count(*) c from pragma_table_info('posts')"
         // Mavjud ma'lumotda yetim qator bo'lsa, FK qo'shish rebuild'i JIM yo'qotmaydi
         // — aniq xato beradi va ROLLBACK orqali ma'lumot butun qoladi.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_fk_orphan.db");
+        let path = setup_db("fluxon_fk_orphan.db");
 
         run_source(
             r#"
@@ -1875,7 +1875,7 @@ r = db.tx \->
         // birinchi (tx'siz) ins saqlanib, tx ichidagi ins rollback bo'ladi.
         // FAYL-backed temp DB: ikki run_source orasida saqlanadi (memory DB esa
         // birinchi Interp drop bo'lganda o'chadi). Tekshiruvchi run ALOHIDA Interp.
-        let path = std::env::temp_dir().join("flux_tx_rollback_test.db");
+        let path = std::env::temp_dir().join("fluxon_tx_rollback_test.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -1928,7 +1928,7 @@ tbl t
         // Ikki ALOHIDA Interp (= ikki process) bir FAYL DB ustida: birinchi yozadi
         // (tbl bilan), ikkinchi tbl'siz o'qiydi — DB introspeksiyasi ustun json
         // ekanini tiklab map beradi (ilgari xom string qaytib row.body.x xato berardi).
-        let path = std::env::temp_dir().join("flux_json_xproc_test.db");
+        let path = std::env::temp_dir().join("fluxon_json_xproc_test.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -1975,7 +1975,7 @@ row = db.one "select * from t where k=$1" [:a]
         //
         // Scenario: birinchi process `str` (TEXT) ustun yaratadi; ikkinchi process
         // tbl YO'Q holda map yozadi — bu ilgari "json ustun emas" xatosi berardi.
-        let path = std::env::temp_dir().join("flux_schemaless_write_test.db");
+        let path = std::env::temp_dir().join("fluxon_schemaless_write_test.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -2164,7 +2164,7 @@ queue.push "tozala"
         // haqiqatan ishlagani DB orqali RACE'siz tekshiriladi (ilgari worker
         // fon thread'i tugashini kafolatlab bo'lmasdi).
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = setup_db("flux_queue_drain.db");
+        let path = setup_db("fluxon_queue_drain.db");
 
         run(r#"
 use db
@@ -2323,7 +2323,8 @@ r = sh.run "exit 7"
     fn temp_module_dir() -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("flux_mod_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fluxon_mod_test_{}_{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2570,7 +2571,7 @@ each i in inf
         );
     }
 
-    // --- `flux check` (faqat parse, issue #55) ---
+    // --- `fluxon check` (faqat parse, issue #55) ---
 
     // To'g'ri kod -> check muvaffaqiyatli (Ok).
     #[test]
@@ -2613,7 +2614,7 @@ log "${fib 10}"
     // parse_args: `check` buyrug'ini tanib, faylni Command::Check ga joylaydi.
     #[test]
     fn parse_args_check_buyrugi() {
-        let args: Vec<String> = ["flux", "check", "test.fx"]
+        let args: Vec<String> = ["fluxon", "check", "test.fx"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -2682,7 +2683,7 @@ claims = auth.verify token
     fn auth_verify_buzilgan_token_xato() {
         let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
-        // Imzo buzilgan token -> auth.verify err (Flux'da `try` o'tkazgich, xato
+        // Imzo buzilgan token -> auth.verify err (Fluxon'da `try` o'tkazgich, xato
         // run'ni to'xtatadi — shuning uchun Rust tomonda expect_err bilan
         // tekshiramiz). token'ga belgi qo'shsak imzo mos kelmaydi.
         let err = run_source(
@@ -2861,14 +2862,14 @@ s = """
     #[test]
     fn blok_satr_interpolatsiya() {
         run(r#"
-name = "flux"
+name = "fluxon"
 n = 2
 s = """
   salom ${name}!
   n+1 = ${n + 1}
   qisqa: $name
   """
-(s == "salom flux!\nn+1 = 3\nqisqa: flux") | (fail "blok satr interpolatsiya xato: ${s}")
+(s == "salom fluxon!\nn+1 = 3\nqisqa: fluxon") | (fail "blok satr interpolatsiya xato: ${s}")
 "#);
     }
 
@@ -2955,10 +2956,10 @@ s = """
         );
     }
 
-    // Issue #131: crypto battery Flux kodidan ochiq — argumentli chaqiruv
+    // Issue #131: crypto battery Fluxon kodidan ochiq — argumentli chaqiruv
     // (Call) ham, argument'siz `crypto.uuid` (Field) ham ishlaydi.
     #[test]
-    fn crypto_battery_flux_kodidan() {
+    fn crypto_battery_fluxon_kodidan() {
         run(r#"
 h = crypto.sha256 "abc"
 (h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") | (fail "sha256 buzildi: ${h}")
@@ -3043,7 +3044,7 @@ data = crypto.b64db "AP/+iA=="
     #[test]
     fn bytes_fs_integratsiya() {
         run(r#"
-yol = "/tmp/flux_bytes_it_" + (rand.str 10) + ".bin"
+yol = "/tmp/fluxon_bytes_it_" + (rand.str 10) + ".bin"
 fs.write yol (crypto.b64db "AP/+iA==")
 b = fs.readb yol
 ((bytes.len b) == 4) | (fail "fs.readb uzunlik buzildi")

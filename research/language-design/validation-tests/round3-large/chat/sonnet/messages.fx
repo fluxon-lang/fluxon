@@ -1,4 +1,4 @@
-# messages.flux — Xabar yuborish, tarix va reaksiya endpointlari
+# messages.fluxon — Xabar yuborish, tarix va reaksiya endpointlari
 
 use http db queue
 use ./schema

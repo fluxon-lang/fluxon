@@ -1,7 +1,7 @@
-# realtime.flux — WebSocket realtime server
+# realtime.fluxon — WebSocket realtime server
 #
 # SPEC GAP HUJJATI:
-# Flux spec'da WebSocket primitivlari to'liq aniqlanmagan.
+# Fluxon spec'da WebSocket primitivlari to'liq aniqlanmagan.
 # Spec faqat queue.push / queue.on ni ta'riflaydi. WS uchun quyidagilarni
 # IXTIRO QILDIM (spec'da yo'q):
 #

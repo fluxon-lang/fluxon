@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Flux .fx test to'plamini ishga tushiruvchi. Toza master ustida mavjud
+# Fluxon .fx test to'plamini ishga tushiruvchi. Toza master ustida mavjud
 # imkoniyatlarni (yadro til, kolleksiyalar+modullar, db, time+env, http) sinaydi.
 #
 # Ishga (lokal):  ./tests-fx/run_all.sh        # runtime/ papkasidan
-# Ishga (CI):     FLUX_BIN=target/release/flux ./tests-fx/run_all.sh
+# Ishga (CI):     FLUXON_BIN=target/release/fluxon ./tests-fx/run_all.sh
 #
-# FLUX_BIN — flux binary'ga yo'l (standart: ./target/release/flux). DIR esa shu
+# FLUXON_BIN — fluxon binary'ga yo'l (standart: ./target/release/fluxon). DIR esa shu
 # skript joylashgan papkadan aniqlanadi, qaysi cwd'dan chaqirilsa ham ishlaydi.
 set -u
-BIN="${FLUX_BIN:-./target/release/flux}"
+BIN="${FLUXON_BIN:-./target/release/fluxon}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pass=0; fail=0
 
@@ -35,7 +35,7 @@ echo "############ 03 db (in-memory SQLite) ############"
 run "03_db"                 env DATABASE_URL=sqlite::memory: $BIN run $DIR/03_db.fx
 
 echo "############ 03b db.tx rollback ############"
-DB="/tmp/flux_rb_$$.db"; rm -f "$DB"
+DB="/tmp/fluxon_rb_$$.db"; rm -f "$DB"
 env DATABASE_URL="sqlite:$DB" $BIN run $DIR/03b_db_rollback.fx >/dev/null 2>&1
 rb_out="$(env DATABASE_URL="sqlite:$DB" $BIN run $DIR/03b_check.fx 2>&1)"
 echo "$rb_out"
@@ -48,10 +48,10 @@ rm -f "$DB"
 echo
 
 echo "############ 04 time + env ############"
-run "04_time_env"  env FLUX_TEST_VAR=salom PORT=9090 $BIN run $DIR/04_time_env.fx
+run "04_time_env"  env FLUXON_TEST_VAR=salom PORT=9090 $BIN run $DIR/04_time_env.fx
 
 echo "############ 05 http (server + klient) ############"
-$BIN run $DIR/05_http_server.fx >/tmp/flux_srv_$$.log 2>&1 &
+$BIN run $DIR/05_http_server.fx >/tmp/fluxon_srv_$$.log 2>&1 &
 SRV=$!
 for i in $(seq 1 40); do
   curl -s -o /dev/null http://127.0.0.1:8123/health 2>/dev/null && break
@@ -60,7 +60,7 @@ done
 http_out="$($BIN run $DIR/05_http_client.fx 2>&1)"
 echo "$http_out"
 kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
-rm -f /tmp/flux_srv_$$.log
+rm -f /tmp/fluxon_srv_$$.log
 if echo "$http_out" | grep -q "HAMMASI O'TDI"; then
   echo ">>> 05_http: PASS"; pass=$((pass+1))
 else
@@ -90,7 +90,7 @@ run "09_fs"                 $BIN run $DIR/09_fs.fx
 
 echo "############ 10 ai (LLM primitiv — tarmoqsiz) ############"
 # ai.ask/json/run haqiqiy chaqiruvi $AI_KEY + tarmoq talab qiladi; bu test faqat
-# shadowing va tool-loop'ning Flux tomonini sinaydi (token sarflamaydi).
+# shadowing va tool-loop'ning Fluxon tomonini sinaydi (token sarflamaydi).
 run "10_ai"                 $BIN run $DIR/10_ai.fx
 
 echo "############ 11 sh (tashqi shell buyruqlari) ############"

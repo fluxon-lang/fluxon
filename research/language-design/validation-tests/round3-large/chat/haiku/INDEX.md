@@ -1,4 +1,4 @@
-# Flux Chat Platform - File Index
+# Fluxon Chat Platform - File Index
 
 ## Quick Start
 
@@ -8,28 +8,28 @@
 3. `ARCHITECTURE.md` — System design, data flows, performance
 
 **Then explore the code:**
-4. `schema.flux` — Start here: data model (7 tables)
-5. `main.flux` — HTTP routing and orchestration
-6. Pick a feature: `users.flux`, `channels.flux`, `messages.flux`, etc.
+4. `schema.fluxon` — Start here: data model (7 tables)
+5. `main.fluxon` — HTTP routing and orchestration
+6. Pick a feature: `users.fluxon`, `channels.fluxon`, `messages.fluxon`, etc.
 
 ---
 
 ## File Descriptions
 
-### Implementation Files (Flux Code)
+### Implementation Files (Fluxon Code)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `schema.flux` | 46 | Database schema (7 tables: users, channels, memberships, messages, reactions) |
-| `users.flux` | 42 | User CRUD, status management, presence tracking |
-| `channels.flux` | 91 | Channel CRUD, membership, roles, member listing |
-| `messages.flux` | 128 | Message persistence, reactions, paginated history, moderation integration |
-| `ai_service.flux` | 130 | Moderation (toxicity/spam), summarization, topic extraction, spam detection |
-| `realtime.flux` | 189 | WebSocket simulation: presence, typing, broadcasting, connect/disconnect |
-| `cron_jobs.flux` | 143 | Scheduled tasks: hourly stats, daily reports, spam detection, cleanup |
-| `main.flux` | 298 | HTTP server, 26 REST endpoints, auth, orchestration |
+| `schema.fluxon` | 46 | Database schema (7 tables: users, channels, memberships, messages, reactions) |
+| `users.fluxon` | 42 | User CRUD, status management, presence tracking |
+| `channels.fluxon` | 91 | Channel CRUD, membership, roles, member listing |
+| `messages.fluxon` | 128 | Message persistence, reactions, paginated history, moderation integration |
+| `ai_service.fluxon` | 130 | Moderation (toxicity/spam), summarization, topic extraction, spam detection |
+| `realtime.fluxon` | 189 | WebSocket simulation: presence, typing, broadcasting, connect/disconnect |
+| `cron_jobs.fluxon` | 143 | Scheduled tasks: hourly stats, daily reports, spam detection, cleanup |
+| `main.fluxon` | 298 | HTTP server, 26 REST endpoints, auth, orchestration |
 
-**Total Flux code: 1,067 lines**
+**Total Fluxon code: 1,067 lines**
 
 ### Documentation Files
 
@@ -82,28 +82,28 @@
 ## How to Read the Code
 
 ### Learning Path (Beginner)
-1. `schema.flux` — Understand the data model
-2. `main.flux` lines 1-50 — HTTP server setup
-3. `users.flux` — Simple CRUD example
-4. `channels.flux` — Relationships and queries
-5. `messages.flux` — Complex business logic (moderation)
+1. `schema.fluxon` — Understand the data model
+2. `main.fluxon` lines 1-50 — HTTP server setup
+3. `users.fluxon` — Simple CRUD example
+4. `channels.fluxon` — Relationships and queries
+5. `messages.fluxon` — Complex business logic (moderation)
 
 ### For System Design (Architect)
 1. `ARCHITECTURE.md` — Data flows, concurrency, deployment
-2. `main.flux` — Entry point, all endpoints
-3. `realtime.flux` — State management, broadcast pattern
-4. `cron_jobs.flux` — Background job orchestration
+2. `main.fluxon` — Entry point, all endpoints
+3. `realtime.fluxon` — State management, broadcast pattern
+4. `cron_jobs.fluxon` — Background job orchestration
 
 ### For API Integration (Client Dev)
 1. `README.md` section "REST API Endpoints"
-2. `main.flux` — All http.on handlers
+2. `main.fluxon` — All http.on handlers
 3. `SUMMARY.txt` section "KEY FEATURES"
 
 ### For Performance Tuning (DevOps)
 1. `ARCHITECTURE.md` section "Performance Characteristics"
-2. `messages.flux` — N+1 query example
-3. `realtime.flux` — In-memory state limits
-4. `cron_jobs.flux` — Resource-intensive jobs
+2. `messages.fluxon` — N+1 query example
+3. `realtime.fluxon` — In-memory state limits
+4. `cron_jobs.fluxon` — Resource-intensive jobs
 
 ---
 
@@ -168,7 +168,7 @@
 ```bash
 export DATABASE_URL="postgresql://user:pass@localhost/chat"
 export AI_KEY="sk-..."
-flux run main.flux  # Serve on http://localhost:8080
+fluxon run main.fluxon  # Serve on http://localhost:8080
 ```
 
 ### Production
@@ -191,16 +191,16 @@ flux run main.flux  # Serve on http://localhost:8080
 A: 70% ready. Core features (CRUD, AI, scheduling) are solid. Realtime/concurrency needs work.
 
 **Q: How do I add WebSocket support?**
-A: Waiting for Flux to add `http.on :ws` handler. Until then, use HTTP polling (implemented) or switch to another language for the realtime layer.
+A: Waiting for Fluxon to add `http.on :ws` handler. Until then, use HTTP polling (implemented) or switch to another language for the realtime layer.
 
 **Q: How do I handle race conditions?**
 A: Move presence/typing to Redis with atomic operations. Add database constraints and transactions.
 
 **Q: Why is the message history N+1?**
-A: See `messages.flux:get_channel_history`. Should batch: `SELECT ... WHERE user_id IN (...)`.
+A: See `messages.fluxon:get_channel_history`. Should batch: `SELECT ... WHERE user_id IN (...)`.
 
 **Q: Can I add user profiles/avatars?**
-A: Yes. Add `avatar_url` column to `users` table in `schema.flux`, then update `users.flux` to handle it.
+A: Yes. Add `avatar_url` column to `users` table in `schema.fluxon`, then update `users.fluxon` to handle it.
 
 **Q: How do I implement threading/replies?**
 A: Add `parent_message_id` column to `messages` table, then modify message queries to filter by parent/root.
@@ -212,9 +212,9 @@ A: Add full-text search index on `messages.body` (PostgreSQL feature), then expo
 
 ## Key Statistics
 
-- **Total lines of code:** 1,067 (Flux only)
+- **Total lines of code:** 1,067 (Fluxon only)
 - **Total documentation:** 1,100+ lines
-- **Files:** 8 Flux modules + 4 docs
+- **Files:** 8 Fluxon modules + 4 docs
 - **Database tables:** 7
 - **REST endpoints:** 26
 - **AI features:** 4 (moderation, summarization, topics, spam)
@@ -245,5 +245,5 @@ A: Add full-text search index on `messages.body` (PostgreSQL feature), then expo
 ---
 
 **Last Updated:** June 4, 2026
-**Project:** Realtime Chat Platform in Flux
+**Project:** Realtime Chat Platform in Fluxon
 **Status:** Complete (features + documentation)

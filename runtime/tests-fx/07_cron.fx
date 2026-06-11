@@ -1,5 +1,5 @@
 # 07 — cron battery (rejalashtirilgan fon vazifalari).
-# Ishga: ./target/release/flux run tests-fx/07_cron.fx
+# Ishga: ./target/release/fluxon run tests-fx/07_cron.fx
 #
 # cron — standart Unix 5-maydonli cron ifoda (tirnoqsiz). `cron.on` ro'yxatga
 # oladi (bloklamaydi). Bu test PARSE + REGISTRATSIYA to'g'riligini tekshiradi

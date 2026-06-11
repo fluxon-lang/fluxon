@@ -1,6 +1,6 @@
-# Fintech Backend in Flux (Haiku)
+# Fintech Backend in Fluxon (Haiku)
 
-A complete, production-grade payments and ledger backend written in Flux — a new AI-native backend language.
+A complete, production-grade payments and ledger backend written in Fluxon — a new AI-native backend language.
 
 ## Architecture
 
@@ -166,7 +166,7 @@ GET    /health                            — Server status
 - `db.ins` returns nil on constraint violation → idempotency keys can be violated
 - `str.int "abc"` returns 0 → account transfers could go to account 0
 
-See **`SPEC_GAPS.md`** for detailed analysis of Flux spec ambiguities and workarounds.
+See **`SPEC_GAPS.md`** for detailed analysis of Fluxon spec ambiguities and workarounds.
 
 ## Running the Backend
 
@@ -178,7 +178,7 @@ export DATABASE_URL=postgres://user:pass@localhost/fintech
 export AI_KEY=sk-...
 
 # Run
-flux run main.fx
+fluxon run main.fx
 
 # Server listens on :8080
 ```
@@ -285,7 +285,7 @@ curl -X POST http://localhost:8080/transfers \
 6. **Float imprecision**: Risk scores accumulate (manually capped)
 7. **Mutable state isolation unclear**: Idempotency cache might not work per-request
 
-See **`SPEC_GAPS.md`** for full analysis and recommendations for Flux v2.
+See **`SPEC_GAPS.md`** for full analysis and recommendations for Fluxon v2.
 
 ## Estimated Lines of Code
 
@@ -302,7 +302,7 @@ See **`SPEC_GAPS.md`** for full analysis and recommendations for Flux v2.
 
 ## Takeaways
 
-1. **Flux is readable and batteries-included**: No dependency management, built-in http/db/ai is excellent.
+1. **Fluxon is readable and batteries-included**: No dependency management, built-in http/db/ai is excellent.
 2. **Spec ambiguities are dangerous**: Money system needs absolute clarity on atomicity, overflow, error handling.
 3. **Idempotency is hard without `ON CONFLICT`**: Workaround via UNIQUE constraint works but is fragile.
 4. **Audit trails are critical**: Every state change logged, immutable, helps detect bugs post-facto.
@@ -310,7 +310,7 @@ See **`SPEC_GAPS.md`** for full analysis and recommendations for Flux v2.
 
 ---
 
-**Language**: Flux (AI-native)  
+**Language**: Fluxon (AI-native)  
 **Domain**: Fintech (payments, ledger, double-entry accounting)  
 **Complexity**: HIGH (atomicity, concurrency, invariants, idempotency)  
-**Production Readiness**: ~85% (pending Flux spec clarifications on tx/types/errors)
+**Production Readiness**: ~85% (pending Fluxon spec clarifications on tx/types/errors)

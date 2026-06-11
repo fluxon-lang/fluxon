@@ -1,4 +1,4 @@
-# main.flux — Asosiy kirish nuqtasi
+# main.fluxon — Asosiy kirish nuqtasi
 # HTTP va WebSocket serverlarini ishga tushiradi, barcha modullarni ulaydi.
 
 use http
@@ -14,7 +14,7 @@ use ./cron_jobs
 http_port = str.int (env.HTTP_PORT ?? "8080")
 ws_port   = str.int (env.WS_PORT ?? "8081")
 
-log "=== Flux Chat Platform ishga tushmoqda ==="
+log "=== Fluxon Chat Platform ishga tushmoqda ==="
 log "HTTP port: ${http_port}"
 log "WS port:   ${ws_port}"
 log "DATABASE_URL: ${env.DATABASE_URL ?? '(belgilanmagan)'}"
@@ -42,7 +42,7 @@ http.on :get "/health" \req ->
 # API versiyasi
 http.on :get "/" \req ->
   rep 200 {
-    service: "Flux Chat Platform"
+    service: "Fluxon Chat Platform"
     version: "1.0.0"
     endpoints: {
       users:    "/users"

@@ -1,4 +1,4 @@
-# cron.flux — scheduled jobs. Hourly report of active channels & message volume.
+# cron.fluxon — scheduled jobs. Hourly report of active channels & message volume.
 use db cron
 
 # Compute and log activity for the last hour: per-channel message counts plus a

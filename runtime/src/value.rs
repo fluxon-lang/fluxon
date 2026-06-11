@@ -1,9 +1,9 @@
-// Flux runtime qiymatlari.
+// Fluxon runtime qiymatlari.
 //
 // List va Map ulashilgan/o'zgaruvchan bo'lishi mumkin (spec: `m.set`, `l.push`
 // yangi qiymat qaytaradi, lekin shared state map'lar `<-` bilan boshqariladi).
 // Soddalik uchun list/map'ni Rc<RefCell<...>> bilan emas, oddiy klonlanadigan
-// qiymat sifatida saqlaymiz — Flux semantikasi asosan "yangi qiymat qaytarish"
+// qiymat sifatida saqlaymiz — Fluxon semantikasi asosan "yangi qiymat qaytarish"
 // (persistent) uslubida, mutatsiya esa binding qayta tayinlash orqali.
 
 use std::collections::BTreeMap;
@@ -70,13 +70,13 @@ fn write_map(f: &mut fmt::Formatter<'_>, m: &BTreeMap<String, Value>) -> fmt::Re
     write!(f, "}}")
 }
 
-// Ikki map'ni Flux `==` semantikasi bilan taqqoslaydi (Map va Ctx uchun umumiy).
+// Ikki map'ni Fluxon `==` semantikasi bilan taqqoslaydi (Map va Ctx uchun umumiy).
 fn maps_equal(a: &BTreeMap<String, Value>, b: &BTreeMap<String, Value>) -> bool {
     a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w)))
 }
 
 impl Value {
-    // Flux truthiness: faqat nil va false yolg'on; qolgan hammasi rost.
+    // Fluxon truthiness: faqat nil va false yolg'on; qolgan hammasi rost.
     pub fn truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }
@@ -98,7 +98,7 @@ impl Value {
         }
     }
 
-    // Tenglik — Flux `==` semantikasi.
+    // Tenglik — Fluxon `==` semantikasi.
     pub fn equals(&self, other: &Value) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,

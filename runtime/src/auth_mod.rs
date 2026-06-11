@@ -1,4 +1,4 @@
-// Flux auth battery — autentifikatsiya primitivlari (JWT + parol hash).
+// Fluxon auth battery — autentifikatsiya primitivlari (JWT + parol hash).
 //
 // Til API (issue #69):
 //   token  = auth.jwt {sub:user.id tenant:t.id role:"admin"}   # -> imzolangan JWT (str)

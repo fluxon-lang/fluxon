@@ -1,5 +1,5 @@
 # 04 — time + env battery.
-# Ishga: FLUX_TEST_VAR=salom PORT=9090 ./target/release/flux run tests-fx/04_time_env.fx
+# Ishga: FLUXON_TEST_VAR=salom PORT=9090 ./target/release/fluxon run tests-fx/04_time_env.fx
 
 fails <- 0
 fn ok label -> log "ok  ${label}"
@@ -8,7 +8,7 @@ fn bad label
   fails <- fails + 1
 
 # --- time.now: UTC matn timestamp (DB-mos "YYYY-MM-DD HH:MM:SS", 19 belgi) ---
-# ESLATMA: time.* STRING qaytaradi; Flux'da `<` string'ga ishlamaydi, shuning
+# ESLATMA: time.* STRING qaytaradi; Fluxon'da `<` string'ga ishlamaydi, shuning
 # uchun tartibni son sifatida — yilni str.slice + str.int bilan — solishtiramiz.
 t = time.now
 if (str.len t) == 19
@@ -86,11 +86,11 @@ else
   bad "time.diff got=${mins}"
 
 # --- env.NOM: muhit o'zgaruvchisi ---
-v = env.FLUX_TEST_VAR
+v = env.FLUXON_TEST_VAR
 if v == "salom"
-  ok "env.FLUX_TEST_VAR = ${v}"
+  ok "env.FLUXON_TEST_VAR = ${v}"
 else
-  bad "env.FLUX_TEST_VAR got=${v}"
+  bad "env.FLUXON_TEST_VAR got=${v}"
 
 # yo'q o'zgaruvchi → nil, ?? default ishlaydi
 port = env.PORT ?? "8080"

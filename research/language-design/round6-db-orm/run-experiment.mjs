@@ -47,8 +47,8 @@ const GEN_SCHEMA = {
 phase('Generate')
 const generations = await parallel(variantNames.map((name) => () =>
   agent(
-    `You are writing a backend in the Flux language (.fx). Below is the COMPLETE Flux language spec — it is the single source of truth for syntax and batteries. Follow it exactly; do not invent syntax.\n\n` +
-    `===== FLUX SPEC (variant: ${name}) =====\n${specs[name]}\n===== END SPEC =====\n\n` +
+    `You are writing a backend in the Fluxon language (.fx). Below is the COMPLETE Fluxon language spec — it is the single source of truth for syntax and batteries. Follow it exactly; do not invent syntax.\n\n` +
+    `===== FLUXON SPEC (variant: ${name}) =====\n${specs[name]}\n===== END SPEC =====\n\n` +
     `Now implement this product. Output the full .fx file.\n\n` +
     `===== PRD =====\n${prd}\n===== END PRD =====\n\n` +
     `Write the backend. In your self_report, be honest about which parts of the PRD were awkward to express with THIS spec's db syntax, and whether you had to drop to raw db.q SQL.`,
@@ -81,22 +81,22 @@ const JUDGE_SCHEMA = {
     },
     winner: { type: 'string' },
     reasoning: { type: 'string' },
-    recommendation: { type: 'string', description: 'Concrete proposal for what to actually implement in Flux db.* — may be a hybrid taking the best parts of several variants' },
+    recommendation: { type: 'string', description: 'Concrete proposal for what to actually implement in Fluxon db.* — may be a hybrid taking the best parts of several variants' },
   },
 }
 
 const bundle = ok.map((g) =>
   `### VARIANT ${g.name}\n` +
   `self_report: ${JSON.stringify(g.self_report)}\n\n` +
-  `\`\`\`flux\n${g.fx_code}\n\`\`\``
+  `\`\`\`fluxon\n${g.fx_code}\n\`\`\``
 ).join('\n\n---\n\n')
 
 const judge = await agent(
-  `You are evaluating ${ok.length} candidate DB-query designs for the Flux language. Each was given the SAME PRD (a multi-tenant booking + analytics backend) and a Flux spec differing ONLY in how reads/aggregation are written. A haiku agent wrote each backend in ONE pass.\n\n` +
+  `You are evaluating ${ok.length} candidate DB-query designs for the Fluxon language. Each was given the SAME PRD (a multi-tenant booking + analytics backend) and a Fluxon spec differing ONLY in how reads/aggregation are written. A haiku agent wrote each backend in ONE pass.\n\n` +
   `The goal: pick the db-query design that an AI agent writes most correctly and with fewest tokens in one read. The hardest signals are: did it get IN-filters right, time-range, GROUP-BY analytics, ordering+paging, and the race-safe booking transaction — WITHOUT dropping to raw SQL.\n\n` +
   `Here is the PRD:\n${prd}\n\n` +
   `Here are the ${ok.length} outputs:\n\n${bundle}\n\n` +
-  `Score each variant, pick a winner, and give a concrete recommendation for what to implement in Flux's db.* (a hybrid is allowed). Be specific about which syntax choices helped or hurt the agent.`,
+  `Score each variant, pick a winner, and give a concrete recommendation for what to implement in Fluxon's db.* (a hybrid is allowed). Be specific about which syntax choices helped or hurt the agent.`,
   { label: 'judge', phase: 'Judge', schema: JUDGE_SCHEMA },
 )
 

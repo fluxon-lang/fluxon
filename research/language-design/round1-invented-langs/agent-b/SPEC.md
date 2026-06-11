@@ -1,6 +1,6 @@
-# Flux Language Specification
+# Fluxon Language Specification
 
-**Flux** — a terse, readable language where structure IS meaning.
+**Fluxon** — a terse, readable language where structure IS meaning.
 Extension: `.fx` | Philosophy: *Minimum syntax, maximum intent.*
 
 ---

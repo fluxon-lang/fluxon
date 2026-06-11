@@ -1,4 +1,4 @@
-# cart.flux — savatcha endpointlari
+# cart.fluxon — savatcha endpointlari
 # add item, view cart (hisoblangan jami), remove item, update qty.
 use http db
 

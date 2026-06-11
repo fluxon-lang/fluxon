@@ -1,4 +1,4 @@
-# reviews.flux — sharhlar
+# reviews.fluxon — sharhlar
 # POST sharh (reyting 1-5 tekshiriladi), mahsulot sharhlari ro'yxati + o'rtacha.
 use http db
 
