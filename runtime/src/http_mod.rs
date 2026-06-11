@@ -1267,13 +1267,19 @@ async fn handle_request(
         _ => None,
     };
 
-    // OPTIONS preflight — CORS yoqilgan bo'lsa route izlamasdan to'g'ridan-to'g'ri
+    // CORS preflight — CORS yoqilgan bo'lsa route izlamasdan to'g'ridan-to'g'ri
     // javob beramiz (brauzer haqiqiy so'rovdan oldin OPTIONS yuboradi). Bu route
     // topilmasligi (404) muammosini ham hal qiladi: preflight uchun handler shart
-    // emas. CORS o'chiq bo'lsa OPTIONS oddiy marshrutga tushadi (eski xulq).
-    if method == "options"
-        && let Some(cfg) = &cors
-    {
+    // emas.
+    //
+    // HAR OPTIONS emas — faqat HAQIQIY preflight'ni ushlaymiz: Fetch standartiga
+    // ko'ra brauzer preflight'i HAR DOIM Access-Control-Request-Method header
+    // yuboradi. Bu shart bo'lmasa (oddiy OPTIONS — resurs imkoniyatini so'rash
+    // yoki foydalanuvchining `http.on :options "/..."` handler'i), so'rov
+    // odatdagidek marshrutga tushadi (codex P2). CORS o'chiq bo'lsa ham OPTIONS
+    // oddiy marshrutga tushadi.
+    let is_preflight = method == "options" && headers.contains_key("access_control_request_method");
+    if is_preflight && let Some(cfg) = &cors {
         return Ok(cors_preflight_response(cfg, req_origin.as_deref()));
     }
 

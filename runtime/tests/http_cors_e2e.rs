@@ -55,6 +55,18 @@ impl Drop for Killer {
 // Raw HTTP/1.1 so'rov, ixtiyoriy Origin header bilan. To'liq javob matnini
 // qaytaradi (status + header + body) — test header'larni undan qidiradi.
 async fn http_request(port: u16, method: &str, path: &str, origin: Option<&str>) -> String {
+    http_request_full(port, method, path, origin, false).await
+}
+
+// `preflight: true` bo'lsa Access-Control-Request-Method header qo'shadi —
+// brauzer CORS preflight'i shu bilan belgilanadi (Fetch standarti).
+async fn http_request_full(
+    port: u16,
+    method: &str,
+    path: &str,
+    origin: Option<&str>,
+    preflight: bool,
+) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
@@ -63,9 +75,14 @@ async fn http_request(port: u16, method: &str, path: &str, origin: Option<&str>)
         Some(o) => format!("Origin: {}\r\n", o),
         None => String::new(),
     };
+    let preflight_line = if preflight {
+        "Access-Control-Request-Method: GET\r\n"
+    } else {
+        ""
+    };
     let req = format!(
-        "{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n",
-        method, path, origin_line
+        "{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\n{}{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+        method, path, origin_line, preflight_line
     );
     stream.write_all(req.as_bytes()).await.expect("http yozish");
     let mut resp = Vec::new();
@@ -73,12 +90,16 @@ async fn http_request(port: u16, method: &str, path: &str, origin: Option<&str>)
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// Wildcard CORS (dev) — hammaga ochiq.
+// Wildcard CORS (dev) — hammaga ochiq. Oddiy OPTIONS handler'i ham bor:
+// CORS yoqilgan bo'lsa ham preflight EMAS so'rov shu handler'ga tushishi kerak.
 const STAR_SCRIPT: &str = r#"
 http.cors "*"
 
 http.on :get "/data" \req ->
   rep 200 {items: [1 2 3]}
+
+http.on :options "/data" \req ->
+  rep 200 {custom_options: true}
 
 http.serve PORT
 "#;
@@ -112,8 +133,16 @@ async fn cors_preflight_options_avtomatik_javob() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // OPTIONS /data — route handler yo'q, lekin CORS preflight 204 + Allow-* qaytaradi.
-    let resp = http_request(port, "OPTIONS", "/data", Some("https://app.example.com")).await;
+    // OPTIONS /data + Access-Control-Request-Method (haqiqiy preflight) — route
+    // handler yo'q, lekin CORS preflight 204 + Allow-* qaytaradi.
+    let resp = http_request_full(
+        port,
+        "OPTIONS",
+        "/data",
+        Some("https://app.example.com"),
+        true,
+    )
+    .await;
     let low = resp.to_lowercase();
     assert!(
         resp.contains("204"),
@@ -133,6 +162,29 @@ async fn cors_preflight_options_avtomatik_javob() {
     assert!(
         low.contains("access-control-max-age:"),
         "preflight Max-Age kutilgan: {}",
+        resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn cors_oddiy_options_handlerga_tushadi() {
+    // CORS yoqilgan, lekin preflight EMAS OPTIONS (Access-Control-Request-Method
+    // yo'q) — foydalanuvchining `http.on :options "/data"` handler'iga tushishi
+    // kerak, bo'sh 204 EMAS (codex P2).
+    let port = 8436;
+    let script = STAR_SCRIPT.replace("PORT", &port.to_string());
+    let (child, path) = spawn_server(port, &script);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    // Origin bor, lekin Access-Control-Request-Method YO'Q — bu preflight emas.
+    let resp = http_request(port, "OPTIONS", "/data", Some("https://app.example.com")).await;
+    assert!(resp.contains("200"), "handler 200 kutilgan: {}", resp);
+    assert!(
+        resp.contains("custom_options"),
+        "oddiy OPTIONS foydalanuvchi handler'iga tushishi kerak: {}",
         resp
     );
 
