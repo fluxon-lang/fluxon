@@ -147,6 +147,12 @@ http.serve 8080
 - Body size limit (DoS guard): `http.serve 8080 {max_body: BYTES}`. Default 10 MiB;
   over the limit → `413 Payload Too Large` (body not buffered). `max_body: 0`
   disables the limit (unlimited — only behind a trusted internal network).
+- File upload (`multipart/form-data`): files → `req.files` (list of
+  `{name filename content size}`), plain form fields → `req.body` (map, symmetric
+  with JSON). `content` is str for UTF-8 text, bytes for binary; `size` is BYTE
+  count. `req.files` is always a list (empty when not multipart). `max_body`
+  applies to multipart too.
+  `f = req.files.0` → `fs.write f.filename f.content` saves an upload.
 ```flux
 http.before "/api/*" \req ->
   if !req.headers.authorization

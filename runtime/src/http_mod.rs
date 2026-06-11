@@ -350,9 +350,183 @@ fn parse_query(q: &str) -> Value {
     Value::Map(m)
 }
 
+// --- multipart/form-data (issue #133) ---
+
+// Content-Type'dan multipart boundary'ni ajratadi. multipart/form-data
+// bo'lmasa yoki boundary topilmasa None — chaqiruvchi oddiy body yo'liga
+// qaytadi. Boundary qo'shtirnoqli bo'lishi mumkin (RFC 2046 ruxsat beradi).
+fn multipart_boundary(ct: &str) -> Option<String> {
+    let lower = ct.to_ascii_lowercase();
+    if !lower.contains("multipart/form-data") {
+        return None;
+    }
+    let i = lower.find("boundary=")?;
+    let rest = &ct[i + "boundary=".len()..];
+    let val = if let Some(r) = rest.strip_prefix('"') {
+        r.split('"').next().unwrap_or("")
+    } else {
+        rest.split(';').next().unwrap_or("").trim()
+    };
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
+// Baytlar ichidan pastki ketma-ketlikni qidiradi (memmem). Multipart tana
+// ikkilik bo'lishi mumkin — str metodlari yaroqsiz, shuning uchun bayt darajasida.
+fn find_sub(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || hay.len() < from + needle.len() {
+        return None;
+    }
+    hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|i| i + from)
+}
+
+// Content-Disposition qatoridan parametr qiymatini oladi (`name="x"`,
+// `filename="a.png"`). `name` qidirilganda `filename=` ichidagi "name=" ga
+// adashib tushmaslik uchun mos kelgan joydan OLDINGI belgi ajratuvchi
+// (`;`/bo'shliq) ekani tekshiriladi. Qiymat qo'shtirnoqsiz ham bo'lishi mumkin
+// (eski klientlar) — u holda `;` gacha o'qiladi.
+fn cd_param(line: &str, key: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let pat = format!("{}=", key);
+    let mut search = 0;
+    while let Some(i) = lower[search..].find(&pat).map(|i| i + search) {
+        let at_boundary = i == 0 || matches!(lower.as_bytes()[i - 1], b';' | b' ' | b'\t');
+        if at_boundary {
+            let rest = &line[i + pat.len()..];
+            return Some(if let Some(r) = rest.strip_prefix('"') {
+                match r.find('"') {
+                    Some(e) => r[..e].to_string(),
+                    None => r.to_string(), // yopilmagan qo'shtirnoq — oxirigacha
+                }
+            } else {
+                let e = rest.find(';').unwrap_or(rest.len());
+                rest[..e].trim().to_string()
+            });
+        }
+        search = i + pat.len();
+    }
+    None
+}
+
+// Boundary qatori shu yerda haqiqatan tugayaptimi? RFC 2046: `--boundary` dan
+// keyin yo yopuvchi `--`, yo ixtiyoriy transport padding (bo'shliq/tab) + CRLF
+// keladi. Tekshiruvsiz fayl mazmunidagi tasodifiy `\r\n--abcXYZ` (boundary
+// `abc` ning prefiksi) chegara deb olinib qism noto'g'ri kesilardi (codex P2
+// revyu) — bunday holatda bu valid mazmun, chegara emas.
+fn boundary_line_ends(rest: &[u8]) -> bool {
+    if rest.starts_with(b"--") {
+        return true;
+    }
+    let mut i = 0;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    rest[i..].starts_with(b"\r\n")
+}
+
+// To'liq boundary qatorini qidiradi: `marker` dan keyingi baytlar ham chegara
+// qatorini tasdiqlashi shart (boundary_line_ends). Mos kelmagan prefiks
+// uchrashlar (fayl mazmunidagi `--boundaryX...`) o'tkazib yuboriladi.
+fn find_boundary(body: &[u8], marker: &[u8], from: usize) -> Option<usize> {
+    let mut search = from;
+    loop {
+        let i = find_sub(body, marker, search)?;
+        if boundary_line_ends(&body[i + marker.len()..]) {
+            return Some(i);
+        }
+        search = i + 1;
+    }
+}
+
+// multipart/form-data tanani qismlarga ajratadi: oddiy form maydonlari ->
+// fields map (req.body — JSON bilan simmetrik), fayl qismlari (filename bor) ->
+// files ro'yxati ({name filename content size}). Tana formatga mos kelmasa
+// (boundary topilmadi, buzuq struktura) None — chaqiruvchi xom body'ga qaytadi,
+// shunda buzuq so'rov ma'lumotni yo'qotmaydi.
+//
+// Fayl mazmuni req.body bilan bir xil qoidaga amal qiladi: UTF-8 matn -> str,
+// ikkilik -> bytes (issue #132) — AI bitta naqshni o'rganadi. `size` doim BAYT
+// soni (str.len belgi sanaydi — fayl o'lchami uchun noto'g'ri bo'lardi).
+#[allow(clippy::type_complexity)]
+fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Value>, Vec<Value>)> {
+    let delim = format!("--{}", boundary).into_bytes();
+    // Qism oxiri belgisi: CRLF + boundary (CRLF qism mazmuniga kirmaydi).
+    let mut end_marker = b"\r\n".to_vec();
+    end_marker.extend_from_slice(&delim);
+
+    let mut fields = BTreeMap::new();
+    let mut files = Vec::new();
+
+    // Birinchi boundary (RFC 2046 undan oldin preamble'ga ruxsat beradi).
+    // Tana to'g'ridan-to'g'ri `--boundary` bilan boshlansa CRLF prefiksi yo'q —
+    // alohida tekshiramiz; aks holda qator boshidagi (CRLF'dan keyingi)
+    // to'liq chegarani qidiramiz.
+    let mut pos = if body.starts_with(&delim) && boundary_line_ends(&body[delim.len()..]) {
+        delim.len()
+    } else {
+        find_boundary(body, &end_marker, 0)? + end_marker.len()
+    };
+    loop {
+        // Boundary'dan keyin `--` — yakuniy chegara, tugadik.
+        if body[pos..].starts_with(b"--") {
+            break;
+        }
+        // Boundary qatori CRLF bilan tugaydi (orada transport padding mumkin).
+        let nl = find_sub(body, b"\r\n", pos)?;
+        let part_start = nl + 2;
+        let part_end = find_boundary(body, &end_marker, part_start)?;
+        let part = &body[part_start..part_end];
+
+        // Qism: header'lar + bo'sh qator + mazmun. Header'lar matn (ASCII) —
+        // lossy o'qish xavfsiz; mazmun esa xom baytlar bo'lib qoladi.
+        if let Some(hdr_end) = find_sub(part, b"\r\n\r\n", 0) {
+            let headers_raw = String::from_utf8_lossy(&part[..hdr_end]);
+            let content = &part[hdr_end + 4..];
+            let cd_line = headers_raw
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-disposition:"));
+            if let Some(cd) = cd_line
+                && let Some(name) = cd_param(cd, "name")
+            {
+                let content_value = match std::str::from_utf8(content) {
+                    Ok(s) => Value::Str(s.to_string()),
+                    Err(_) => Value::Bytes(Arc::new(content.to_vec())),
+                };
+                match cd_param(cd, "filename") {
+                    // filename bor — fayl qismi (bo'sh filename ham fayl:
+                    // brauzer bo'sh file input'ni shunday yuboradi).
+                    Some(filename) => {
+                        let mut fm = BTreeMap::new();
+                        fm.insert("name".to_string(), Value::Str(name));
+                        fm.insert("filename".to_string(), Value::Str(filename));
+                        fm.insert("content".to_string(), content_value);
+                        fm.insert("size".to_string(), Value::Int(content.len() as i64));
+                        files.push(Value::Map(fm));
+                    }
+                    // Oddiy form maydoni — req.body'ga (matn deb qaraladi).
+                    None => {
+                        fields.insert(
+                            name,
+                            Value::Str(String::from_utf8_lossy(content).into_owned()),
+                        );
+                    }
+                }
+            }
+        }
+        pos = part_end + end_marker.len();
+    }
+    Some((fields, files))
+}
+
 // --- request -> Value::Map ---
 
-// req = {method, path, query:{}, headers:{}, params:{}, body:(JSON map/str), ctx}
+// req = {method, path, query:{}, headers:{}, params:{}, body:(JSON map/str), files:[], ctx}
 // ctx — shared request-scoped store (issue #68): middleware `req.ctx <- {...}`
 // yozadi, handler `req.ctx` o'qiydi. ctx'ni caller (`handle_request`) qo'shadi
 // (`with_ctx`), chunki u har so'rovga yangi Arc<Mutex> yaratadi — middleware va
@@ -370,8 +544,19 @@ fn build_req(
     ip: String,
     body_bytes: Bytes,
     is_json: bool,
+    multipart: Option<String>,
 ) -> Value {
-    let body = if body_bytes.is_empty() {
+    // multipart/form-data (issue #133): oddiy maydonlar req.body'ga (JSON bilan
+    // simmetrik), fayllar req.files'ga. Parse muvaffaqiyatsiz bo'lsa (buzuq
+    // tana) quyidagi oddiy yo'lga tushamiz — xom body yo'qolmaydi.
+    let parsed_multipart = multipart
+        .as_deref()
+        .and_then(|b| parse_multipart(&body_bytes, b));
+    let mut files = Vec::new();
+    let body = if let Some((fields, fs)) = parsed_multipart {
+        files = fs;
+        Value::Map(fields)
+    } else if body_bytes.is_empty() {
         Value::Nil
     } else {
         match std::str::from_utf8(&body_bytes) {
@@ -407,6 +592,9 @@ fn build_req(
     // bu proksi IP'si bo'ladi (X-Forwarded-For v1'da boshqarilmaydi — docs).
     m.insert("ip".to_string(), Value::Str(ip));
     m.insert("body".to_string(), body);
+    // req.files doim list (multipart bo'lmasa bo'sh) — `each f in req.files`
+    // nil tekshiruvisiz ishlaydi (issue #133).
+    m.insert("files".to_string(), Value::List(files));
     Value::Map(m)
 }
 
@@ -917,6 +1105,12 @@ async fn handle_request(
         headers.get("content_type"),
         Some(Value::Str(ct)) if ct.contains("application/json")
     );
+    // multipart/form-data boundary (issue #133) — bo'lsa tana qismlarga
+    // ajratiladi (req.body maydonlar, req.files fayllar).
+    let multipart = match headers.get("content_type") {
+        Some(Value::Str(ct)) => multipart_boundary(ct),
+        _ => None,
+    };
 
     // Marshrutni topamiz (handler'ni baytlardan oldin, 404 ni tez qaytarish uchun).
     let matched = {
@@ -999,7 +1193,7 @@ async fn handle_request(
     let ctx = Arc::new(Mutex::new(BTreeMap::new()));
     let request_value = with_ctx(
         build_req(
-            method, path, query, headers, params, client_ip, body_bytes, is_json,
+            method, path, query, headers, params, client_ip, body_bytes, is_json, multipart,
         ),
         ctx,
     );
@@ -1468,6 +1662,7 @@ mod tests {
             "1.1.1.1".into(),
             Bytes::from(vec![0xff, 0xfe, 0x00]),
             false,
+            None,
         );
         let Value::Map(m) = req else {
             panic!("req map bo'lishi kerak");
@@ -1490,6 +1685,7 @@ mod tests {
             "1.1.1.1".into(),
             Bytes::from("salom"),
             false,
+            None,
         );
         let Value::Map(m) = req else {
             panic!("req map bo'lishi kerak");
@@ -1497,6 +1693,237 @@ mod tests {
         match m.get("body") {
             Some(Value::Str(s)) => assert_eq!(s, "salom"),
             _ => panic!("matn tana str bo'lishi kerak"),
+        }
+    }
+
+    // --- multipart/form-data (issue #133) ---
+
+    // Brauzer/curl yuboradigan tipik multipart tana yasaydi.
+    fn multipart_body(boundary: &str, parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, filename, content) in parts {
+            out.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            match filename {
+                Some(f) => out.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                        name, f
+                    )
+                    .as_bytes(),
+                ),
+                None => out.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{}\"\r\n", name).as_bytes(),
+                ),
+            }
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(content);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+        out
+    }
+
+    #[test]
+    fn multipart_boundary_oddiy_va_qoshtirnoqli() {
+        // Oddiy va qo'shtirnoqli boundary'lar ham parse bo'ladi; boshqa
+        // content-type (JSON) None qaytaradi.
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=----WebKit123"),
+            Some("----WebKit123".to_string())
+        );
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=\"abc def\""),
+            Some("abc def".to_string())
+        );
+        assert_eq!(multipart_boundary("application/json"), None);
+        assert_eq!(multipart_boundary("multipart/form-data"), None);
+    }
+
+    #[test]
+    fn cd_param_filename_ichidagi_name_adashtirmaydi() {
+        // "filename=" qidiruvda "name=" ga mos kelmasin — ajratuvchi tekshiriladi.
+        let line = "Content-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"";
+        assert_eq!(cd_param(line, "name").as_deref(), Some("avatar"));
+        assert_eq!(cd_param(line, "filename").as_deref(), Some("a.png"));
+        // filename yo'q qism — oddiy maydon.
+        let field = "Content-Disposition: form-data; name=\"title\"";
+        assert_eq!(cd_param(field, "name").as_deref(), Some("title"));
+        assert_eq!(cd_param(field, "filename"), None);
+    }
+
+    #[test]
+    fn parse_multipart_maydon_va_fayl() {
+        // Oddiy maydon req.body'ga, fayl (filename bor) files ro'yxatiga tushadi.
+        let body = multipart_body(
+            "BB",
+            &[
+                ("title", None, b"salom dunyo"),
+                ("doc", Some("a.txt"), b"matn fayl"),
+            ],
+        );
+        let (fields, files) = parse_multipart(&body, "BB").expect("parse bo'lishi kerak");
+        match fields.get("title") {
+            Some(Value::Str(s)) => assert_eq!(s, "salom dunyo"),
+            _ => panic!("title str bo'lishi kerak"),
+        }
+        assert_eq!(files.len(), 1);
+        let Value::Map(f) = &files[0] else {
+            panic!("fayl map bo'lishi kerak");
+        };
+        assert!(matches!(f.get("name"), Some(Value::Str(s)) if s == "doc"));
+        assert!(matches!(f.get("filename"), Some(Value::Str(s)) if s == "a.txt"));
+        assert!(matches!(f.get("content"), Some(Value::Str(s)) if s == "matn fayl"));
+        assert!(matches!(f.get("size"), Some(Value::Int(9))));
+    }
+
+    #[test]
+    fn parse_multipart_ikkilik_fayl_bytes() {
+        // Ikkilik mazmun (UTF-8 emas, ichida CRLF ham bor) bytes bo'lib keladi
+        // va baytlar aynan saqlanadi; size — bayt soni.
+        let data: &[u8] = &[0xff, 0xd8, b'\r', b'\n', 0x00, 0xfe];
+        let body = multipart_body("XX", &[("img", Some("a.jpg"), data)]);
+        let (_, files) = parse_multipart(&body, "XX").expect("parse bo'lishi kerak");
+        let Value::Map(f) = &files[0] else {
+            panic!("fayl map bo'lishi kerak");
+        };
+        match f.get("content") {
+            Some(Value::Bytes(b)) => assert_eq!(**b, data.to_vec()),
+            _ => panic!("ikkilik mazmun bytes bo'lishi kerak"),
+        }
+        assert!(matches!(f.get("size"), Some(Value::Int(6))));
+    }
+
+    #[test]
+    fn parse_multipart_bir_nom_bir_nechta_fayl() {
+        // Bir xil name bilan bir nechta fayl (`<input multiple>`) — hammasi
+        // ro'yxatda qoladi (map emas, list bo'lgani uchun yo'qolmaydi).
+        let body = multipart_body(
+            "MM",
+            &[
+                ("docs", Some("1.txt"), b"bir"),
+                ("docs", Some("2.txt"), b"ikki"),
+            ],
+        );
+        let (_, files) = parse_multipart(&body, "MM").expect("parse bo'lishi kerak");
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn parse_multipart_mazmundagi_boundary_prefiksi_kesmaydi() {
+        // Fayl mazmunida `\r\n--abcXYZ` bor (boundary `abc` ning prefiksi, lekin
+        // to'liq chegara qatori emas) — qism KESILMAY butun saqlanishi kerak
+        // (codex P2 revyu: faqat `\r\n--boundary` qidirish mazmunni buzardi).
+        let data: &[u8] = b"birinchi\r\n--abcXYZ\r\nqolgan qism";
+        let body = multipart_body("abc", &[("doc", Some("a.txt"), data)]);
+        let (_, files) = parse_multipart(&body, "abc").expect("parse bo'lishi kerak");
+        assert_eq!(files.len(), 1);
+        let Value::Map(f) = &files[0] else {
+            panic!("fayl map bo'lishi kerak");
+        };
+        match f.get("content") {
+            Some(Value::Str(s)) => assert_eq!(s.as_bytes(), data),
+            _ => panic!("mazmun butun str bo'lishi kerak"),
+        }
+        assert!(matches!(f.get("size"), Some(Value::Int(n)) if *n == data.len() as i64));
+    }
+
+    #[test]
+    fn parse_multipart_padding_bilan_boundary_qabul() {
+        // RFC 2046: boundary qatoridan keyin transport padding (bo'shliq/tab)
+        // bo'lishi mumkin — bunday chegara haqiqiy deb olinadi.
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--PP  \r\n");
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"\r\n\r\n");
+        body.extend_from_slice(b"qiymat");
+        body.extend_from_slice(b"\r\n--PP--\r\n");
+        let (fields, _) = parse_multipart(&body, "PP").expect("parse bo'lishi kerak");
+        assert!(matches!(fields.get("a"), Some(Value::Str(s)) if s == "qiymat"));
+    }
+
+    #[test]
+    fn parse_multipart_buzuq_tana_none() {
+        // Boundary tanada umuman yo'q — None, chaqiruvchi xom body'ga qaytadi.
+        assert!(parse_multipart(b"shunchaki matn", "YOQ").is_none());
+    }
+
+    #[test]
+    fn build_req_multipart_body_va_files() {
+        // To'liq yo'l: boundary berilganda req.body maydonlar map'i, req.files
+        // fayllar ro'yxati bo'ladi.
+        let body = multipart_body(
+            "ZZ",
+            &[("title", None, b"rasmim"), ("pic", Some("p.png"), b"PNG")],
+        );
+        let req = build_req(
+            "POST".into(),
+            "/upload".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "1.1.1.1".into(),
+            Bytes::from(body),
+            false,
+            Some("ZZ".to_string()),
+        );
+        let Value::Map(m) = req else {
+            panic!("req map bo'lishi kerak");
+        };
+        let Some(Value::Map(b)) = m.get("body") else {
+            panic!("body map bo'lishi kerak");
+        };
+        assert!(matches!(b.get("title"), Some(Value::Str(s)) if s == "rasmim"));
+        match m.get("files") {
+            Some(Value::List(fs)) => assert_eq!(fs.len(), 1),
+            _ => panic!("files list bo'lishi kerak"),
+        }
+    }
+
+    #[test]
+    fn build_req_multipart_emas_files_bosh_list() {
+        // Oddiy so'rovda ham req.files mavjud (bo'sh list) — `each` nil
+        // tekshiruvisiz ishlaydi.
+        let req = build_req(
+            "POST".into(),
+            "/t".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "1.1.1.1".into(),
+            Bytes::from("{\"a\":1}"),
+            true,
+            None,
+        );
+        let Value::Map(m) = req else {
+            panic!("req map bo'lishi kerak");
+        };
+        match m.get("files") {
+            Some(Value::List(fs)) => assert!(fs.is_empty()),
+            _ => panic!("files bo'sh list bo'lishi kerak"),
+        }
+    }
+
+    #[test]
+    fn build_req_multipart_buzuq_xom_qoladi() {
+        // Boundary bor lekin tana mos emas — parse None, body xom str qoladi
+        // (ma'lumot jim yo'qolmaydi), files bo'sh.
+        let req = build_req(
+            "POST".into(),
+            "/u".into(),
+            String::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "1.1.1.1".into(),
+            Bytes::from("oddiy matn"),
+            false,
+            Some("QQ".to_string()),
+        );
+        let Value::Map(m) = req else {
+            panic!("req map bo'lishi kerak");
+        };
+        assert!(matches!(m.get("body"), Some(Value::Str(s)) if s == "oddiy matn"));
+        match m.get("files") {
+            Some(Value::List(fs)) => assert!(fs.is_empty()),
+            _ => panic!("files bo'sh list bo'lishi kerak"),
         }
     }
 
@@ -1896,6 +2323,7 @@ mod tests {
             "127.0.0.1".into(),
             Bytes::from(bytes.to_string()),
             is_json,
+            None,
         );
         match v {
             Value::Map(m) => m.get("body").cloned().unwrap(),
@@ -1986,6 +2414,7 @@ mod tests {
             "127.0.0.1".into(),
             Bytes::new(),
             false,
+            None,
         );
         let req = with_ctx(req, cell.clone());
         let Value::Map(m) = &req else {
@@ -2010,6 +2439,7 @@ mod tests {
                 "127.0.0.1".into(),
                 Bytes::new(),
                 false,
+                None,
             ),
             cell.clone(),
         );
@@ -2047,6 +2477,7 @@ mod tests {
                 "127.0.0.1".into(),
                 Bytes::new(),
                 false,
+                None,
             ),
             cell,
         );
@@ -2325,6 +2756,7 @@ mod tests {
                 "203.0.113.7".into(),
                 Bytes::new(),
                 false,
+                None,
             ),
             Arc::new(Mutex::new(BTreeMap::new())),
         );
@@ -2343,6 +2775,7 @@ mod tests {
             "10.0.0.1".into(),
             Bytes::new(),
             false,
+            None,
         );
         let Value::Map(m) = &req else {
             panic!("Map");

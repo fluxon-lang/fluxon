@@ -526,6 +526,20 @@ http.serve 8080
   `413 Payload Too Large` qaytaradi va tanani xotiraga yig'maydi. `max_body: 0`
   chegarani o'chiradi (cheklovsiz — faqat ishonchli ichki tarmoq orqasida).
 
+**Fayl yuklash (`multipart/form-data`).** Brauzer formasi yoki `curl -F` yuborgan
+fayllar `req.files` ro'yxatiga tushadi, oddiy form maydonlari esa `req.body` ga
+(JSON bilan simmetrik):
+```flux
+http.on :post "/upload" \req ->
+  f = req.files.0
+  fs.write f.filename f.content
+  rep 201 {saved:f.filename size:f.size}
+```
+- Har fayl: `{name filename content size}`. `content` — UTF-8 matn bo'lsa str,
+  ikkilik (rasm, PDF) bo'lsa bytes; `size` — doim **bayt** soni.
+- `req.files` doim ro'yxat — multipart bo'lmasa bo'sh (`each` tekshiruvsiz ishlaydi).
+- `max_body` chegarasi multipart'ga ham tegishli.
+
 **Redirect (yo'naltirish).** Maxsus fe'l yo'q — `rep` bilan 302 status va
 `location` kalitini berasiz; u Location header'ga aylanadi:
 ```flux

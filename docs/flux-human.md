@@ -525,6 +525,21 @@ http.serve 8080
   returns `413 Payload Too Large` without buffering the body. `max_body: 0`
   disables the limit (unlimited — only behind a trusted internal network).
 
+**File upload (`multipart/form-data`).** Files sent by a browser form or
+`curl -F` land in `req.files`, plain form fields in `req.body` (symmetric with
+JSON):
+```flux
+http.on :post "/upload" \req ->
+  f = req.files.0
+  fs.write f.filename f.content
+  rep 201 {saved:f.filename size:f.size}
+```
+- Each file: `{name filename content size}`. `content` is a str for UTF-8 text,
+  bytes for binary (image, PDF); `size` is always the **byte** count.
+- `req.files` is always a list — empty when the request is not multipart
+  (`each` works without a nil check).
+- The `max_body` limit applies to multipart bodies too.
+
 **Redirect.** There is no special verb — with `rep` you give a 302 status and a
 `location` key; it becomes the Location header:
 ```flux
