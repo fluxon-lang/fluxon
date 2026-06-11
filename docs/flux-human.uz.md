@@ -908,6 +908,10 @@ str.repeat "ab" 3      # takrorlash → "ababab"
 math.floor 3.7         # → 3
 math.ceil 3.2          # → 4
 math.abs -5            # → 5
+math.min 3 7           # → 3 (int kirsa int qaytadi)
+math.max 3 7           # → 7
+math.pow 2 10          # → 1024 (int ^ manfiy bo'lmagan int → int)
+math.sqrt 9            # → 3.0 (doim flt; manfiy kirish — xato)
 ```
 
 **`rand` — tasodifiy:**

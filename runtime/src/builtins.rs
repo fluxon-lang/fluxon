@@ -257,6 +257,40 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "round" => Ok(Value::Int(x.round() as i64)),
+        // min/max argumentning o'zini qaytaradi — int kirsa int qoladi
+        // (abs bilan bir uslub), aralash int/flt da ham tur yo'qolmaydi.
+        "min" | "max" => {
+            let y = arg_num(&args, 1, &format!("math.{}", func))?;
+            let pick_first = if func == "min" { x <= y } else { x >= y };
+            Ok(if pick_first {
+                args[0].clone()
+            } else {
+                args[1].clone()
+            })
+        }
+        "pow" => {
+            let y = arg_num(&args, 1, "math.pow")?;
+            match (&args[0], &args[1]) {
+                // int ^ manfiy bo'lmagan int → int (checked: overflow'da panic
+                // emas, Flux xatosi; i64 ga sig'maydigan daraja ham overflow).
+                (Value::Int(a), Value::Int(b)) if *b >= 0 => {
+                    let e = u32::try_from(*b).map_err(|_| Flow::overflow("math.pow"))?;
+                    Ok(Value::Int(
+                        a.checked_pow(e).ok_or_else(|| Flow::overflow("math.pow"))?,
+                    ))
+                }
+                // manfiy daraja yoki flt aralashgan — natija flt.
+                _ => Ok(Value::Flt(x.powf(y))),
+            }
+        }
+        "sqrt" => {
+            // Manfiy sondan ildiz NaN berardi — Flux'da NaN qiymati kutilmaydi,
+            // o'rniga aniq xato.
+            if x < 0.0 {
+                return Err(Flow::err("math.sqrt: manfiy sondan ildiz olib bo'lmaydi"));
+            }
+            Ok(Value::Flt(x.sqrt()))
+        }
         _ => Err(Flow::err(format!(
             "math modulida '{}' funksiyasi yo'q",
             func
@@ -1525,6 +1559,78 @@ mod math_tests {
             math_module("abs", vec![Value::Int(-7)]),
             Ok(Value::Int(7))
         ));
+    }
+
+    // Issue #128: min/max argument turini saqlaydi — int kirsa int chiqadi,
+    // aralash int/flt da g'olibning asl turi qaytadi.
+    #[test]
+    fn min_max_turni_saqlaydi() {
+        assert!(matches!(
+            math_module("min", vec![Value::Int(3), Value::Int(7)]),
+            Ok(Value::Int(3))
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(3), Value::Int(7)]),
+            Ok(Value::Int(7))
+        ));
+        // aralash: flt kichik bo'lsa flt qaytadi, int katta bo'lsa int.
+        assert!(matches!(
+            math_module("min", vec![Value::Int(3), Value::Flt(2.5)]),
+            Ok(Value::Flt(v)) if v == 2.5
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(3), Value::Flt(2.5)]),
+            Ok(Value::Int(3))
+        ));
+        // teng qiymatlarda birinchi argument qaytadi (deterministik).
+        assert!(matches!(
+            math_module("min", vec![Value::Int(5), Value::Flt(5.0)]),
+            Ok(Value::Int(5))
+        ));
+    }
+
+    // Issue #128: int ^ manfiy bo'lmagan int → int (checked), overflow'da
+    // panic emas Flux xatosi; manfiy daraja yoki flt aralashsa flt.
+    #[test]
+    fn pow_int_flt_va_overflow() {
+        assert!(matches!(
+            math_module("pow", vec![Value::Int(2), Value::Int(10)]),
+            Ok(Value::Int(1024))
+        ));
+        assert!(matches!(
+            math_module("pow", vec![Value::Int(2), Value::Int(-1)]),
+            Ok(Value::Flt(v)) if v == 0.5
+        ));
+        assert!(matches!(
+            math_module("pow", vec![Value::Flt(2.0), Value::Int(3)]),
+            Ok(Value::Flt(v)) if v == 8.0
+        ));
+        // 2^63 i64 ga sig'maydi — overflow xatosi.
+        let r = math_module("pow", vec![Value::Int(2), Value::Int(63)]);
+        let Err(Flow::Error(msg)) = r else {
+            panic!("math.pow overflow xato berishi kerak");
+        };
+        assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        // u32 ga sig'maydigan daraja ham overflow (panic emas).
+        assert!(math_module("pow", vec![Value::Int(2), Value::Int(u32::MAX as i64 + 1)]).is_err());
+    }
+
+    // Issue #128: sqrt doim flt qaytaradi; manfiy kirish NaN emas, aniq xato.
+    #[test]
+    fn sqrt_flt_va_manfiy_xato() {
+        assert!(matches!(
+            math_module("sqrt", vec![Value::Int(9)]),
+            Ok(Value::Flt(v)) if v == 3.0
+        ));
+        assert!(matches!(
+            math_module("sqrt", vec![Value::Flt(2.25)]),
+            Ok(Value::Flt(v)) if v == 1.5
+        ));
+        let r = math_module("sqrt", vec![Value::Int(-4)]);
+        let Err(Flow::Error(msg)) = r else {
+            panic!("math.sqrt manfiy son xato berishi kerak");
+        };
+        assert!(msg.contains("manfiy"), "xato matni: {}", msg);
     }
 }
 
