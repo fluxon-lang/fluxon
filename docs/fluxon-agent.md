@@ -138,6 +138,11 @@ http.serve 8080
   writes), `ctx = req.ctx` (handler reads). Lives for THIS request, shared between
   middleware and handler — compute auth once, not per handler. Per-request, isolated.
 - `req.ip` — client IP (TCP peer; behind a proxy this is the proxy's IP).
+- CORS: `http.cors "*"` (any origin, dev) or `http.cors ["https://app.example.com"]`
+  (allowlist), optional `{creds:true}` (cookies/Authorization; with `"*"` the
+  response echoes the request Origin, as browsers require). `OPTIONS` preflight is
+  answered automatically (204 + `Access-Control-Allow-*`); every response (incl.
+  404) gets the headers. Opts: `methods`/`headers` (str) and `max_age` (seconds).
 - Rate limit: `http.limit N :sec|:min|:hr \req -> key` (declared like middleware,
   runs in order; an optional leading path scopes it like `http.before`):
   `http.limit 100 :min \req -> req.ctx.tenant_id` (per-tenant, all routes),

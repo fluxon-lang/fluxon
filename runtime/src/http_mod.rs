@@ -127,6 +127,137 @@ pub struct Middleware {
     pub kind: MwKind,
 }
 
+// CORS sozlamasi (issue #135). `http.cors` to'ldiradi; yoqilgan bo'lsa OPTIONS
+// preflight avtomatik javob oladi va har javobga `Access-Control-Allow-*`
+// header'lar qo'shiladi.
+//
+//   http.cors "*"                                   # hammaga ochiq (dev)
+//   http.cors ["https://app.example.com"]           # ruxsat etilgan origin'lar
+//   http.cors ["https://app.example.com"] {creds: true}   # cookie/Authorization
+//
+// `origins`: None — har qanday origin ("*"). Some(set) — faqat ro'yxatdagilar.
+// Wildcard "*" va `creds: true` birga ishlatib bo'lmaydi (brauzer rad etadi),
+// shuning uchun creds yoqilsa javob so'rovning aniq Origin'ini aks ettiradi.
+#[derive(Clone)]
+pub struct CorsConfig {
+    // Ruxsat etilgan origin'lar. None — "*" (har qanday). Some — aniq ro'yxat.
+    origins: Option<Vec<String>>,
+    // Ruxsat etilgan metodlar (Access-Control-Allow-Methods). Default keng to'plam.
+    methods: String,
+    // Ruxsat etilgan so'rov header'lari (Access-Control-Allow-Headers).
+    headers: String,
+    // Cookie/Authorization (credentials) ulashishga ruxsat (Allow-Credentials).
+    creds: bool,
+    // Preflight javobini brauzer necha soniya kesh qiladi (Max-Age).
+    max_age: u64,
+}
+
+// Origin so'rovga ruxsat berilganmi? Ruxsat berilsa, javobning
+// `Access-Control-Allow-Origin` qiymati qaytadi (aniq origin yoki "*").
+impl CorsConfig {
+    // So'rovning Origin header'iga qarab Allow-Origin qiymatini hisoblaydi.
+    // None qaytsa — bu origin ruxsat etilmagan (CORS header qo'shilmaydi).
+    fn allow_origin_for(&self, req_origin: Option<&str>) -> Option<String> {
+        match &self.origins {
+            // Har qanday origin ruxsat. creds=true bo'lsa "*" ishlatib bo'lmaydi —
+            // so'rov origin'ini aks ettiramiz (bo'lmasa "*").
+            None => {
+                if self.creds {
+                    req_origin.map(|o| o.to_string())
+                } else {
+                    Some("*".to_string())
+                }
+            }
+            // Aniq ro'yxat — so'rov origin'i ichida bo'lsa o'shani aks ettiramiz.
+            Some(list) => match req_origin {
+                Some(o) if list.iter().any(|a| a == o) => Some(o.to_string()),
+                _ => None,
+            },
+        }
+    }
+
+    // Javobning HeaderMap'iga CORS header'larini qo'shadi (preflight'siz oddiy
+    // javoblar uchun ham). Origin ruxsat etilmagan bo'lsa hech narsa qo'shilmaydi.
+    fn apply_to(&self, hmap: &mut hyper::HeaderMap, req_origin: Option<&str>) {
+        let Some(allow) = self.allow_origin_for(req_origin) else {
+            return;
+        };
+        set_header(hmap, "access-control-allow-origin", &allow);
+        // Allow-Origin so'rov origin'iga qarab o'zgaradi — kesh to'g'ri bo'lishi
+        // uchun Vary'ga Origin qo'shamiz (aks holda proksi bir origin javobini
+        // boshqasiga beradi). insert EMAS — handler `rep ... {vary:"Accept-Encoding"}`
+        // bilan qo'ygan Vary'ni saqlab, Origin'ni BIRLASHTIRAMIZ (codex P2: insert
+        // mavjud kesh kalitini buzardi). "*" — javob origin'ga bog'liq emas, Vary shart emas.
+        if allow != "*" {
+            add_vary_origin(hmap);
+        }
+        if self.creds {
+            set_header(hmap, "access-control-allow-credentials", "true");
+        }
+    }
+}
+
+// Javobning `Vary` header'iga `Origin` qo'shadi, mavjud qiymatlarni saqlab.
+// `Vary` allaqachon `Origin` (yoki `*`) ni o'z ichiga olsa — o'zgartirmaydi
+// (takror oldini olish). Aks holda vergul bilan birlashtiradi.
+fn add_vary_origin(hmap: &mut hyper::HeaderMap) {
+    use hyper::header::{HeaderValue, VARY};
+    // Mavjud Vary qiymatlarini o'qiymiz (bir nechta Vary qatori bo'lishi mumkin).
+    let existing: Vec<String> = hmap
+        .get_all(VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .collect();
+    // Allaqachon Origin yoki * bor bo'lsa — qo'shilgan, qaytamiz.
+    let already = existing.iter().any(|line| {
+        line.split(',').any(|tok| {
+            let t = tok.trim();
+            t.eq_ignore_ascii_case("origin") || t == "*"
+        })
+    });
+    if already {
+        return;
+    }
+    if existing.is_empty() {
+        hmap.insert(VARY, HeaderValue::from_static("Origin"));
+    } else {
+        // Mavjud qiymat(lar)ni bitta qatorga birlashtirib Origin qo'shamiz.
+        let merged = format!("{}, Origin", existing.join(", "));
+        if let Ok(hv) = HeaderValue::from_str(&merged) {
+            hmap.insert(VARY, hv);
+        }
+    }
+}
+
+// Javobga CORS header'larini qo'shadi (yoqilgan bo'lsa) va javobni qaytaradi.
+// Body-read xato javoblari (400/413), 404 va handler javobi — hammasi shu
+// orqali yakunlanadi, shunda CORS yoqilganda HAR javob `Access-Control-Allow-*`
+// oladi (codex P2: oldin erta-return xatolari header'siz qaytardi).
+fn cors_finalize(
+    mut resp: Response<Full<Bytes>>,
+    cors: &Option<CorsConfig>,
+    req_origin: Option<&str>,
+) -> Response<Full<Bytes>> {
+    if let Some(cfg) = cors {
+        cfg.apply_to(resp.headers_mut(), req_origin);
+    }
+    resp
+}
+
+// HeaderMap'ga bitta header'ni insert qiladi (eskisini bosadi). Buzuq nom/qiymat
+// jim o'tkazib yuboriladi. CORS header'lari uchun yordamchi (closure borrow
+// muammosini chetlab o'tadi).
+fn set_header(hmap: &mut hyper::HeaderMap, name: &str, val: &str) {
+    use hyper::header::{HeaderName, HeaderValue};
+    if let (Ok(n), Ok(v)) = (
+        HeaderName::from_bytes(name.as_bytes()),
+        HeaderValue::from_str(val),
+    ) {
+        hmap.insert(n, v);
+    }
+}
+
 // "/notes/:id" -> [Lit("notes"), Param("id")]. Bo'sh segmentlar tashlanadi.
 fn parse_pattern(path: &str) -> Vec<Seg> {
     path.split('/')
@@ -852,6 +983,7 @@ impl Interp {
             "on" => self.http_on(args),
             "use" => self.http_use(args),
             "before" => self.http_before(args),
+            "cors" => self.http_cors(args),
             "limit" => self.http_limit(args),
             "serve" => self.http_serve(args),
             "get" => http_client("GET", args, false),
@@ -930,6 +1062,81 @@ impl Interp {
             handler,
             kind: MwKind::Fn,
         });
+        Ok(Value::Nil)
+    }
+
+    // http.cors origins [opts]  — deklarativ CORS (issue #135).
+    //
+    //   http.cors "*"                                # hammaga ochiq (dev)
+    //   http.cors ["https://app.example.com"]        # ruxsat etilgan origin'lar
+    //   http.cors ["https://app.example.com"] {creds: true}
+    //
+    // 1-argument: "*" (str) — har qanday origin, yoki origin'lar ro'yxati (list).
+    // 2-argument (ixtiyoriy): opsiyalar map'i:
+    //   creds:   true → Allow-Credentials (cookie/Authorization). "*" bilan birga
+    //            ishlatilsa javob so'rov origin'ini aks ettiradi (brauzer talabi).
+    //   methods: ruxsat etilgan metodlar (str). Default keng to'plam.
+    //   headers: ruxsat etilgan so'rov header'lari (str). Default keng to'plam.
+    //   max_age: preflight kesh muddati soniyada (int). Default 86400 (1 kun).
+    fn http_cors(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        let origins = match args.first() {
+            // "*" — har qanday origin (None ichki ifoda).
+            Some(Value::Str(s)) if s == "*" => None,
+            // Bitta origin str sifatida ham qabul qilamiz (qulaylik).
+            Some(Value::Str(s)) => Some(vec![s.clone()]),
+            // Origin'lar ro'yxati.
+            Some(Value::List(items)) => {
+                let mut list = Vec::with_capacity(items.len());
+                for it in items.iter() {
+                    match it {
+                        Value::Str(s) => list.push(s.clone()),
+                        _ => {
+                            return Err(Flow::err(
+                                "http.cors: origin ro'yxati str elementlardan iborat bo'lishi kerak",
+                            ));
+                        }
+                    }
+                }
+                Some(list)
+            }
+            _ => {
+                return Err(Flow::err(
+                    "http.cors: 1-argument \"*\" yoki origin'lar ro'yxati bo'lishi kerak",
+                ));
+            }
+        };
+
+        let mut cfg = CorsConfig {
+            origins,
+            // Keng standart to'plam — agent alohida sozlamasdan ishlaydi.
+            methods: "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),
+            headers: "Content-Type, Authorization".to_string(),
+            creds: false,
+            max_age: 86400,
+        };
+
+        if let Some(Value::Map(opts)) = args.get(1) {
+            if let Some(v) = opts.get("creds") {
+                cfg.creds = !matches!(v, Value::Nil | Value::Bool(false));
+            }
+            if let Some(Value::Str(s)) = opts.get("methods") {
+                cfg.methods = s.clone();
+            }
+            if let Some(Value::Str(s)) = opts.get("headers") {
+                cfg.headers = s.clone();
+            }
+            if let Some(Value::Int(n)) = opts.get("max_age")
+                && *n >= 0
+            {
+                cfg.max_age = *n as u64;
+            }
+        } else if args.len() > 1 && !matches!(args.get(1), Some(Value::Nil)) {
+            return Err(Flow::err(
+                "http.cors: 2-argument opsiyalar map'i bo'lishi kerak ({creds: true})",
+            ));
+        }
+
+        *self.cors.lock().unwrap() = Some(cfg);
         Ok(Value::Nil)
     }
 
@@ -1101,6 +1308,31 @@ async fn handle_request(
         .into_iter()
         .map(|(k, v)| (k.replace('-', "_"), v))
         .collect();
+    // CORS sozlamasi (issue #135) — yoqilgan bo'lsa Origin'ga qarab preflight'ga
+    // javob beramiz va har javobga `Access-Control-Allow-*` qo'shamiz. So'rovning
+    // Origin header'i (headers'da '-' -> '_' qilingan) ruxsat tekshiruvi uchun.
+    let cors = interp.cors.lock().unwrap().clone();
+    let req_origin = match headers.get("origin") {
+        Some(Value::Str(o)) => Some(o.clone()),
+        _ => None,
+    };
+
+    // CORS preflight — CORS yoqilgan bo'lsa route izlamasdan to'g'ridan-to'g'ri
+    // javob beramiz (brauzer haqiqiy so'rovdan oldin OPTIONS yuboradi). Bu route
+    // topilmasligi (404) muammosini ham hal qiladi: preflight uchun handler shart
+    // emas.
+    //
+    // HAR OPTIONS emas — faqat HAQIQIY preflight'ni ushlaymiz: Fetch standartiga
+    // ko'ra brauzer preflight'i HAR DOIM Access-Control-Request-Method header
+    // yuboradi. Bu shart bo'lmasa (oddiy OPTIONS — resurs imkoniyatini so'rash
+    // yoki foydalanuvchining `http.on :options "/..."` handler'i), so'rov
+    // odatdagidek marshrutga tushadi (codex P2). CORS o'chiq bo'lsa ham OPTIONS
+    // oddiy marshrutga tushadi.
+    let is_preflight = method == "options" && headers.contains_key("access_control_request_method");
+    if is_preflight && let Some(cfg) = &cors {
+        return Ok(cors_preflight_response(cfg, req_origin.as_deref()));
+    }
+
     let is_json = matches!(
         headers.get("content_type"),
         Some(Value::Str(ct)) if ct.contains("application/json")
@@ -1126,7 +1358,10 @@ async fn handle_request(
                 "error".to_string(),
                 Value::Str(format!("topilmadi: {} {}", method, path)),
             );
-            return Ok(json_response(404, json_encode(&Value::Map(m))));
+            // 404 ham CORS header oladi — aks holda brauzer xato javob tanasini
+            // CORS to'sig'i sabab o'qiy olmaydi (debugni qiyinlashtiradi).
+            let resp = json_response(404, json_encode(&Value::Map(m)));
+            return Ok(cors_finalize(resp, &cors, req_origin.as_deref()));
         }
     };
 
@@ -1138,8 +1373,15 @@ async fn handle_request(
         match req.into_body().collect().await {
             Ok(c) => c.to_bytes(),
             // Oldin bu jim Bytes::new() ga tushardi (uzilgan POST handler'ga
-            // body:nil bilan yetardi); endi 400 qaytaramiz (issue #91).
-            Err(_) => return Ok(bad_request("so'rov tanasini o'qib bo'lmadi")),
+            // body:nil bilan yetardi); endi 400 qaytaramiz (issue #91). CORS
+            // header bilan yakunlanadi (codex P2: har javob CORS oladi).
+            Err(_) => {
+                return Ok(cors_finalize(
+                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    &cors,
+                    req_origin.as_deref(),
+                ));
+            }
         }
     } else {
         // Tez yo'l: Content-Length e'lon qilingan o'lcham chegaradan oshsa, tanani
@@ -1151,7 +1393,11 @@ async fn handle_request(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
         if matches!(declared, Some(len) if len > max_body as u64) {
-            return Ok(payload_too_large(max_body));
+            return Ok(cors_finalize(
+                payload_too_large(max_body),
+                &cors,
+                req_origin.as_deref(),
+            ));
         }
         // Limited oqim davomida ham haqiqiy chegarani majburlaydi — chegara oshsa
         // o'qishni to'xtatadi (Content-Length yolg'on bo'lsa ham himoyalaydi).
@@ -1163,9 +1409,17 @@ async fn handle_request(
                 if e.downcast_ref::<http_body_util::LengthLimitError>()
                     .is_some()
                 {
-                    return Ok(payload_too_large(max_body));
+                    return Ok(cors_finalize(
+                        payload_too_large(max_body),
+                        &cors,
+                        req_origin.as_deref(),
+                    ));
                 }
-                return Ok(bad_request("so'rov tanasini o'qib bo'lmadi"));
+                return Ok(cors_finalize(
+                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    &cors,
+                    req_origin.as_deref(),
+                ));
             }
         }
     };
@@ -1252,7 +1506,31 @@ async fn handle_request(
         Ok(Err(flow)) => flow_to_response(flow),
         Err(join_err) => flow_to_response(Flow::Error(format!("handler panic: {}", join_err))),
     };
-    Ok(resp)
+    // CORS yoqilgan bo'lsa har javobga `Access-Control-Allow-*` qo'shamiz
+    // (issue #135). Handler `rep ... {access_control_allow_origin: ...}` bilan
+    // qo'lda yozgan bo'lsa ham insert ustidan yozadi — kanonik sozlama ustun.
+    Ok(cors_finalize(resp, &cors, req_origin.as_deref()))
+}
+
+// OPTIONS preflight javobi (issue #135). Brauzer haqiqiy so'rovdan oldin
+// OPTIONS yuboradi va `Access-Control-Allow-*` header'larni kutadi. Tana yo'q
+// (204 No Content). Origin ruxsat etilmagan bo'lsa CORS header'larsiz 204
+// qaytadi (brauzer so'rovni bloklaydi — to'g'ri xulq).
+fn cors_preflight_response(cfg: &CorsConfig, req_origin: Option<&str>) -> Response<Full<Bytes>> {
+    let mut b = Response::builder().status(StatusCode::NO_CONTENT);
+    if let Some(hmap) = b.headers_mut() {
+        cfg.apply_to(hmap, req_origin);
+        // Preflight'ga xos header'lar (oddiy javobda kerak emas): ruxsat etilgan
+        // metodlar, header'lar va kesh muddati. Faqat origin ruxsat etilganda
+        // qo'shamiz — apply_to Allow-Origin qo'ymagan bo'lsa preflight'ni ham
+        // bo'sh qoldiramiz (brauzer rad etadi).
+        if hmap.contains_key("access-control-allow-origin") {
+            set_header(hmap, "access-control-allow-methods", &cfg.methods);
+            set_header(hmap, "access-control-allow-headers", &cfg.headers);
+            set_header(hmap, "access-control-max-age", &cfg.max_age.to_string());
+        }
+    }
+    b.body(Full::new(Bytes::new())).unwrap()
 }
 
 // --- HTTP klient: http.get/post/put/del ---
@@ -2889,5 +3167,139 @@ mod tests {
         }];
         let (_r, params) = match_route(&routes, "get", "/users/a%2Fb").expect("bir segment — mos");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "a%2Fb"));
+    }
+
+    // --- CORS (issue #135) ---
+
+    // Standart sozlamalar bilan config — testlar faqat kerakli maydonni o'zgartiradi.
+    fn cors_cfg(origins: Option<Vec<String>>, creds: bool) -> CorsConfig {
+        CorsConfig {
+            origins,
+            methods: "GET, POST, OPTIONS".into(),
+            headers: "Content-Type".into(),
+            creds,
+            max_age: 600,
+        }
+    }
+
+    // HeaderMap'dan str qiymat oladi (yo'q bo'lsa None).
+    fn hv(h: &hyper::HeaderMap, name: &str) -> Option<String> {
+        h.get(name).map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn cors_wildcard_har_origin_uchun_star() {
+        // `http.cors "*"` — har qanday origin "*" oladi (creds yo'q).
+        let cfg = cors_cfg(None, false);
+        let mut h = hyper::HeaderMap::new();
+        cfg.apply_to(&mut h, Some("https://a.example.com"));
+        assert_eq!(hv(&h, "access-control-allow-origin").as_deref(), Some("*"));
+        // "*" bilan Vary: Origin qo'shilmaydi (javob origin'ga bog'liq emas).
+        assert_eq!(hv(&h, "vary"), None);
+    }
+
+    #[test]
+    fn cors_wildcard_creds_origin_aks_ettiradi() {
+        // `http.cors "*" {creds: true}` — brauzer "*" + credentials'ni rad etadi,
+        // shuning uchun so'rov origin'ini aks ettiramiz + Allow-Credentials.
+        let cfg = cors_cfg(None, true);
+        let mut h = hyper::HeaderMap::new();
+        cfg.apply_to(&mut h, Some("https://a.example.com"));
+        assert_eq!(
+            hv(&h, "access-control-allow-origin").as_deref(),
+            Some("https://a.example.com")
+        );
+        assert_eq!(
+            hv(&h, "access-control-allow-credentials").as_deref(),
+            Some("true")
+        );
+        // Aniq origin aks ettirilganda Vary: Origin shart (kesh to'g'riligi).
+        assert_eq!(hv(&h, "vary").as_deref(), Some("Origin"));
+    }
+
+    #[test]
+    fn cors_royxat_faqat_ruxsat_etilgan_origin() {
+        // Aniq ro'yxat — ruxsat etilgan origin aks ettiriladi.
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        cfg.apply_to(&mut h, Some("https://app.example.com"));
+        assert_eq!(
+            hv(&h, "access-control-allow-origin").as_deref(),
+            Some("https://app.example.com")
+        );
+        assert_eq!(hv(&h, "vary").as_deref(), Some("Origin"));
+    }
+
+    #[test]
+    fn cors_vary_mavjud_qiymatni_saqlaydi() {
+        // Handler `rep ... {vary:"Accept-Encoding"}` qo'ygan Vary'ni o'chirmasdan
+        // Origin'ni birlashtiramiz (codex P2: insert kesh kalitini buzardi).
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::VARY, "Accept-Encoding".parse().unwrap());
+        cfg.apply_to(&mut h, Some("https://app.example.com"));
+        assert_eq!(hv(&h, "vary").as_deref(), Some("Accept-Encoding, Origin"));
+    }
+
+    #[test]
+    fn cors_vary_takror_origin_qoshmaydi() {
+        // Vary allaqachon Origin bo'lsa — takror qo'shilmaydi (case-insensitive).
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::VARY, "origin".parse().unwrap());
+        cfg.apply_to(&mut h, Some("https://app.example.com"));
+        // Mavjud "origin" saqlanadi, ikkinchi marta qo'shilmaydi.
+        assert_eq!(hv(&h, "vary").as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn cors_royxat_tashqi_origin_rad() {
+        // Ro'yxatda yo'q origin — hech qanday CORS header qo'shilmaydi
+        // (brauzer so'rovni bloklaydi).
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        cfg.apply_to(&mut h, Some("https://evil.example.com"));
+        assert_eq!(hv(&h, "access-control-allow-origin"), None);
+    }
+
+    #[test]
+    fn cors_origin_yoq_royxat_bilan_header_qoshilmaydi() {
+        // Origin header'siz so'rov (masalan curl) — aniq ro'yxatda mos yo'q,
+        // CORS header qo'shilmaydi.
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let mut h = hyper::HeaderMap::new();
+        cfg.apply_to(&mut h, None);
+        assert_eq!(hv(&h, "access-control-allow-origin"), None);
+    }
+
+    #[test]
+    fn cors_preflight_metod_va_header_qaytaradi() {
+        // OPTIONS preflight 204 + Allow-Methods/Headers/Max-Age qaytaradi.
+        let cfg = cors_cfg(None, false);
+        let resp = cors_preflight_response(&cfg, Some("https://a.example.com"));
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let h = resp.headers();
+        assert_eq!(hv(h, "access-control-allow-origin").as_deref(), Some("*"));
+        assert_eq!(
+            hv(h, "access-control-allow-methods").as_deref(),
+            Some("GET, POST, OPTIONS")
+        );
+        assert_eq!(
+            hv(h, "access-control-allow-headers").as_deref(),
+            Some("Content-Type")
+        );
+        assert_eq!(hv(h, "access-control-max-age").as_deref(), Some("600"));
+    }
+
+    #[test]
+    fn cors_preflight_rad_etilgan_origin_header_qoshmaydi() {
+        // Ruxsat etilmagan origin'ga preflight 204 qaytaradi, lekin CORS
+        // header'larsiz — brauzer so'rovni bloklaydi (to'g'ri xulq).
+        let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
+        let resp = cors_preflight_response(&cfg, Some("https://evil.example.com"));
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let h = resp.headers();
+        assert_eq!(hv(h, "access-control-allow-origin"), None);
+        assert_eq!(hv(h, "access-control-allow-methods"), None);
     }
 }

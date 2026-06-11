@@ -231,6 +231,12 @@ pub struct Interp {
     // ko'radi). Route handler'dan OLDIN ishlaydi; biri `fail`/`rep` qaytarsa zanjir
     // to'xtaydi. `routes` kabi top-level to'ldiradi, server thread'lari o'qiydi.
     pub middlewares: Arc<Mutex<Vec<crate::http_mod::Middleware>>>,
+    // CORS sozlamasi (issue #135). `http.cors` o'rnatadi, server thread'lari
+    // o'qiydi: yoqilgan bo'lsa OPTIONS preflight avtomatik javob oladi va har
+    // javobga `Access-Control-Allow-*` header'lar qo'shiladi. None — CORS o'chiq
+    // (default, hech qanday header qo'shilmaydi). `routes` kabi top-level
+    // to'ldiradi, server thread'lari o'qiydi.
+    pub cors: Arc<Mutex<Option<crate::http_mod::CorsConfig>>>,
     // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
     // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
     // qayta tiklaydi. `new_arc` o'rnatadi.
@@ -315,6 +321,7 @@ impl Interp {
             global,
             routes: Arc::new(Mutex::new(Vec::new())),
             middlewares: Arc::new(Mutex::new(Vec::new())),
+            cors: Arc::new(Mutex::new(None)),
             this: OnceLock::new(),
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),
