@@ -1485,7 +1485,7 @@ fn arg<'a>(args: &'a [Value], i: usize, who: &str) -> Result<&'a Value, Flow> {
     args.get(i)
         .ok_or_else(|| Flow::err(format!("{}: {}-argument yetishmadi", who, i + 1)))
 }
-fn arg_str(args: &[Value], i: usize, who: &str) -> Result<String, Flow> {
+pub(crate) fn arg_str(args: &[Value], i: usize, who: &str) -> Result<String, Flow> {
     match arg(args, i, who)? {
         Value::Str(s) => Ok(s.clone()),
         Value::Sym(s) => Ok(s.clone()),

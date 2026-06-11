@@ -326,6 +326,19 @@ is rejected, not accepted forever). `iat`/`exp` are added to the payload
 automatically. Catch with `!`/propagate → 401 in a handler. Pairs with middleware:
 verify in `http.before`, put claims in `req.ctx`, read in the handler.
 
+### crypto (hash / hmac / base64 / uuid)
+```flux
+crypto.sha256 s        # → SHA-256 hex (lowercase)
+crypto.hmac key msg    # → HMAC-SHA256 hex — verify webhook signatures (Stripe/GitHub/Telegram)
+crypto.b64 s           # → base64 (standard alphabet, padded)
+crypto.b64d s          # → decode base64 (padding optional, url-safe accepted), or err
+crypto.hex s           # → hex of the string's bytes
+crypto.uuid            # → UUID v4 (crypto-secure source)
+```
+`crypto.hmac`/`crypto.sha256` return lowercase hex — compare directly with the
+signature header a webhook sends. `crypto.b64d` errs on invalid base64 or
+non-UTF-8 output (no silent corruption).
+
 ### reg (function registry — dynamic dispatch)
 Store/call a function by STRING name (for agent tools — NOT a `match`-switch,
 added at runtime):

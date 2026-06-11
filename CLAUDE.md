@@ -57,6 +57,7 @@ Yangi battery yoki o'zgarish kiritishdan oldin tegishli faylni biling:
 | `ai` battery (LLM — Anthropic Messages API) | `runtime/src/ai_mod.rs` |
 | `db` battery (SQLite, tx, schema) | `runtime/src/db_mod.rs` |
 | `auth` battery (JWT HS256 + parol hash argon2id) | `runtime/src/auth_mod.rs` |
+| `crypto` battery (sha256/hmac/b64/hex/uuid) | `runtime/src/crypto_mod.rs` |
 | CLI kirish nuqtasi + integratsiya testlari | `runtime/src/main.rs` |
 
 **Spec'ni o'qish kerak bo'lsa:** `docs/flux-agent.md` (~2700 token, ixcham —
@@ -155,8 +156,8 @@ o'ylang va test bilan himoyalang:
 ## 8. Batareyalar holati (hammasi tayyor)
 
 `docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar
-runtime'da **implementatsiya qilingan**: `http`, `db`, `ai`, `auth`, `ws`,
-`cron`, `queue`, `reg` (`ai` — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`,
+runtime'da **implementatsiya qilingan**: `http`, `db`, `ai`, `auth`, `crypto`,
+`ws`, `cron`, `queue`, `reg` (`ai` — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`,
 Anthropic Messages API orqali; `runtime/src/ai_mod.rs`).
 
 Yangi battery qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb
