@@ -747,6 +747,36 @@ log "parts=${parts} joined=${parts.join "-"}"
 "#);
     }
 
+    // Issue #126: str.trim/replace/starts/ends/pad/repeat — har real loyihada
+    // birinchi kunda kerak bo'ladigan str funksiyalari.
+    #[test]
+    fn str_trim_replace_starts_ends_pad_repeat() {
+        run(r#"
+(str.trim "  salom  " == "salom") | (fail "str.trim")
+(str.trim "salom" == "salom") | (fail "str.trim o'zgarmas")
+(str.replace "a-b-c" "-" "+" == "a+b+c") | (fail "str.replace")
+(str.replace "abc" "x" "y" == "abc") | (fail "str.replace topilmadi")
+(str.replace "abc" "" "y" == "abc") | (fail "str.replace bo'sh pattern")
+(str.starts "/api/users" "/api") | (fail "str.starts true")
+((str.starts "/api" "/web") == false) | (fail "str.starts false")
+(str.ends "file.fx" ".fx") | (fail "str.ends true")
+((str.ends "file.fx" ".rs") == false) | (fail "str.ends false")
+(str.pad "7" 3 "0" == "007") | (fail "str.pad")
+(str.pad "1234" 3 "0" == "1234") | (fail "str.pad uzun o'zgarmas")
+(str.pad "ab" 4 " " == "  ab") | (fail "str.pad bo'shliq")
+(str.repeat "ab" 3 == "ababab") | (fail "str.repeat")
+(str.repeat "ab" 0 == "") | (fail "str.repeat nol")
+"#);
+    }
+
+    // str.repeat manfiy son va str.pad bo'sh to'ldiruvchi — aniq xato (jim
+    // noto'g'ri natija emas).
+    #[test]
+    fn str_repeat_negative_and_pad_empty_fail() {
+        assert!(run_source(r#"str.repeat "a" (0 - 1)"#).is_err());
+        assert!(run_source(r#"str.pad "a" 3 """#).is_err());
+    }
+
     #[test]
     fn time_module_fmt_and_roundtrip() {
         // time.fmt unix int bilan deterministik: 1700000000 = 2023-11-14 22:13:20 UTC.

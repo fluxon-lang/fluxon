@@ -143,6 +143,66 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             let sub = arg_str(&args, 1, "str.has")?;
             Ok(Value::Bool(s.contains(&sub)))
         }
+        "trim" => Ok(Value::Str(
+            arg_str(&args, 0, "str.trim")?.trim().to_string(),
+        )),
+        "replace" => {
+            let s = arg_str(&args, 0, "str.replace")?;
+            let old = arg_str(&args, 1, "str.replace")?;
+            let new = arg_str(&args, 2, "str.replace")?;
+            // Bo'sh pattern bilan Rust replace har belgi orasiga qo'shadi —
+            // bu hech kim kutmaydigan natija, shuning uchun s o'zgarmaydi.
+            if old.is_empty() {
+                return Ok(Value::Str(s));
+            }
+            Ok(Value::Str(s.replace(&old, &new)))
+        }
+        "starts" => {
+            let s = arg_str(&args, 0, "str.starts")?;
+            let pre = arg_str(&args, 1, "str.starts")?;
+            Ok(Value::Bool(s.starts_with(&pre)))
+        }
+        "ends" => {
+            let s = arg_str(&args, 0, "str.ends")?;
+            let suf = arg_str(&args, 1, "str.ends")?;
+            Ok(Value::Bool(s.ends_with(&suf)))
+        }
+        // str.pad s n ch — chapdan ch bilan n uzunlikka to'ldiradi (padStart):
+        // raqam formatlash ("7" → "007") asosiy ehtiyoj. Uzunlik str.len bilan
+        // bir xil o'lchovda (chars), bayt emas. n <= len bo'lsa s o'zgarmaydi.
+        "pad" => {
+            let s = arg_str(&args, 0, "str.pad")?;
+            let n = arg_int(&args, 1, "str.pad")?.max(0) as usize;
+            let ch = arg_str(&args, 2, "str.pad")?;
+            let Some(c) = ch.chars().next() else {
+                return Err(Flow::err("str.pad: 3-argument bo'sh bo'lmasligi kerak"));
+            };
+            let len = s.chars().count();
+            if n <= len {
+                return Ok(Value::Str(s));
+            }
+            let mut out = String::with_capacity(s.len() + (n - len) * c.len_utf8());
+            for _ in 0..(n - len) {
+                out.push(c);
+            }
+            out.push_str(&s);
+            Ok(Value::Str(out))
+        }
+        "repeat" => {
+            let s = arg_str(&args, 0, "str.repeat")?;
+            let n = arg_int(&args, 1, "str.repeat")?;
+            if n < 0 {
+                return Err(Flow::err(format!(
+                    "str.repeat: takror soni manfiy bo'lmasligi kerak ({})",
+                    n
+                )));
+            }
+            // checked_mul: ulkan n da String::repeat panic o'rniga aniq xato.
+            if s.len().checked_mul(n as usize).is_none() {
+                return Err(Flow::overflow("str.repeat"));
+            }
+            Ok(Value::Str(s.repeat(n as usize)))
+        }
         "int" => {
             let s = arg_str(&args, 0, "str.int")?;
             match s.trim().parse::<i64>() {
