@@ -216,7 +216,7 @@ http.on :get "/channels/:id/topics" \req ->
 
 # =================================================================
 # REALTIME / WEBSOCKET SIMULATION
-# (In real Flux, would use http.on :ws or similar)
+# (In real Fluxon, would use http.on :ws or similar)
 # We use HTTP endpoints that simulate WebSocket operations
 # =================================================================
 

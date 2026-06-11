@@ -1,4 +1,4 @@
-// Flux queue battery — fon navbati (background jobs).
+// Fluxon queue battery — fon navbati (background jobs).
 //
 // Til API (docs):
 //   queue.push "send" {ph:p body:t}            # navbatga ish qo'shadi (nom + payload map)
@@ -12,7 +12,7 @@
 //     kafolatlangan, beqaror yuk ostida ham thread portlamaydi. (`cron` kabi fon
 //     thread, lekin u vaqt bo'yicha emas, navbat bo'yicha uyg'onadi.)
 //   - Handler hali ro'yxatga olinmagan ish uchun `queue.push` chaqirilsa, ish
-//     navbatda KUTIB turadi. Flux top-level kodda `queue.push` `queue.on` dan
+//     navbatda KUTIB turadi. Fluxon top-level kodda `queue.push` `queue.on` dan
 //     oldin yozilishi mumkin — worker Condvar'da uxlaydi, `queue.on` kelganda
 //     uyg'onib ishni bajaradi (busy-loop YO'Q, issue #105). Handler'siz ish
 //     handler'i BOR boshqa ishlarni to'sib qo'ymaydi.

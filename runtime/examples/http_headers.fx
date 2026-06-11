@@ -1,6 +1,6 @@
 # Custom javob header'lari (issue #16) — rep'ning ixtiyoriy 3-argument map'i.
 #
-# Header nomida defis o'rniga `_` yoziladi (Flux map kalitida defis bo'lolmaydi);
+# Header nomida defis o'rniga `_` yoziladi (Fluxon map kalitida defis bo'lolmaydi);
 # runtime uni `-` ga aylantiradi: content_type → Content-Type. Nom case-insensitive.
 # Bu o'qish bilan simmetrik — req.headers'da ham `-` → `_`.
 #
@@ -10,7 +10,7 @@ use http
 
 # 1) Maxsus Content-Type — HTML qaytarish (body str bo'lsa default text/plain).
 http.on :get "/html" \req ->
-  rep 200 "<h1>Salom Flux</h1>" {content_type:"text/html"}
+  rep 200 "<h1>Salom Fluxon</h1>" {content_type:"text/html"}
 
 # 2) Redirect — Location header (302). URL qisqartiruvchi naqshi.
 http.on :get "/go" \req ->

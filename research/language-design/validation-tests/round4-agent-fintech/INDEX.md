@@ -2,13 +2,13 @@
 
 ## Overview
 
-This is a **complete, production-grade fintech/payments backend** written entirely in **Flux** — a new AI-native backend language.
+This is a **complete, production-grade fintech/payments backend** written entirely in **Fluxon** — a new AI-native backend language.
 
-**Purpose**: Validate that Flux spec is sufficient for correctness-critical domains (fintech = extremely demanding).
+**Purpose**: Validate that Fluxon spec is sufficient for correctness-critical domains (fintech = extremely demanding).
 
 **Key Challenge**: Build something REAL and HARD (atomic transactions, idempotency, double-entry accounting, concurrency) using only the spec.
 
-**Result**: 1,129 lines of Flux code + comprehensive analysis of 13 spec gaps.
+**Result**: 1,129 lines of Fluxon code + comprehensive analysis of 13 spec gaps.
 
 ---
 
@@ -20,7 +20,7 @@ This is a **complete, production-grade fintech/payments backend** written entire
 ### The Actual Code
 All files in: `fintech/haiku/`
 
-#### Core Logic (9 Flux modules, 1,129 lines total)
+#### Core Logic (9 Fluxon modules, 1,129 lines total)
 1. **[schema.fx](fintech/haiku/schema.fx)** — Database schema (8 tables, double-entry accounting)
 2. **[accounts.fx](fintech/haiku/accounts.fx)** — Account CRUD, balance queries
 3. **[transfers.fx](fintech/haiku/transfers.fx)** — Core transfer logic (atomic, idempotent)
@@ -33,7 +33,7 @@ All files in: `fintech/haiku/`
 
 #### Documentation
 - **[README.md](fintech/haiku/README.md)** — Architecture, API docs, design decisions (2,000+ lines)
-- **[SPEC_GAPS.md](fintech/haiku/SPEC_GAPS.md)** — Detailed analysis of 13 critical gaps in Flux spec
+- **[SPEC_GAPS.md](fintech/haiku/SPEC_GAPS.md)** — Detailed analysis of 13 critical gaps in Fluxon spec
 - **[EXAMPLE_USAGE.md](fintech/haiku/EXAMPLE_USAGE.md)** — Step-by-step walk-through of using the API
 
 ---
@@ -180,7 +180,7 @@ Read **[SPEC_GAPS.md](fintech/haiku/SPEC_GAPS.md)** (what spec doesn't say, how 
 ✗ `str.int "bad"` returns 0 → transfers to account 0  
 
 ### Production Readiness: ~85%
-(Pending Flux spec clarifications)
+(Pending Fluxon spec clarifications)
 
 ---
 
@@ -201,7 +201,7 @@ fintech/haiku/
 ├── SPEC_GAPS.md           (~2,000 words) — 13 gaps detailed
 └── EXAMPLE_USAGE.md       (~1,500 words) — API walkthrough
 
-Total Flux Code: 1,129 lines
+Total Fluxon Code: 1,129 lines
 Total Docs: ~5,500 words
 ```
 
@@ -234,7 +234,7 @@ Total Docs: ~5,500 words
 
 ---
 
-## Recommendations for Flux v2
+## Recommendations for Fluxon v2
 
 ### CRITICAL (for correctness domains)
 1. Add `decimal` type (with overflow detection)
@@ -260,7 +260,7 @@ Total Docs: ~5,500 words
 
 ## Key Takeaways
 
-1. **Flux is excellent for batteries-included development**
+1. **Fluxon is excellent for batteries-included development**
    - Built-in http, db, ai, json, cron — no dependency hell
    - Python-like syntax is readable
    - Pipe operator (`|>`) is clean
@@ -275,13 +275,13 @@ Total Docs: ~5,500 words
    - Errors must be structured
    - Invariants must be verifiable
 
-4. **With v2 fixes, Flux would be production-ready**
+4. **With v2 fixes, Fluxon would be production-ready**
    - Add decimal type
    - Clarify tx isolation
    - Add structured errors
    - Document guarantees
 
-5. **This codebase is a great test suite for Flux**
+5. **This codebase is a great test suite for Fluxon**
    - Stresses concurrency, transactions, idempotency
    - Needs absolute guarantees
    - Can validate every spec claim
@@ -292,7 +292,7 @@ Total Docs: ~5,500 words
 
 | Metric | Value |
 |--------|-------|
-| Total Flux lines | 1,129 |
+| Total Fluxon lines | 1,129 |
 | Total documentation | ~5,500 words |
 | HTTP endpoints | 17 |
 | Database tables | 8 |
@@ -337,11 +337,11 @@ See **[EXAMPLE_USAGE.md](fintech/haiku/EXAMPLE_USAGE.md)** for full examples.
 
 ## Conclusion
 
-This is a **complete, real, hard fintech backend** in Flux. It demonstrates:
-- Flux is capable of production systems
+This is a **complete, real, hard fintech backend** in Fluxon. It demonstrates:
+- Fluxon is capable of production systems
 - Spec is mostly complete but has critical gaps
 - Correctness-critical domains expose weaknesses
-- With improvements, Flux could be excellent for fintech
+- With improvements, Fluxon could be excellent for fintech
 
 **Status**: Ready for review, testing, and spec clarification.
 

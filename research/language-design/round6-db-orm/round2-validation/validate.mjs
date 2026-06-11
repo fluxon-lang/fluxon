@@ -3,13 +3,13 @@ export const meta = {
   description: 'Re-run the booking+analytics PRD against the NEW (working) builder spec; a haiku agent writes .fx, we actually RUN it to check syntax/semantics, agent self-fixes once',
   phases: [
     { title: 'Generate', detail: 'haiku writes .fx from the builder spec' },
-    { title: 'Run+Fix', detail: 'execute via flux binary; on error the agent fixes once' },
+    { title: 'Run+Fix', detail: 'execute via fluxon binary; on error the agent fixes once' },
   ],
 }
 
 const prd = args.prd
 const spec = args.spec
-const fluxBin = args.fluxBin
+const fluxonBin = args.fluxonBin
 const workDir = args.workDir
 
 phase('Generate')
@@ -26,8 +26,8 @@ const GEN_SCHEMA = {
 }
 
 const gen = await agent(
-  `You are writing a backend in the Flux language (.fx). Below is the COMPLETE Flux spec — the single source of truth for syntax. Follow it EXACTLY; do not invent syntax. Pay special attention to the db read builder (db.from |> db.eq |> ... |> db.all/first/agg).\n\n` +
-  `===== FLUX SPEC =====\n${spec}\n===== END SPEC =====\n\n` +
+  `You are writing a backend in the Fluxon language (.fx). Below is the COMPLETE Fluxon spec — the single source of truth for syntax. Follow it EXACTLY; do not invent syntax. Pay special attention to the db read builder (db.from |> db.eq |> ... |> db.all/first/agg).\n\n` +
+  `===== FLUXON SPEC =====\n${spec}\n===== END SPEC =====\n\n` +
   `Implement this product. Output the full .fx file (code only, no markdown).\n\n` +
   `===== PRD =====\n${prd}\n===== END PRD =====\n\n` +
   `Prefer the db builder for all reads/analytics; use raw db.q ONLY for true multi-table JOINs and date() grouping. Report honestly where you had to escape to raw SQL.`,
@@ -38,15 +38,15 @@ if (!gen) return { error: 'generation failed' }
 
 phase('Run+Fix')
 
-// Agent kodini faylga yozib, flux binary bilan PARSE-tekshiruvdan o'tkazadigan
-// helper agent. flux'da serverni ishga tushirmasdan, faqat sintaksis/yuklashni
+// Agent kodini faylga yozib, fluxon binary bilan PARSE-tekshiruvdan o'tkazadigan
+// helper agent. fluxon'da serverni ishga tushirmasdan, faqat sintaksis/yuklashni
 // tekshirish uchun kodning oxiridan http.serve ni olib tashlab "check" rejimida
 // run qilamiz — bu parse + top-level eval (tbl, route reg) ni bajaradi.
 const RUNCHECK_SCHEMA = {
   type: 'object',
   required: ['ok', 'stderr_tail'],
   properties: {
-    ok: { type: 'boolean', description: 'Did the flux binary load the file without a parse/eval error?' },
+    ok: { type: 'boolean', description: 'Did the fluxon binary load the file without a parse/eval error?' },
     stderr_tail: { type: 'string', description: 'Last lines of stderr (the error, if any)' },
   },
 }
@@ -56,10 +56,10 @@ const RUNCHECK_SCHEMA = {
 // route'lari, db builder chaqiruvlari top-level'da bo'lsa) baholanadi.
 async function runCheck(code, tag) {
   return agent(
-    `Write the following Flux code to ${workDir}/candidate.fx, then create a check copy ${workDir}/check.fx that is IDENTICAL except every line starting with \`http.serve\` is removed (so it won't block). Run:\n` +
-    `  DATABASE_URL="sqlite::memory:" ${fluxBin} run ${workDir}/check.fx\n` +
-    `Use a 20s timeout. Report ok=true ONLY if it exits 0 with no Flux error on stderr. Put the last ~15 lines of stderr in stderr_tail.\n\n` +
-    `CODE:\n<<<FLUX\n${code}\nFLUX`,
+    `Write the following Fluxon code to ${workDir}/candidate.fx, then create a check copy ${workDir}/check.fx that is IDENTICAL except every line starting with \`http.serve\` is removed (so it won't block). Run:\n` +
+    `  DATABASE_URL="sqlite::memory:" ${fluxonBin} run ${workDir}/check.fx\n` +
+    `Use a 20s timeout. Report ok=true ONLY if it exits 0 with no Fluxon error on stderr. Put the last ~15 lines of stderr in stderr_tail.\n\n` +
+    `CODE:\n<<<FLUXON\n${code}\nFLUXON`,
     { label: `run:${tag}`, phase: 'Run+Fix', model: 'haiku', schema: RUNCHECK_SCHEMA },
   )
 }
@@ -80,7 +80,7 @@ if (first && !first.ok) {
     },
   }
   const fix = await agent(
-    `Your Flux code failed to run. Here is the spec (db builder section matters most), your code, and the error. Fix it. Output the full corrected .fx.\n\n` +
+    `Your Fluxon code failed to run. Here is the spec (db builder section matters most), your code, and the error. Fix it. Output the full corrected .fx.\n\n` +
     `===== SPEC =====\n${spec}\n===== END SPEC =====\n\n` +
     `===== YOUR CODE =====\n${gen.fx_code}\n===== END =====\n\n` +
     `===== ERROR (stderr) =====\n${first.stderr_tail}\n===== END =====`,

@@ -28,7 +28,7 @@
 - Treated tx as Postgres-like: ACID, serializable isolation (safest assumption)
 - Did NOT rely on database constraints (UNIQUE, NOT NULL) for correctness because spec doesn't guarantee they're enforced within tx
 
-**Risk:** If Flux's tx is actually just a session/context wrapper without real atomicity, concurrent transfers could lead to:
+**Risk:** If Fluxon's tx is actually just a session/context wrapper without real atomicity, concurrent transfers could lead to:
 - Double-spending (both transfers see balance = 1000, both subtract, final = -1000)
 - Orphaned ledger entries (debit created, tx fails, credit never created)
 
@@ -47,7 +47,7 @@ Both pass balance check, both transfer → balance = -200 (WRONG)
 - Relied on `db.tx` to serialize everything (hope it's SERIALIZABLE isolation)
 - Inside transfer, I check balance, then immediately insert ledger entries, all in ONE tx
 - Assumed this ordering is atomic: check → debit → credit → ledger update
-- Did NOT implement explicit locking because Flux spec provides no syntax for it
+- Did NOT implement explicit locking because Fluxon spec provides no syntax for it
 
 **Risk:** CRITICAL. If tx isolation is weaker than SERIALIZABLE, transfers can race. This is the #1 correctness issue.
 
@@ -249,5 +249,5 @@ risk_score = risk_score + 0.2  # now 0.3, or 0.30000000001?
 
 **Written by**: Claude Haiku 4.5  
 **Date**: 2026-06-04  
-**Files**: 9 Flux modules + 1 schema file + HTTP server  
+**Files**: 9 Fluxon modules + 1 schema file + HTTP server  
 **Correctness Level**: Production-ready IF spec guarantees hold; HIGH RISK if tx/concurrency/type conversion deviate

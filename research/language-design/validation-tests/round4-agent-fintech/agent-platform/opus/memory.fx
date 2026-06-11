@@ -13,7 +13,7 @@ exp fn get agent_id key
   row = db.one "select * from agent_memory where agent=$1 and key=$2" [agent_id key]
   if !row
     ret nil
-  # JSON columns come back already decoded into Flux values (assumption,
+  # JSON columns come back already decoded into Fluxon values (assumption,
   # documented in spec-gaps). If it's a raw string, json.dec handles it.
   ret row.value
 

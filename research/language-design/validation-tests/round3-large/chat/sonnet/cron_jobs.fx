@@ -1,4 +1,4 @@
-# cron_jobs.flux — Cron ishlar: soatlik faollik logi va boshqalar
+# cron_jobs.fluxon — Cron ishlar: soatlik faollik logi va boshqalar
 
 use db cron
 use ./realtime

@@ -1,5 +1,5 @@
 # WS battery namoyishi — minimal realtime chat (echo + xona broadcast).
-# Ishga tushirish:  flux run examples/ws_chat.fx
+# Ishga tushirish:  fluxon run examples/ws_chat.fx
 # Sinash (boshqa terminalda, websocat kerak):
 #   websocat ws://localhost:9000
 #   > {"t":"join","room":"general","name":"firdavs"}
@@ -29,7 +29,7 @@ ws.on :message \conn raw ->
   else
     ws.send conn (json.enc {t:"error" reason:"noma'lum amal: ${m.t}"})
 
-# Ulanish uzildi — Flux xona a'zoligini avtomat tozalaydi, biz faqat loglaymiz.
+# Ulanish uzildi — Fluxon xona a'zoligini avtomat tozalaydi, biz faqat loglaymiz.
 ws.on :disconnect \conn ->
   log "uzildi: ${conn.id}"
 

@@ -1,7 +1,7 @@
 # llm.fx — LLM access for the agent loop.
 #
 # We implement a MANUAL tool-calling loop with ai.json rather than
-# leaning on ai.run, because ai.run (per spec) takes a list of Flux
+# leaning on ai.run, because ai.run (per spec) takes a list of Fluxon
 # FUNCTIONS and runs the loop opaquely — it doesn't let us (a) inject
 # per-agent persistent memory, (b) log every invocation with timing,
 # (c) gate destructive/low-confidence calls behind confirmation, or

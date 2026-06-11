@@ -5,19 +5,19 @@
 #   OPENAI_API_KEY bo'lsa            -> GPT
 # Model: $AI_MODEL ?? provayder default. Override: $AI_PROVIDER (anthropic|openai).
 #
-# Ishga tushirish — `.env` qaysi katalogda bo'lsa, flux O'SHA katalogdan
+# Ishga tushirish — `.env` qaysi katalogda bo'lsa, fluxon O'SHA katalogdan
 # ishga tushganda topadi (env_lookup joriy katalogdagi `.env`ni o'qiydi).
 #   # .env loyiha root'ida bo'lsa:
-#   cd <loyiha-root> && runtime/target/release/flux run runtime/examples/ai_chat.fx
+#   cd <loyiha-root> && runtime/target/release/fluxon run runtime/examples/ai_chat.fx
 #   # yoki kalitni muhitga eksport qilib, istalgan katalogdan:
 #   export ANTHROPIC_API_KEY=sk-ant-...   # yoki OPENAI_API_KEY=sk-...
-#   flux run examples/ai_chat.fx
+#   fluxon run examples/ai_chat.fx
 #
 # Chiqish: "chiq", "exit" yoki "/q" deb yozing (yoki Ctrl+D).
 
 use ai io
 
-io.print "Flux AI chat — savolingizni yozing ('chiq' = tugatish)\n\n"
+io.print "Fluxon AI chat — savolingizni yozing ('chiq' = tugatish)\n\n"
 
 # Suhbat tarixi — har yangi xabar va javob shu yerga qo'shiladi, shunda model
 # kontekstni eslab qoladi (ai.run msgs orqali ko'p qadamli suhbat).

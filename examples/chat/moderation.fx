@@ -1,4 +1,4 @@
-# moderation.flux — AI features: auto-moderation classifier + channel summary.
+# moderation.fluxon — AI features: auto-moderation classifier + channel summary.
 # Uses the ai battery (ai.json for structured classification, ai.ask for summary).
 use ai db
 

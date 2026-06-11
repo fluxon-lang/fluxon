@@ -1,7 +1,7 @@
-# main.flux — wires the HTTP REST server, the WebSocket realtime server, and
+# main.fluxon — wires the HTTP REST server, the WebSocket realtime server, and
 # the cron jobs together. This is the entry point.
 #
-# Module aliasing note: our local files `cron.flux` and `moderation.flux` would
+# Module aliasing note: our local files `cron.fluxon` and `moderation.fluxon` would
 # otherwise be fine, but `cron` is also a battery name, so the local file is
 # imported `as jobs` per the spec's collision rule.
 use http

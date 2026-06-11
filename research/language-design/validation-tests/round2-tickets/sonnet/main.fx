@@ -1,4 +1,4 @@
-# main.flux — entry point: wire up routes and start the server
+# main.fluxon — entry point: wire up routes and start the server
 
 use http
 use ./tickets

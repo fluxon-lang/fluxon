@@ -12,14 +12,14 @@ assignees: ''
 
 ## Spec'da bormi
 
-- [ ] Ha — `docs/flux-agent.md` da spetsifikatsiyalangan (qaysi bo'lim: ...)
+- [ ] Ha — `docs/fluxon-agent.md` da spetsifikatsiyalangan (qaysi bo'lim: ...)
 - [ ] Yo'q — yangi dizayn (sintaksis taklifi pastda)
 
 > Eslatma: spec'dagi barcha batareyalar (`http`, `db`, `ai`, `auth`, `ws`,
 > `cron`, `queue`, `reg`) allaqachon implementatsiya qilingan — bu taklif
 > mavjud xulq-atvorni kengaytiradimi yoki yangimi, aniqlashtiring.
 
-## Taklif qilingan Flux sintaksisi
+## Taklif qilingan Fluxon sintaksisi
 
 ```fx
 # foydalanuvchi buni qanday yozadi

@@ -1,4 +1,4 @@
-# aifeatures.flux — AI xususiyatlari
+# aifeatures.fluxon — AI xususiyatlari
 # (a) POST /products/:id/summarize — sharhlardan marketing xulosasi.
 # (b) GET /recommend/:customer_id — buyurtma tarixidan tavsiyalar.
 # Fayl nomi "ai" emas (batareya bilan to'qnashmasin uchun) — aifeatures.

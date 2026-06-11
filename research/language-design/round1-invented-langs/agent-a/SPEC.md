@@ -1,6 +1,6 @@
-# Flux Language Spec (`.fx`)
+# Fluxon Language Spec (`.fx`)
 
-Flux is a terse, batteries-included scripting language. One way to do each thing.
+Fluxon is a terse, batteries-included scripting language. One way to do each thing.
 Read this once and you can write it.
 
 ## 1. Lexical basics

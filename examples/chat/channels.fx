@@ -1,4 +1,4 @@
-# channels.flux — channel CRUD, membership (join/leave), listing.
+# channels.fluxon — channel CRUD, membership (join/leave), listing.
 use db
 
 # Create a channel owned by created_by. Creator is auto-joined as :owner.

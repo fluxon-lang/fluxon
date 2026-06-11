@@ -1,6 +1,6 @@
-# Realtime Chat Platform in Flux
+# Realtime Chat Platform in Fluxon
 
-A complete backend for a realtime chat application, built in Flux from scratch. This is a large, realistic project that exercises the language across schema design, REST APIs, realtime communication, AI features, and scheduled tasks.
+A complete backend for a realtime chat application, built in Fluxon from scratch. This is a large, realistic project that exercises the language across schema design, REST APIs, realtime communication, AI features, and scheduled tasks.
 
 ## Architecture
 
@@ -8,14 +8,14 @@ The project is split into logical modules:
 
 ### Core Modules
 
-1. **schema.flux** — Database schema (7 tables: users, channels, memberships, messages, reactions)
-2. **users.flux** — User management (create, get, list, status, presence)
-3. **channels.flux** — Channel CRUD, membership management, member listing, role-based access
-4. **messages.flux** — Message creation with inline moderation, paginated history, reactions
-5. **ai_service.flux** — AI-powered summarization, topic extraction, spam detection
-6. **realtime.flux** — WebSocket simulation (connect/disconnect, typing, presence, broadcasting)
-7. **cron_jobs.flux** — Scheduled tasks (hourly stats, daily activity, spam detection, cleanup)
-8. **main.flux** — HTTP server orchestrating all endpoints and services
+1. **schema.fluxon** — Database schema (7 tables: users, channels, memberships, messages, reactions)
+2. **users.fluxon** — User management (create, get, list, status, presence)
+3. **channels.fluxon** — Channel CRUD, membership management, member listing, role-based access
+4. **messages.fluxon** — Message creation with inline moderation, paginated history, reactions
+5. **ai_service.fluxon** — AI-powered summarization, topic extraction, spam detection
+6. **realtime.fluxon** — WebSocket simulation (connect/disconnect, typing, presence, broadcasting)
+7. **cron_jobs.fluxon** — Scheduled tasks (hourly stats, daily activity, spam detection, cleanup)
+8. **main.fluxon** — HTTP server orchestrating all endpoints and services
 
 ### Features Implemented
 
@@ -65,7 +65,7 @@ The project is split into logical modules:
 
 #### Realtime Features
 
-Implemented using Flux's `queue` battery as a message bus:
+Implemented using Fluxon's `queue` battery as a message bus:
 
 - **User presence**: Connected user tracking per channel with timestamps
 - **Typing indicators**: Track who's typing, auto-cleanup of stale indicators
@@ -101,7 +101,7 @@ Simple header-based auth (in production, use JWT):
 
 ## Implementation Notes
 
-### What Flux Does Well
+### What Fluxon Does Well
 
 1. **Concise syntax**: No semicolons, no braces; clean indentation-based structure
 2. **Immutable by default**: `x = value` prevents accidental mutations
@@ -112,7 +112,7 @@ Simple header-based auth (in production, use JWT):
 7. **Clean error handling**: `!` operator for propagation, `??` for nil-coalesce
 8. **Symbols/enums**: `:online`, `:offline`, `:ok`, `:block` are first-class
 
-### What Flux Lacks / Spec Gaps
+### What Fluxon Lacks / Spec Gaps
 
 This is the critical section. See below.
 
@@ -132,16 +132,16 @@ This is the critical section. See below.
 ### 2. **Shared Mutable State Across Connections (CRITICAL)**
 
 **What I had to do:** Implemented in-memory data structures:
-```flux
+```fluxon
 active_connections <- {}      # channel_id -> [user_ids]
 typing_indicators <- {}        # channel_id -> {user_id: timestamp}
 presence_per_channel <- {}     # channel_id -> {user_id: timestamp}
 ```
 
-**The problem:** These are in `realtime.flux` and mutable with `<-`, but:
+**The problem:** These are in `realtime.fluxon` and mutable with `<-`, but:
 - No persistence — lost on restart
 - No clustering — won't work across multiple servers
-- Map deletion is awkward: Flux maps don't have a `delete` operator, so I rebuild maps to remove keys
+- Map deletion is awkward: Fluxon maps don't have a `delete` operator, so I rebuild maps to remove keys
 
 **What was missing:** 
 - The spec doesn't define how to share state across multiple handler invocations running concurrently
@@ -153,8 +153,8 @@ presence_per_channel <- {}     # channel_id -> {user_id: timestamp}
 
 ### 3. **Map Key Deletion (MINOR)**
 
-**The problem:** Flux maps don't support `delete map[key]`. To remove a user from presence:
-```flux
+**The problem:** Fluxon maps don't support `delete map[key]`. To remove a user from presence:
+```fluxon
 new_map <- {}
 each k, v in old_map
   if k != user_id
@@ -169,7 +169,7 @@ This is verbose and inefficient for large maps.
 ### 4. **WebSocket Event Model (CRITICAL)**
 
 **What I had to do:** Use `queue.push` to simulate broadcasts:
-```flux
+```fluxon
 fn broadcast_event channel_id event
   queue.push "broadcast" {channel_id: channel_id event: event}
 ```
@@ -202,7 +202,7 @@ fn broadcast_event channel_id event
 ### 6. **Request Header Handling**
 
 **What I did:** Read from `req.headers.user_id`:
-```flux
+```fluxon
 user_id_str = req.headers.user_id
 ```
 
@@ -241,7 +241,7 @@ user_id_str = req.headers.user_id
 ### 9. **List/Map Mutation Semantics**
 
 **Problem:** The spec says `l.push x` returns a new list. But for large lists, this is inefficient. And with mutable bindings (`<-`), the pattern is:
-```flux
+```fluxon
 list <- list.push item   # copy entire list
 ```
 
@@ -257,7 +257,7 @@ list <- list.push item   # copy entire list
 ### 10. **Pagination Cursor Handling**
 
 **What I did:**
-```flux
+```fluxon
 if before != nil
   query <- "select * from messages where channel = $1 and id < $2"
   params <- [channel_id before]
@@ -274,12 +274,12 @@ if before != nil
 ### 11. **AI Confidence and Metadata**
 
 **What the spec says:** 
-```flux
+```fluxon
 r._.conf    # confidence 0..1
 ```
 
 **What I had to do:** 
-```flux
+```fluxon
 r = ai.json "..." {... confidence: "flt" ...}
 conf = result.confidence ?? result._.conf ?? 0.5
 ```
@@ -293,7 +293,7 @@ conf = result.confidence ?? result._.conf ?? 0.5
 ### 12. **Symbols in Database**
 
 **What the spec says:** 
-```flux
+```fluxon
 tbl tickets
   status sym
 db.ins "tickets" {status::new}
@@ -303,24 +303,24 @@ match t.category -> :billing ...
 **What works:** Symbols auto-convert to/from strings in DB. ✓
 
 **What's ambiguous:** Filtering with symbols:
-```flux
+```fluxon
 db.q "select * from tickets where category = $1" [:billing]
 ```
 
-Does Flux auto-convert `:billing` to `"billing"` in the parameterized query? I assumed yes based on the docs. Should work.
+Does Fluxon auto-convert `:billing` to `"billing"` in the parameterized query? I assumed yes based on the docs. Should work.
 
 **Gap severity:** LOW — likely works.
 
 ### 13. **Time/Timestamp Handling**
 
 **What I used:**
-```flux
+```fluxon
 time.now                  # current timestamp
 time.ago 1 :hr            # 1 hour ago
 ```
 
 **The problem:** The spec doesn't say what units `time.now` returns (Unix seconds? milliseconds?). I assumed seconds. For typing indicators, I tried to use milliseconds:
-```flux
+```fluxon
 age = time.now - timestamp
 if age < 5000
 ```
@@ -334,13 +334,13 @@ This might be wrong if `time.now` is in seconds.
 ### 14. **Array Aggregation in SQL**
 
 **What I used:**
-```flux
+```fluxon
 db.q "... array_agg(u.username) as users ..."
 ```
 
-This is raw PostgreSQL, not Flux. The spec doesn't say if raw SQL is OK or if Flux should have aggregation helpers.
+This is raw PostgreSQL, not Fluxon. The spec doesn't say if raw SQL is OK or if Fluxon should have aggregation helpers.
 
-**Gap severity:** LOW — workaround is to fetch and build in Flux.
+**Gap severity:** LOW — workaround is to fetch and build in Fluxon.
 
 ### 15. **No Transactional Guarantees**
 
@@ -381,7 +381,7 @@ This is raw PostgreSQL, not Flux. The spec doesn't say if raw SQL is OK or if Fl
 ### 18. **No Middleware / Hook Pattern**
 
 **What I had to do:** Replicate auth logic in every endpoint:
-```flux
+```fluxon
 user = require_auth req
 if !user
   rep 401 {error:"Unauthorized"}
@@ -465,11 +465,11 @@ curl -X POST http://localhost:8080/channels/1/summarize \
 
 ## Lessons Learned
 
-1. **Flux is excellent for data-centric backends** — schema, queries, REST, and AI integration are smooth.
+1. **Fluxon is excellent for data-centric backends** — schema, queries, REST, and AI integration are smooth.
 2. **The realtime gap is real** — chat, notifications, and collaborative apps need WebSocket primitives.
 3. **Shared state without concurrency control is racy** — multithreaded apps need explicit synchronization.
 4. **"Batteries included" is powerful** — ai.ask/ai.json and db.* are game-changers compared to importing libraries.
 5. **Immutability by default is great** — catches accidental mutations early.
 6. **Spec ambiguities trip you up** — time units, metadata semantics, concurrency model need documentation.
 
-This implementation is ~1300 lines of Flux across 8 files and exercises the language across REST, DB, AI, realtime (simulated), and scheduling. It's a realistic project that a production team would build.
+This implementation is ~1300 lines of Fluxon across 8 files and exercises the language across REST, DB, AI, realtime (simulated), and scheduling. It's a realistic project that a production team would build.

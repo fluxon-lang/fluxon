@@ -1,34 +1,34 @@
-# Flux — Dasturlash Tili (Inson uchun to'liq qo'llanma)
+# Fluxon — Dasturlash Tili (Inson uchun to'liq qo'llanma)
 
-> 🌐 **Til:** O'zbek (joriy) · [English](flux-human.md)
+> 🌐 **Til:** O'zbek (joriy) · [English](fluxon-human.md)
 
-> **Flux nima?** Flux — AI agentlar yaxshi yozadigan, backend tizimlari uchun
+> **Fluxon nima?** Fluxon — AI agentlar yaxshi yozadigan, backend tizimlari uchun
 > mo'ljallangan dasturlash tili. Falsafasi: *"Til AI'ga moslashadi, AI tilga
 > emas."* Har bir ishni qilishning **bitta** aniq yo'li bor, sintaksis kam
 > token ishlatadi, va eng kerakli narsalar (HTTP server, ma'lumotlar bazasi,
 > AI/LLM chaqiruvi, cron, navbat) — tilning **ichida**, hech qanday paket
 > o'rnatmasdan.
 
-Flux fayllari `.fx` kengaytmasi bilan saqlanadi.
+Fluxon fayllari `.fx` kengaytmasi bilan saqlanadi.
 
-Bu hujjat — to'liq, batafsil **inson** qo'llanmasi. Agar siz AI agentga Flux'ni
-o'rgatmoqchi bo'lsangiz, qisqaroq `flux-agent.md` faylidan foydalaning.
+Bu hujjat — to'liq, batafsil **inson** qo'llanmasi. Agar siz AI agentga Fluxon'ni
+o'rgatmoqchi bo'lsangiz, qisqaroq `fluxon-agent.md` faylidan foydalaning.
 
 ---
 
 ## 0. Asosiy g'oyalar (avval shularni o'qing)
 
-Flux'ni boshqa tillardan ajratib turadigan 5 ta tamoyil:
+Fluxon'ni boshqa tillardan ajratib turadigan 5 ta tamoyil:
 
 1. **Bir ish = bir yo'l (canonical form).** Boshqa tillarda bir narsani 5 xil
-   yozish mumkin (`while`, `for`, `do-while`...). Flux'da takrorlash uchun
+   yozish mumkin (`while`, `for`, `do-while`...). Fluxon'da takrorlash uchun
    **faqat `each`** bor. Ekranga chiqarish uchun **faqat bitta** usul. Bu
    qoidaning sababi: AI har safar "qaysi usulni tanlay?" deb o'ylamaydi —
    tanlov yo'q, demak xato ham kam.
 
 2. **Kam token, lekin tushunarli.** Sintaksis imkon qadar qisqa, lekin
    *shifrli emas*. Kalit so'zlar to'liq yoziladi (`each`, `match`, `else`) —
-   chunki Flux'ni birinchi marta ko'rgan odam yoki AI ularni darhol tushunishi
+   chunki Fluxon'ni birinchi marta ko'rgan odam yoki AI ularni darhol tushunishi
    kerak.
 
 3. **Batteries included (hammasi ichida).** `http`, `db`, `ai`, `json`, `cron`,
@@ -37,7 +37,7 @@ Flux'ni boshqa tillardan ajratib turadigan 5 ta tamoyil:
    ishlatasiz.
 
 4. **AI — birinchi darajali primitiv.** Boshqa tillarda LLM chaqirish uchun
-   SDK o'rnatib, kalit sozlab, JSON parse qilasiz. Flux'da `ai.json` bitta
+   SDK o'rnatib, kalit sozlab, JSON parse qilasiz. Fluxon'da `ai.json` bitta
    qatorda matnni strukturali ma'lumotga aylantiradi va ishonch ballini
    qaytaradi.
 
@@ -51,16 +51,16 @@ Flux'ni boshqa tillardan ajratib turadigan 5 ta tamoyil:
 
 ### Izohlar (comments)
 Faqat bitta turdagi izoh bor — `#` belgisidan qator oxirigacha:
-```flux
+```fluxon
 # Bu izoh
 x = 5   # Bu ham izoh
 ```
-Flux'da `//` yoki `/* */` **yo'q**. Bitta usul — `#`.
+Fluxon'da `//` yoki `/* */` **yo'q**. Bitta usul — `#`.
 
 ### Statementlar
 Har bir statement **yangi qatorda** tugaydi. Nuqtali vergul (`;`) **kerak emas**
 va ishlatilmaydi:
-```flux
+```fluxon
 x = 5
 y = 10
 ```
@@ -68,7 +68,7 @@ y = 10
 ### Bloklar
 Blok `{}` bilan emas, **chekinish** bilan ochiladi. Har daraja — **2 bo'shliq**.
 Chekinish kamayganda blok tugaydi:
-```flux
+```fluxon
 if x > 0
   log "musbat"
   log "ikkinchi qator ham blok ichida"
@@ -79,7 +79,7 @@ log "blokdan tashqari"
 
 ## 2. Qiymatlar va tiplar
 
-Flux'da quyidagi asosiy tiplar bor:
+Fluxon'da quyidagi asosiy tiplar bor:
 
 | Yozuv | Tip | Izoh |
 |-------|-----|------|
@@ -99,7 +99,7 @@ Flux'da quyidagi asosiy tiplar bor:
 ma'lumotlar uchun. Literal sintaksisi yo'q — qiymat funksiyalardan keladi:
 `fs.readb yo'l` (faylni ikkilik o'qish), `crypto.b64db s` (base64'ni ikkilik
 ochish), `bytes.of s` (matn → UTF-8 baytlari). Asosiy amallar:
-```flux
+```fluxon
 b = fs.readb "rasm.png"     # bytes (fayl yo'q bo'lsa nil)
 bytes.len b                  # bayt soni (str.len esa BELGI sanaydi)
 bytes.str b                  # bytes → matn (UTF-8 bo'lmasa aniq xato)
@@ -112,14 +112,14 @@ matnga sizib chiqmaydi. `crypto.sha256`/`b64`/`hex` kirishlari str yoki bytes.
 
 **Ro'yxat va map'da vergul YO'Q.** Elementlar bo'shliq bilan ajraladi. Bu
 ataylab — vergullar token isrof qiladi:
-```flux
+```fluxon
 nums = [1 2 3 4]
 user = {name:"Aziza" age:30 active:true}
 ```
 
 **Matn ichida o'zgaruvchi qo'yish (interpolation).** `"${...}"` orqali ifodani
 matn ichiga joylashtirasiz:
-```flux
+```fluxon
 name = "Aziza"
 log "Salom ${name}!"              # → Salom Aziza!
 log "Jami: ${price * qty} so'm"   # ifoda ham bo'ladi
@@ -130,7 +130,7 @@ uchun `${...}` shart.
 **Ko'p qatorli matn (blok satr).** Uzun prompt, SQL yoki shablon uchun `"""`
 ishlatiladi. Kontent keyingi qatordan boshlanadi, qatorlarning umumiy
 chekinishi avtomatik kesiladi — blok kod ichida tabiiy joylashadi:
-```flux
+```fluxon
 prompt = """
   Sen yordamchi agentsan.
   Foydalanuvchi savoli: ${savol}
@@ -143,7 +143,7 @@ escape'siz erkin yoziladi (JSON/HTML parchalari uchun qulay).
 **Belgilar (symbols) — enum o'rniga.** Holatlarni ifodalash uchun matn
 o'rniga belgi ishlating. `:new`, `:confirmed` — bu `"new"` matnidan token
 arzonroq va aniqroq:
-```flux
+```fluxon
 status = :confirmed
 dir = :in
 ```
@@ -160,12 +160,12 @@ qoida ataylab: faqat ikki narsa yolg'on.
 
 ## 3. O'zgaruvchilar (bindings)
 
-Flux'da **ikki** xil bog'lash bor, va ular **boshqa ish** qiladi (shuning
+Fluxon'da **ikki** xil bog'lash bor, va ular **boshqa ish** qiladi (shuning
 uchun ikkitasi bo'lishi canonical qoidaga zid emas):
 
 ### `=` — o'zgarmas (immutable)
 Bir marta qiymat beriladi, keyin o'zgartirib bo'lmaydi:
-```flux
+```fluxon
 x = 10
 name = "Aziza"
 ```
@@ -174,7 +174,7 @@ Bu **standart** holat. Ko'pchilik qiymatlar o'zgarmaydi.
 ### `<-` — o'zgaruvchan (mutable)
 Qiymatini keyin o'zgartirish mumkin bo'lgan o'zgaruvchi. Qayta tayinlash ham
 `<-` bilan:
-```flux
+```fluxon
 total <- 0.0
 total <- total + 5.0     # qayta tayinlash
 ```
@@ -188,24 +188,24 @@ total <- total + 5.0     # qayta tayinlash
 ## 4. Operatorlar
 
 ### Arifmetik
-```flux
+```fluxon
 +   -   *   /   %        # qo'shish, ayirish, ko'paytirish, bo'lish, qoldiq
 ```
 **`+` string'larni ham birlashtiradi.** Operandlar son bo'lsa — qo'shadi,
 matn bo'lsa — ulaydi:
-```flux
+```fluxon
 1 + 2          # → 3
 "sal" + "om"   # → "salom"
 ```
 Tip o'zi farqni belgilaydi — bitta operator, ikki tabiiy ish.
 
 ### Solishtirish
-```flux
+```fluxon
 ==  !=  <  <=  >  >=
 ```
 
 ### Mantiqiy
-```flux
+```fluxon
 &    # va (and)
 |    # yoki (or)
 !    # emas (not) — qiymat oldida: !x
@@ -214,13 +214,13 @@ Tip o'zi farqni belgilaydi — bitta operator, ikki tabiiy ish.
 ### Maxsus operatorlar
 
 **`??` — null-coalesce.** Chap tomon `nil` bo'lsa, o'ng tomonni beradi:
-```flux
+```fluxon
 port = env.PORT ?? "8080"     # PORT yo'q bo'lsa, "8080"
 name = user.name ?? "mehmon"
 ```
 
 **`.` — a'zoga murojaat / indeks.** Map kaliti, ro'yxat indeksi, uzunlik:
-```flux
+```fluxon
 user.name        # map kaliti
 list.0           # ro'yxatning birinchi elementi
 list.len         # uzunlik
@@ -230,13 +230,13 @@ list.(i)         # `.` orqali hisoblangan indeks — list[i] bilan bir xil
 ```
 
 **`..` — diapazon (range).** Ikkala chet ham kiradi:
-```flux
+```fluxon
 1..5             # [1 2 3 4 5]
 ```
 
 **`|>` — quvur (pipe).** Qiymatni funksiyaga uzatadi, ichма-ich yozuvni
 yo'qotadi:
-```flux
+```fluxon
 result = data |> clean |> format
 # bu g'a teng: format(clean(data))
 ```
@@ -250,14 +250,14 @@ result = data |> clean |> format
 Funksiya `fn` bilan e'lon qilinadi. Argumentlar **bo'shliq** bilan ajraladi
 (vergul yo'q):
 
-```flux
+```fluxon
 fn add a b
   ret a + b
 ```
 
 ### Bir qatorli funksiya
 Agar tana bitta ifoda bo'lsa, `->` bilan bir qatorda yozsa bo'ladi:
-```flux
+```fluxon
 fn double x -> x * 2
 ```
 
@@ -266,7 +266,7 @@ Ikki usul, lekin ular bir xil natija beradi:
 - `ret x` — aniq qaytarish
 - **Oxirgi ifoda** — avtomat qaytariladi (`ret`siz)
 
-```flux
+```fluxon
 fn add a b
   a + b            # oxirgi ifoda — avtomat qaytadi
 
@@ -282,7 +282,7 @@ fn check x
 **`ret` lambda ichida ham ishlaydi.** Bu — HTTP handlerlarda eng muhim.
 Validatsiya uchun chuqur `if/elif/else` piramidasi o'rniga **guard-clause**
 (erta chiqish) yozing — kod tekis qoladi:
-```flux
+```fluxon
 # ❌ Chuqur nesting (yomon):       ✅ Guard-clause (yaxshi):
 http.on :post "/x" \req ->        http.on :post "/x" \req ->
   if req.body.email                 if !req.body.email
@@ -296,19 +296,19 @@ http.on :post "/x" \req ->        http.on :post "/x" \req ->
 
 ### Funksiyani chaqirish
 Argumentlar bo'shliq bilan, qavssiz:
-```flux
+```fluxon
 add 2 3            # → 5
 double 4           # → 8
 ```
 Qavs faqat **guruhlash** uchun kerak (funksiya natijasini boshqasiga uzatish):
-```flux
+```fluxon
 double (add 2 3)   # avval add 2 3 = 5, keyin double 5 = 10
 ```
 
 **Argumentsiz funksiya — bo'sh qavs `()` bilan chaqiriladi.** Qavssiz chaqirish
 argument bilan aniqlangani uchun, parametri yo'q funksiyani chaqirishning yagona
 yo'li shu. Bu nom (qiymat) bilan chaqiruvni aniq ajratadi:
-```flux
+```fluxon
 fn new_id -> rand.str 8
 new_id()           # CHAQIRUV → har safar yangi tasodifiy id
 new_id             # CHAQIRMAYDI → funksiya QIYMATI (callback/reg uchun)
@@ -318,7 +318,7 @@ new_id             # CHAQIRMAYDI → funksiya QIYMATI (callback/reg uchun)
 
 ### Lambda (anonim funksiya)
 `\` belgisi bilan, inline ishlatiladi:
-```flux
+```fluxon
 \x -> x * 2
 each_map nums \x -> x * 2    # har elementni 2 ga ko'paytirish
 ```
@@ -328,7 +328,7 @@ each_map nums \x -> x * 2    # har elementni 2 ga ko'paytirish
 ## 6. Boshqaruv oqimi (control flow)
 
 ### Shartlar: `if` / `elif` / `else`
-```flux
+```fluxon
 if x > 0
   log "musbat"
 elif x == 0
@@ -342,17 +342,17 @@ bo'lishi uchun.
 `if` **ifoda sifatida** ham ishlaydi (ternary ekvivalenti): bir qatorda qiymat
 qaytaradi. `else` majburiy. Shartdagi qavssiz chaqiruvni qavsga oling.
 
-```flux
+```fluxon
 pad = if h < 10 ("0" + str.str h) else (str.str h)   # leading-zero
 turi = if n % 2 == 0 "juft" else "toq"                # oddiy tanlov
 r    = if (str.len s) > 0 "to'la" else "bo'sh"        # chaqiruvli shart → qavs
 ```
 
 ### Takrorlash: `each` (yagona loop)
-Flux'da **faqat bitta** loop bor — `each`. U ro'yxat, diapazon yoki map
+Fluxon'da **faqat bitta** loop bor — `each`. U ro'yxat, diapazon yoki map
 ustidan yuradi. `while`, `for`, `do-while` **yo'q**:
 
-```flux
+```fluxon
 each item in list           # ro'yxat elementlari
   log item
 
@@ -367,7 +367,7 @@ Loop ichida:
 - `skip` — keyingi iteratsiyaga o'tish (boshqa tillarda `continue`)
 - `stop` — loopdan chiqish (boshqa tillarda `break`)
 
-```flux
+```fluxon
 each n in nums
   if n < 0
     skip          # manfiylarni o'tkazib yuborish
@@ -383,7 +383,7 @@ each n in nums
 ### Qiymat bo'yicha tanlash: `match`
 Bir qiymatni bir nechta variant bilan solishtirish. Asosan belgilar (symbols)
 uchun:
-```flux
+```fluxon
 match status
   :new -> log "yangi"
   :confirmed -> log "tasdiqlangan"
@@ -397,7 +397,7 @@ bir qiymatni variantlarga taqsimlash uchun. Shuning uchun ikkalasi ham bor.
 > Mantiqiy shart (`conf > 0.85` kabi) uchun **har doim `if/elif/else`**
 > ishlating. `match true` deb yozib, ostiga shartlar qo'yish — **xato**,
 > bunday qilmang:
-> ```flux
+> ```fluxon
 > # NOTO'G'RI:
 > match true
 >   conf > 0.85 -> ...
@@ -410,14 +410,14 @@ bir qiymatni variantlarga taqsimlash uchun. Shuning uchun ikkalasi ham bor.
 
 ## 7. Xatolar (error handling)
 
-Flux'da funksiya muvaffaqiyat (`ok`) yoki xato (`err`) qaytarishi mumkin. Xato
+Fluxon'da funksiya muvaffaqiyat (`ok`) yoki xato (`err`) qaytarishi mumkin. Xato
 bilan ishlashning **bitta** asosiy usuli — `!` operatori, va `nil` uchun `??`.
 
 ### `!` — xatoni avtomat yuqoriga uzatish
 Funksiya nomidan keyin `!` qo'ysangiz: agar u xato qaytarsa, xato **avtomat**
 chaqiruvchiga uzatiladi (siz qo'lda tekshirmaysiz). Agar muvaffaqiyatli bo'lsa,
 natijani oladi:
-```flux
+```fluxon
 fn process id
   user = db.one "select * from users where id=$1" [id]!
   # agar db.one xato qaytarsa, process ham shu xatoni qaytaradi —
@@ -430,7 +430,7 @@ qisqartiradi.
 ### `??` — nil bo'lsa muqobil
 Agar qiymat `nil` bo'lsa (xato emas, shunchaki bo'sh), `??` bilan muqobil
 bering:
-```flux
+```fluxon
 name = user.name ?? "mehmon"
 each it in items
   p = db.one "...narx..." [it.product]
@@ -440,7 +440,7 @@ each it in items
 
 ### `fail` — xato chiqarish
 O'z kodingizdan xato ko'tarish:
-```flux
+```fluxon
 if qty < 1
   fail "miqdor noto'g'ri"
 ```
@@ -449,7 +449,7 @@ if qty < 1
 `fail` ga status kodini bersangiz, u **avtomat** o'sha statusli javobga
 aylanadi. Bu — `try/catch` o'rnini bosadi: kutilgan xatoda chuqur nesting
 o'rniga shunchaki `fail` qiling:
-```flux
+```fluxon
 http.on :post "/transfer" \req ->
   acc = db.one "select * from accounts where id=$1" [req.body.from]
   if acc.balance < req.body.amount
@@ -469,7 +469,7 @@ http.on :post "/transfer" \req ->
 
 ### `use` — modul chaqirish
 Standart kutubxona yoki o'z faylingizni chaqirasiz. O'rnatish (`install`) yo'q:
-```flux
+```fluxon
 use http db ai json        # standart batteries — bo'shliq bilan ko'p modul
 use ./tools                # o'z faylingiz → tools.funksiya
 ```
@@ -477,9 +477,9 @@ Chaqirilgandan keyin nomlar modul ostida: `db.one`, `http.serve`,
 `tools.create_order`.
 
 **`as` — qayta nomlash (alias).** Agar o'z faylingiz batareya nomi bilan bir
-xil bo'lsa (masalan `ai.flux` fayl va `ai` batareyasi), to'qnashuv bo'ladi.
+xil bo'lsa (masalan `ai.fluxon` fayl va `ai` batareyasi), to'qnashuv bo'ladi.
 `as` bilan o'z modulingizni qayta nomlang:
-```flux
+```fluxon
 use ai                     # batareya
 use ./ai as helper         # o'z faylingiz → helper.classify (to'qnashmaydi)
 ```
@@ -488,7 +488,7 @@ yoki bersangiz `as` bilan qayta nomlang.
 
 ### `exp` — eksport qilish
 Faylingizdagi funksiya yoki qiymatni boshqa fayllar uchun ochish:
-```flux
+```fluxon
 exp fn create_order items customer
   ...
 exp price_limit = 1000
@@ -499,13 +499,13 @@ Faqat `exp` bilan belgilangan narsalar tashqaridan ko'rinadi.
 
 ## 9. Batteries — standart kutubxona
 
-Bu — Flux'ning eng kuchli qismi. Eng kerakli narsalarning **hammasi** tilning
+Bu — Fluxon'ning eng kuchli qismi. Eng kerakli narsalarning **hammasi** tilning
 ichida. Hech narsa o'rnatmaysiz — faqat `use` qilasiz va ishlatasiz.
 
 ### 9.1 `http` — server va klient
 
 **Server.** Marshrutni (route) bitta qatorda e'lon qilasiz:
-```flux
+```fluxon
 use http
 
 http.on :post "/notes" \req -> rep 201 {ok:true}
@@ -542,7 +542,7 @@ http.on :post "/upload" \req ->
 
 **Redirect (yo'naltirish).** Maxsus fe'l yo'q — `rep` bilan 302 status va
 `location` kalitini berasiz; u Location header'ga aylanadi:
-```flux
+```fluxon
 http.on :get "/:code" \req ->
   link = db.one "select * from links where code=$1" [req.params.code]
   link ?? (rep 404 {error:"topilmadi"})
@@ -554,7 +554,7 @@ http.on :get "/:code" \req ->
 tartibidan qat'i nazar. `/stats/:code` har doim `/:code` dan oldin tekshiriladi.
 
 **Klient.** Tashqi API chaqirish:
-```flux
+```fluxon
 res = http.get "https://api.example.com/data"
 res = http.post url {key:"val"}      # tana avtomat JSON
 # res.status, res.body, res.headers (map, kalit kichik harf)
@@ -563,7 +563,7 @@ loc = res.headers.location           # yoki res.headers["content-type"]
 
 Redirect (3xx) **default kuzatilmaydi** — `res.status` 30x, `res.headers.location`
 o'qiladi. Avtomat kuzatish kerak bo'lsa opsiya map qo'shing:
-```flux
+```fluxon
 res = http.get url {follow:true}         # 3xx → Location'ga ergashadi
 res = http.get url {follow:true max:5}   # hop limiti (default 10)
 # res.hops — necha marta redirect bo'lgani
@@ -573,7 +573,7 @@ res = http.get url {follow:true max:5}   # hop limiti (default 10)
 **Custom so'rov header'lari.** Autentifikatsiya talab qiladigan API'lar uchun
 (`x-api-key`, `Authorization`, `anthropic-version`...) opsiya map'iga `headers`
 qo'shing — bu javobdagi `res.headers` bilan simmetrik:
-```flux
+```fluxon
 res = http.post "https://api.anthropic.com/v1/messages" body {
   headers: {
     "x-api-key": env.ANTHROPIC_API_KEY
@@ -587,7 +587,7 @@ o'rniga o'sha ishlatiladi.
 
 **Timeout (default 30s).** Qotgan upstream so'rovni abadiy bloklamasligi uchun
 har bir klient so'rovi standart 30 soniya timeout bilan ishlaydi. Sozlash:
-```flux
+```fluxon
 res = http.get url {timeout: 5}   # 5 soniyada javob bo'lmasa xato
 res = http.get url {timeout: 0}   # timeout'siz (faqat ishonchli upstream uchun)
 ```
@@ -603,7 +603,7 @@ bo'lmasa 2s kutiladi); boshqa xatolar darhol qaytadi.
 Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi. Hech
 qanday ulanish kodi yozmaysiz.
 
-```flux
+```fluxon
 use db
 
 # So'rov — natija map'lar ro'yxati
@@ -635,7 +635,7 @@ db.put "agent_memory" {val:v} {agent:aid key:k}
 bo'lsa (masalan checkout: buyurtma + qatorlar + stok kamaytirish), `db.tx`
 blokiga o'rang. Blok ichida xato (`fail` yoki `!`) chiqsa, **hamma** o'zgarish
 **qaytariladi** (rollback) — DB hech qachon yarim holatda qolmaydi:
-```flux
+```fluxon
 db.tx \->
   ord = db.ins "orders" {cust:c.id total:total}
   each it in items
@@ -646,7 +646,7 @@ db.tx \->
 ```
 
 `db.tx` qiymat ham qaytaradi (`ret` orqali):
-```flux
+```fluxon
 ord = db.tx \->
   o = db.ins "orders" {...}
   ret o            # blok qiymati tashqariga
@@ -657,7 +657,7 @@ izolyatsiyada ishlaydi va konflikt bo'lsa **avtomat qayta uriniladi**. Bu
 shuni anglatadiki, "o'qib → tekshirib → o'zgartirish" naqshi xavfsiz. Masalan,
 bir hisobdan ikki parallel pul yechish — ikkalasi ham bir balansni ko'rib,
 ikkalasi ham o'tib ketmaydi (overdraft bo'lmaydi):
-```flux
+```fluxon
 db.tx \->
   acc = db.one "select * from accounts where id=$1" [aid]
   if acc.balance < amt
@@ -665,14 +665,14 @@ db.tx \->
   db.up "accounts" {balance:acc.balance - amt} {id:aid}   # race-xavfsiz
 ```
 > Boshqa tillarda buning uchun `SELECT FOR UPDATE`, lock, mutex yozish kerak.
-> Flux'da — kerak emas, `db.tx` o'zi kafolatlaydi. "Til AI'ga moslashadi":
+> Fluxon'da — kerak emas, `db.tx` o'zi kafolatlaydi. "Til AI'ga moslashadi":
 > AI lock haqida o'ylamaydi, shunchaki `db.tx` ichiga yozadi.
 
 **Idempotency — bir amalni ikki marta bajarmaslik.** Pul ko'chirish kabi
 joylarda mijoz so'rovni qayta yuborishi mumkin. Unikal kalit (`uniq` ustun)
 bilan himoyalang: avval mavjudini tekshiring, keyin tranzaksiya ichida kalitni
 yozing — dublikat bo'lsa `uniq` xato → tx rollback:
-```flux
+```fluxon
 old = db.one "select * from transactions where ikey=$1" [key]
 old ?? (ret old)              # allaqachon bajarilgan → eski natijani qaytar
 db.tx \->
@@ -687,13 +687,13 @@ db.tx \->
 - **Param'siz so'rov** — ro'yxat shart emas: `db.q "select * from links"`.
 - **Aggregat (count/sum)** bo'sh jadvalda `nil` qaytarishi mumkin —
   `?? 0` bilan himoyalang:
-  ```flux
+  ```fluxon
   r = db.one "select count(*) c, sum(clicks) s from links"
   log "links: ${r.c}, clicks: ${r.s ?? 0}"
   ```
 
-**Schema e'loni — `tbl`.** Jadvallarni Flux'ning o'zida e'lon qilasiz:
-```flux
+**Schema e'loni — `tbl`.** Jadvallarni Fluxon'ning o'zida e'lon qilasiz:
+```fluxon
 tbl products
   id     serial pk
   owner  int ref:users.id
@@ -718,19 +718,19 @@ bo'shliq bilan ajratiladi (vergulsiz, tejaymiz); vergul ixtiyoriy ham qabul:
 avtomatik qisqartiriladi (deterministik hash suffiks bilan), kod yiqilmaydi.
 
 **Deklarativ migration — `tbl` = yagona manba.** Siz faqat `tbl` ning oxirgi
-ko'rinishini yozasiz; Flux DB joriy holati bilan farqini hisoblab kerakli DDL'ni
+ko'rinishini yozasiz; Fluxon DB joriy holati bilan farqini hisoblab kerakli DDL'ni
 **o'zi** bajaradi:
 - yangi ustun → `ADD COLUMN`;
-- `tbl`dan olib tashlangan ustun → `DROP COLUMN` (avval jadval `_flux_bak_*` ga
+- `tbl`dan olib tashlangan ustun → `DROP COLUMN` (avval jadval `_fluxon_bak_*` ga
   backup qilinadi);
-- `tbl` butunlay olib tashlansa → `DROP TABLE` (backup bilan; **faqat Flux
+- `tbl` butunlay olib tashlansa → `DROP TABLE` (backup bilan; **faqat Fluxon
   yaratgan** jadvallar — qo'lda yaratilgan jadvalga tegilmaydi);
 - index qo'shilsa/olinsa → `CREATE/DROP INDEX`.
 
 Migration **idempotent** — bir xil `tbl` ni qayta deploy qilish xavfsiz, hech
 narsa buzilmaydi. Schema o'zgarishi uchun SQL yozish shart emas. Tip o'zgartirish
 yoki rename avtomatik EMAS — buni qo'lda `db.q "ALTER TABLE ..."` bilan qilasiz,
-Flux undan keyin sinxronlaydi.
+Fluxon undan keyin sinxronlaydi.
 
 **`json` ustun** — o'qiganda **avtomat map/list** bo'ladi (string emas,
 `json.dec` shart emas); yozganda map/list avtomat enkod qilinadi.
@@ -738,26 +738,26 @@ Flux undan keyin sinxronlaydi.
 **`money` tipi — pul uchun.** Pul HECH QACHON `flt` (float) bo'lmasligi kerak —
 float yaxlitlash xatosi pulni buzadi. `money` — butun **minor birlik** (tiyin,
 sent): `15000` = 150.00 so'm. Hamma pul-math `money`/`int` bilan (`int` 64-bit):
-```flux
+```fluxon
 tbl accounts
   id      serial pk
   balance money       # tiyinda, masalan 15000 = 150.00
 total = price * qty   # int math, float emas
 ```
 
-**`sym` tipi — enum uchun.** Bu Flux'ning chiroyli yechimi. Ustun `sym`
-bo'lsa: DB'da **matn** saqlanadi, lekin Flux uni o'qiganda avtomat **symbol**
+**`sym` tipi — enum uchun.** Bu Fluxon'ning chiroyli yechimi. Ustun `sym`
+bo'lsa: DB'da **matn** saqlanadi, lekin Fluxon uni o'qiganda avtomat **symbol**
 qaytaradi. Yozish va filtrlashda symbol avtomat matnga aylanadi. Shunda `match`
 to'g'ridan-to'g'ri ishlaydi:
-```flux
+```fluxon
 tbl tickets
-  category sym         # DB: matn ("billing"), Flux: symbol (:billing)
+  category sym         # DB: matn ("billing"), Fluxon: symbol (:billing)
   status   sym
 
 # Yozish: symbol berasiz, DB matn saqlaydi
 db.ins "tickets" {category::billing status::new}
 
-# O'qish: schema sym desa, Flux symbol qaytaradi
+# O'qish: schema sym desa, Fluxon symbol qaytaradi
 t = db.one "select * from tickets where id=$1" [id]
 match t.category       # t.category — symbol, shuning uchun match ishlaydi
   :billing -> log "to'lov masalasi"
@@ -767,11 +767,11 @@ match t.category       # t.category — symbol, shuning uchun match ishlaydi
 # Filtrlash: symbol uzatiladi, avtomat matnga aylanadi
 db.q "select * from tickets where category=$1" [:billing]
 ```
-**Bitta qoida:** `sym` ustun — DB'da matn, Flux'da symbol, aylanish avtomat.
+**Bitta qoida:** `sym` ustun — DB'da matn, Fluxon'da symbol, aylanish avtomat.
 
 ### 9.3 `ai` — LLM (birinchi darajali primitiv)
 
-Bu Flux'ni boshqa tillardan ajratib turadigan eng katta narsa. LLM — kalit
+Bu Fluxon'ni boshqa tillardan ajratib turadigan eng katta narsa. LLM — kalit
 so'z, SDK emas. **Provayder avtomatik aniqlanadi** (OS env yoki `.env`) — hech
 narsa sozlash shart emas:
 
@@ -783,7 +783,7 @@ narsa sozlash shart emas:
 Bu `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` kabi keng tarqalgan standart nomlarga
 moslashadi — boshqa toollar bilan bir xil `.env` ishlaydi.
 
-```flux
+```fluxon
 use ai
 
 # Oddiy savol-javob → matn
@@ -801,7 +801,7 @@ r = ai.json "Buyurtmani ajrat: ${text}" schema
 
 **Audit metadata — avtomat.** Har bir `ai.*` natijasi `_` ostida metadata
 olib keladi:
-```flux
+```fluxon
 r = ai.json prompt schema
 log r._.conf        # ishonch balli (0..1)
 log r._.tokens      # ishlatilgan token
@@ -809,7 +809,7 @@ log r._.cost        # narx
 log r._.ms          # kechikish (millisekund)
 ```
 Bu ishonch-asosli yo'naltirish (confidence routing) uchun asosiy:
-```flux
+```fluxon
 if r._.conf > 0.85
   auto_javob r          # yuqori ishonch → avtomat
 elif r._.conf >= 0.6
@@ -826,7 +826,7 @@ else
 `ai.run` uni **o'zi bajarmaydi** — sizga *nima qilmoqchiligini* qaytaradi.
 Siz tool'ni bajarib (logging, narx, tasdiq bilan), natijani qaytarib berasiz.
 Loop **qo'lda** — bu sizga to'liq nazorat beradi:
-```flux
+```fluxon
 msgs <- [{role::user content:text}]
 each i in 1..10                          # maksimum 10 qadam
   r = ai.run msgs tools                  # tools: [{name desc params}] ro'yxati
@@ -852,7 +852,7 @@ Funksiyani **string nomi bilan** saqlash va chaqirish. Agent tool'lari uchun
 zarur: AI sizga tool **nomini** (matn) beradi, siz uni funksiyaga aylantirib
 chaqirishingiz kerak.
 
-```flux
+```fluxon
 reg.add "calc" \args -> args.a + args.b          # nom → funksiya
 reg.add "search" \args -> http.get "/s?q=${args.q}"
 
@@ -872,7 +872,7 @@ reg.names                                         # barcha nomlar ro'yxati
 Bularning hammasi **yadro** — `use` qilmasdan ishlaydi (xuddi `log` kabi).
 
 **`list` — ro'yxat metodlari** (qiymat ustida, `.metod`):
-```flux
+```fluxon
 l.len                  # uzunlik
 l.push x               # element qo'shadi → yangi ro'yxat
 l.filter \x -> x > 0   # shartga mosini qoldiradi → yangi ro'yxat
@@ -897,7 +897,7 @@ l.all \x -> x > 0      # hammasi mosmi → bool (birinchi nomosda to'xtaydi)
 > **Muhim:** ro'yxat qurish uchun `l.push x` ishlating, `l + [x]` **emas**.
 > Filtrlash uchun qo'lda `each` loop o'rniga `l.filter`, matn qurish uchun
 > qo'lda akkumulyator o'rniga `l.join`:
-> ```flux
+> ```fluxon
 > # Qo'lda (uzun):              Metod bilan (toza):
 > result <- []                  result = items.filter \t -> t.active
 > each t in items
@@ -910,7 +910,7 @@ l.all \x -> x > 0      # hammasi mosmi → bool (birinchi nomosda to'xtaydi)
 > ```
 
 **`map` — kalit-qiymat metodlari** (qiymat ustida, `.metod`):
-```flux
+```fluxon
 m.set k v              # kalit qo'yadi/yangilaydi → yangi map
 m.del k                # kalitni o'chiradi → yangi map
 m.merge other          # ikki map'ni birlashtiradi (other ustun) → yangi map
@@ -925,7 +925,7 @@ m.key   m[k]           # o'qish (m[k] — dinamik, o'zgaruvchi kalit)
 > boshqariladi.
 
 **`str` — matn funksiyalari:**
-```flux
+```fluxon
 str.len s              # uzunlik (son)
 str.slice s 0 3        # 0..3 oralig'i (3 kirmaydi): "salom" → "sal"
 str.up s               # KATTA HARF
@@ -948,7 +948,7 @@ str.repeat "ab" 3      # takrorlash → "ababab"
 > kerak. Ikkalasi bir xil `.len` bo'lsa chalkashardi.
 
 **`math` — matematika:**
-```flux
+```fluxon
 math.floor 3.7         # → 3
 math.ceil 3.2          # → 4
 math.abs -5            # → 5
@@ -959,7 +959,7 @@ math.sqrt 9            # → 3.0 (doim flt; manfiy kirish — xato)
 ```
 
 **`rand` — tasodifiy:**
-```flux
+```fluxon
 rand.int 1 100         # 1..100 oralig'ida tasodifiy butun son
 rand.str 6             # 6 ta belgili tasodifiy satr (qisqa kod uchun)
 ```
@@ -971,7 +971,7 @@ qilinadi. Session-ID, token va boshqa sirlar uchun kamida `rand.str 24`
 ishlating (~140+ bit).
 
 **`time` — vaqt va sana:**
-```flux
+```fluxon
 time.now               # hozirgi vaqt (timestamp)
 time.ago 24 :hr        # 24 birlik oldingi vaqt. Birlik: :sec :min :hr :day
 time.in  60 :min       # 60 birlik keyingi vaqt (TTL/expiry). Birlik bir xil
@@ -987,12 +987,12 @@ time.diff a b          # (a - b) farq sekundda (int); / 60 -> daqiqa
 > `start_at` dan `end_at = time.add start_at 30 :min` ni hisoblaydi.
 > DB so'rovida raw `now() - interval '24 hours'` yozish o'rniga `time.ago`
 > ishlating — toza va xavfsiz:
-> ```flux
+> ```fluxon
 > r = db.one "select count(*) c from tickets where created > $1" [time.ago 24 :hr]
 > ```
 
 **Davomiylik va interval retseptlari** (interval arifmetikasi BOR — `time.add`/`diff` mavjud):
-```flux
+```fluxon
 end_at = time.add start_at dur :min            # davomiylik: start + dur daqiqa
 mins   = (time.diff end_at start_at) / 60       # ikki vaqt orasi -> daqiqa
 overlap = a.start < b.end & a.end > b.start     # ikki interval kesishadimi (bool)
@@ -1003,7 +1003,7 @@ buf_start = time.sub start_at 15 :min           # buffer: boshidan 15 daqiqa old
 sifatida zonani oladi. Wall-clock ↔ UTC konversiya DST-aware (fiksrlangan offset
 EMAS), shuning uchun "har kuni 09:00 local" yoz/qish o'tishida ham to'g'ri UTC
 instant'ga tushadi:
-```flux
+```fluxon
 utc = time.parse "2026-07-15 09:00:00" "Asia/Tashkent"   # local wall-clock -> UTC
 loc = time.fmt utc "HH:mm" "America/New_York"             # UTC instant -> zona wall-clock
 ```
@@ -1011,14 +1011,14 @@ loc = time.fmt utc "HH:mm" "America/New_York"             # UTC instant -> zona 
 > mavjud emas — xato beradi; noma'lum zona nomi ham xato beradi.
 
 ### 9.6 `json`
-```flux
+```fluxon
 use json
 s = json.enc value     # qiymat → JSON matn
 v = json.dec str       # JSON matn → qiymat
 ```
 
 ### 9.7 `env` — muhit o'zgaruvchilari
-```flux
+```fluxon
 port = env.PORT ?? "8080"      # to'g'ridan-to'g'ri env.NOM
 key = env.AI_KEY
 ```
@@ -1027,7 +1027,7 @@ key = env.AI_KEY
 Standart **Unix 5-maydonli** cron ifoda: `daqiqa soat kun oy hafta-kuni`. Har
 AI agent shu formatni biladi (crontab, GitHub Actions, ...). `cron.on` ifodani
 **tirnoqsiz** o'qiydi — `*` bu yerda ko'paytirish emas, cron belgisi:
-```flux
+```fluxon
 use cron
 cron.on 0 * * * * check_prices    # har soat boshida (daqiqa=0)
 cron.on 30 9 * * * daily_check    # har kun 09:30
@@ -1044,7 +1044,7 @@ fonda ishga tushadi. Server (`http.serve`/`ws.serve`) processni tirik ushlaydi,
 cron fonda o'z vaqtida ishlaydi. Tartib: `cron.on` lar `http.serve` dan **oldin**.
 
 Faqat-cron skript (server yo'q) uchun — `cron.run` processni o'z qo'liga oladi:
-```flux
+```fluxon
 cron.on 0 9 * * * daily_check
 cron.run                          # bloklaydi: dastur tugamaydi, cron ishlayveradi
 ```
@@ -1054,7 +1054,7 @@ cron.run                          # bloklaydi: dastur tugamaydi, cron ishlayvera
 
 ### 9.9 `queue` — fon navbati
 Webhook tez javob berishi uchun og'ir ishni fonga uzatasiz:
-```flux
+```fluxon
 use queue
 
 queue.on "send" \job -> tools.send job.ph job.body   # ishlovchi (handler)
@@ -1078,7 +1078,7 @@ queue.push "send" {ph:phone body:text}               # navbatga qo'shish
 Real-time ilovalar (chat, jonli yangilanish) uchun. `http` so'rov-javob bo'lsa,
 `ws` doimiy ikki tomonlama ulanish.
 
-```flux
+```fluxon
 use ws
 
 ws.on :connect \conn ->         # yangi ulanish. conn.id — barqaror unikal id
@@ -1098,12 +1098,12 @@ ws.serve 9000
   `:message` handler `\conn msg ->` (msg — kelgan **matn**), qolganlari `\conn ->`.
 - `ws.send conn matn` — SHU ulanishga yuboradi (matn; JSON kerak bo'lsa `json.enc`).
 - `ws.data.set conn :kalit qiymat` / `ws.data.get conn :kalit` — SHU ulanish
-  uchun sessiya holati (Flux ulanish uzilguncha saqlaydi, uzilganda tozalaydi).
+  uchun sessiya holati (Fluxon ulanish uzilguncha saqlaydi, uzilganda tozalaydi).
 - `ws.serve port` — serverni ishga tushiradi (bloklovchi).
 
-**Xona (room) — broadcast uchun.** Bir guruhga bir vaqtda yuborish. Flux
+**Xona (room) — broadcast uchun.** Bir guruhga bir vaqtda yuborish. Fluxon
 xonalarni o'zi boshqaradi — siz qo'lda "kim qaysi xonada" map'ini yuritmaysiz:
-```flux
+```fluxon
 ws.room.join conn "ch:5"                          # ulanishni xonaga qo'shish
 ws.room.leave conn "ch:5"                         # xonadan chiqarish
 ws.room.send "ch:5" (json.enc {t:"msg" body:b})   # xonadagi HAMMAGA yuborish
@@ -1115,7 +1115,7 @@ ws.room.members "ch:5"                            # xonadagilar (presence uchun)
 > map kerak emas.
 
 ### 9.11 `log` — stderr'ga chiqarish
-```flux
+```fluxon
 log "xabar"          # diagnostika uchun stderr'ga
 ```
 
@@ -1123,7 +1123,7 @@ log "xabar"          # diagnostika uchun stderr'ga
 
 ## 10. To'liq kichik dastur (hammasi birga)
 
-```flux
+```fluxon
 use http db ai json
 
 tbl notes

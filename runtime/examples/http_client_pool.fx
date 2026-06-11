@@ -6,7 +6,7 @@
 # Ketma-ket sinov:
 #   cargo run -- run examples/http_client_pool.fx
 #
-# Parallel sinov (shu sodda Flux klient API bir nechta parallel chaqiruvda ham
+# Parallel sinov (shu sodda Fluxon klient API bir nechta parallel chaqiruvda ham
 # o'zgarmaydi; har jarayon ichida http.get global Hyper client poolini ishlatadi):
 #   for i in 1 2 3 4; do cargo run --quiet -- run examples/http_client_pool.fx & done; wait
 

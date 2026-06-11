@@ -1,4 +1,4 @@
-// Flux interpreter — AST'ni to'g'ridan-to'g'ri bajaruvchi (tree-walking).
+// Fluxon interpreter — AST'ni to'g'ridan-to'g'ri bajaruvchi (tree-walking).
 //
 // Boshqaruv oqimi (ret/skip/stop/fail) Rust `Result`'ining `Err` tarmog'i
 // orqali tarqatiladi: oddiy qiymatlar `Ok`, oqim-uzilishlari esa `Flow`.
@@ -171,14 +171,14 @@ impl Flow {
 pub type EvalResult = Result<Value, Flow>;
 type ExecResult = Result<Value, Flow>; // blok oxirgi ifoda qiymatini qaytaradi
 
-// Flux-darajadagi fn chaqiriqlar uchun maksimal chuqurlik. Native stack
+// Fluxon-darajadagi fn chaqiriqlar uchun maksimal chuqurlik. Native stack
 // `stacker::maybe_grow` bilan segmentlab o'sadi, shuning uchun haqiqiy chegara
 // shu hisoblagich: limitga yetganda abort emas, graceful Flow::err. 1000 —
 // Python'ning default rekursiya limiti bilan bir xil tartibda; real backend
 // kodi bundan chuqur rekursiya qilmaydi, cheksiz rekursiya esa tez ushlanadi.
 const MAX_CALL_DEPTH: usize = 1000;
 
-// stacker parametrlari: red zone — bir Flux chaqirig'i ichida (keyingi
+// stacker parametrlari: red zone — bir Fluxon chaqirig'i ichida (keyingi
 // tekshiruvgacha) ishlatilishi mumkin bo'lgan native stack'dan kattaroq bo'lishi
 // shart (debug build'da ~15KB/daraja o'lchangan). Segment hajmi — har ajratish
 // ~130 darajani sig'diradi, 1000 daraja uchun bir nechta segment yetadi.
@@ -186,7 +186,7 @@ const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROW_SIZE: usize = 2 * 1024 * 1024;
 
 thread_local! {
-    // Joriy thread'dagi Flux chaqiriq chuqurligi. Thread-local: har HTTP request
+    // Joriy thread'dagi Fluxon chaqiriq chuqurligi. Thread-local: har HTTP request
     // o'z spawn_blocking thread'ida — bir request'ning rekursiyasi boshqasini
     // sanamaydi. Interp'ga maydon qo'shib bo'lmaydi (&self, Sync — Cell mumkin emas).
     static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -249,7 +249,7 @@ pub struct Interp {
     // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
     pub schema: Arc<RwLock<HashMap<String, TableMeta>>>,
     // DB sxemasidan introspeksiya qilingan ustun tiplari cache'i (jadval -> ustun
-    // -> flux-tip). `tbl` e'lon QILINMAGAN process (masalan ikki-process setup'da
+    // -> fluxon-tip). `tbl` e'lon QILINMAGAN process (masalan ikki-process setup'da
     // o'qigich) `schema` bo'sh bo'lganda json ustunni shu cache orqali tiklaydi —
     // shunda json process chegarasidan qat'i nazar bir xil map qaytaradi (issue #63).
     pub(crate) db_schema: RwLock<HashMap<String, BTreeMap<String, String>>>,
@@ -379,20 +379,20 @@ impl Interp {
     //   - yangi ustun  -> ADD COLUMN          (idempotent: bor bo'lsa jim pass)
     //   - olib tashlangan ustun -> BACKUP + DROP COLUMN  (yo'q bo'lsa jim pass)
     //   - index e'loni -> CREATE/DROP INDEX IF [NOT] EXISTS
-    //   - olib tashlangan jadval -> BACKUP + DROP TABLE   (faqat Flux yaratganlar)
+    //   - olib tashlangan jadval -> BACKUP + DROP TABLE   (faqat Fluxon yaratganlar)
     //
     // KRITIK: idempotent va user manual SQL bilan birga ishlaganda yiqilmaydi —
     // "kerakli holatga keltir, allaqachon shunday bo'lsa tinch o't". DROP'lardan
-    // oldin jadval DB ichida `_flux_bak_*` ga nusxalanadi (agent xatosiga himoya).
+    // oldin jadval DB ichida `_fluxon_bak_*` ga nusxalanadi (agent xatosiga himoya).
     fn migrate(&self, db: &dyn crate::db_mod::Db) -> Result<(), Flow> {
         use crate::db_mod::{
             ColDef, SqlVal, build_add_column, build_backup, build_create_index, build_drop_column,
             build_drop_index, coldef_foreign_key, index_name,
         };
 
-        // 0. Flux boshqaradigan jadvallar reyestri (xavfsiz DROP uchun).
+        // 0. Fluxon boshqaradigan jadvallar reyestri (xavfsiz DROP uchun).
         db.exec(
-            "CREATE TABLE IF NOT EXISTS _flux_schema (table_name TEXT PRIMARY KEY)",
+            "CREATE TABLE IF NOT EXISTS _fluxon_schema (table_name TEXT PRIMARY KEY)",
             &[],
         )
         .map_err(Flow::err)?;
@@ -422,7 +422,7 @@ impl Interp {
             db.exec(&db.build_create_table(table, &coldefs), &[])
                 .map_err(Flow::err)?;
             db.exec(
-                "INSERT OR IGNORE INTO _flux_schema(table_name) VALUES (?1)",
+                "INSERT OR IGNORE INTO _fluxon_schema(table_name) VALUES (?1)",
                 &[SqlVal::Text(table.clone())],
             )
             .map_err(Flow::err)?;
@@ -446,10 +446,10 @@ impl Interp {
             //    ustun olib tashlansa, eski `idx_<tbl>_<col>` hali DB'da turadi va
             //    ba'zi SQLite holatlarida `DROP COLUMN` "error in index ... after
             //    drop column: no such column" bilan rad etiladi -> deploy migrate
-            //    qila olmaydi. Shu sabab avval kerak BO'LMAGAN Flux index'larini
+            //    qila olmaydi. Shu sabab avval kerak BO'LMAGAN Fluxon index'larini
             //    tashlaymiz, keyin ustunni xavfsiz drop qilamiz.
             let want_names: HashSet<String> = meta.indexes.iter().map(index_name).collect();
-            for info in db.flux_indexes(table).map_err(Flow::err)? {
+            for info in db.fluxon_indexes(table).map_err(Flow::err)? {
                 if !want_names.contains(&info.name) {
                     db.exec(&build_drop_index(&info.name), &[])
                         .map_err(Flow::err)?;
@@ -510,7 +510,7 @@ impl Interp {
             }
         }
 
-        // 6. DROP TABLE: `_flux_schema` da bor, registry'da yo'q (source'dan
+        // 6. DROP TABLE: `_fluxon_schema` da bor, registry'da yo'q (source'dan
         //    tbl olib tashlangan). BACKUP -> DROP -> reyestrdan o'chir.
         //
         // MUHIM: registry BUTUNLAY bo'sh bo'lsa (hech qanday `tbl` e'lon
@@ -520,7 +520,7 @@ impl Interp {
         if schema.is_empty() {
             return Ok(());
         }
-        for table in db.flux_tables().map_err(Flow::err)? {
+        for table in db.fluxon_tables().map_err(Flow::err)? {
             if !schema.contains_key(&table) {
                 db.exec(&build_backup(&table, ts), &[]).map_err(Flow::err)?;
                 db.exec(
@@ -529,7 +529,7 @@ impl Interp {
                 )
                 .map_err(Flow::err)?;
                 db.exec(
-                    "DELETE FROM _flux_schema WHERE table_name = ?1",
+                    "DELETE FROM _fluxon_schema WHERE table_name = ?1",
                     &[SqlVal::Text(table)],
                 )
                 .map_err(Flow::err)?;
@@ -804,7 +804,7 @@ impl Interp {
         Ok(())
     }
 
-    // Blokni ketma-ket bajaradi; qiymati — oxirgi ifoda (Flux'da blok ifoda).
+    // Blokni ketma-ket bajaradi; qiymati — oxirgi ifoda (Fluxon'da blok ifoda).
     fn exec_block(&self, stmts: &[Stmt], env: &Env) -> ExecResult {
         let mut last = Value::Nil;
         for s in stmts {
@@ -1956,7 +1956,7 @@ fn to_f64(v: &Value) -> f64 {
 fn int_arith(op: BinOp, a: i64, b: i64) -> EvalResult {
     use Value::*;
     // checked_*: overflow'da debug panic / release jim wrap o'rniga ikkala
-    // rejimda bir xil Flux xatosi. i64::MIN / -1 (va % -1) Rust'da release'da
+    // rejimda bir xil Fluxon xatosi. i64::MIN / -1 (va % -1) Rust'da release'da
     // ham panic berardi — checked_div/checked_rem uni ham ushlaydi.
     Ok(match op {
         BinOp::Add => Int(a.checked_add(b).ok_or_else(|| Flow::overflow("+"))?),

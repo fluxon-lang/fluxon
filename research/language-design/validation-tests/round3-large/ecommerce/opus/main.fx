@@ -1,4 +1,4 @@
-# main.flux — kirish nuqtasi
+# main.fluxon — kirish nuqtasi
 # Barcha modullarni ulaydi va serverni 8080 portda ishga tushiradi.
 # Har bir modul yuklanganda o'zining http.on yo'nalishlarini ro'yxatdan o'tkazadi.
 use http

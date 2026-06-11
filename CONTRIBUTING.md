@@ -1,6 +1,6 @@
-# Flux loyihasiga hissa qo'shish
+# Fluxon loyihasiga hissa qo'shish
 
-Rahmat! Flux ochiq manba va hissa qo'shuvchilarni kutamiz. Bu hujjat boshlash
+Rahmat! Fluxon ochiq manba va hissa qo'shuvchilarni kutamiz. Bu hujjat boshlash
 uchun kerak bo'lgan hamma narsani beradi.
 
 > AI agent (Claude Code va h.k.) bilan ishlasangiz — qoidalar va navigatsiya
@@ -30,7 +30,7 @@ tavsiflari va hujjatlar o'zbekcha bo'lsin. Texnik atamalar va kod nomlari
 
 ```sh
 git clone <repo-url>
-cd flux-lang/runtime          # MUHIM: hamma cargo buyrug'i shu yerda
+cd fluxon-lang/runtime          # MUHIM: hamma cargo buyrug'i shu yerda
 
 cargo build                   # qurish
 cargo test                    # testlar (hozir 197 ta)
@@ -40,11 +40,11 @@ cargo run -- run examples/demo.fx   # bir .fx faylni ishga tushirish
 Repo tuzilishi:
 
 ```
-flux-lang/
+fluxon-lang/
 ├── runtime/          interpretator (Rust) — ASOSIY ISH SHU YERDA
 │   ├── src/          manba kod
 │   └── examples/     .fx misollari
-├── docs/             til spetsifikatsiyasi (flux-agent.md, flux-human.md)
+├── docs/             til spetsifikatsiyasi (fluxon-agent.md, fluxon-human.md)
 ├── examples/         real loyiha misollari (chat, ecommerce, support-tickets)
 └── research/         til qanday dizayn qilingani
 ```
@@ -91,7 +91,7 @@ Ikki xil test (batafsil → [`ARCHITECTURE.md`](ARCHITECTURE.md) §6):
 - **Rust testlari** — modul ichida `#[cfg(test)] mod ...`, yoki `.fx` kodini run
   qilib natijani tekshiruvchi integratsiya testi `main.rs::mod tests` da
   (`run(src)` yordamchisi).
-- **`.fx` e2e testlari** — `runtime/tests-fx/` (Flux'ning o'zida yozilgan,
+- **`.fx` e2e testlari** — `runtime/tests-fx/` (Fluxon'ning o'zida yozilgan,
   `run_all.sh` bilan ishga tushadi). Yangi battery qo'shsangiz shu uslubda.
 
 DB testlari global `DB_TEST_LOCK` mutex bilan serializatsiya qilinadi —

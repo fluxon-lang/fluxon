@@ -40,7 +40,7 @@ http.on :get "/echo-headers" \req ->
 # custom javob header'lari (issue #16): 3-argument headers map.
 # `_` → `-` (content_type → Content-Type), nom case-insensitive.
 http.on :get "/html" \req ->
-  rep 200 "<h1>Salom</h1>" {content_type:"text/html" x_powered_by:"flux"}
+  rep 200 "<h1>Salom</h1>" {content_type:"text/html" x_powered_by:"fluxon"}
 
 # takror Set-Cookie: list qiymat → har element alohida sarlavha qatori.
 http.on :get "/cookies" \req ->

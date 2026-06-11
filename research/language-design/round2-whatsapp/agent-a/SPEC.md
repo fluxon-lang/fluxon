@@ -1,6 +1,6 @@
-# Flux — Language Spec
+# Fluxon — Language Spec
 
-Flux is a terse server language for AI-native backends. One way to do one thing.
+Fluxon is a terse server language for AI-native backends. One way to do one thing.
 Indentation = blocks (2 spaces). No semicolons, no braces. Newline ends a statement.
 
 ## Comments
@@ -94,7 +94,7 @@ db.one "..." [..]                          # → one map or nil
 db.ins "table" {col:val ..}                # insert, → inserted row
 db.up "table" {col:val} {id:x}             # update set / where
 ```
-Schema defined in `.flux` via `tbl`:
+Schema defined in `.fluxon` via `tbl`:
 ```
 tbl users
   id   serial pk

@@ -3,9 +3,9 @@
 // dead-code ogohlantirishlarini bu modulda o'chiramiz.
 #![allow(dead_code)]
 
-// Flux AST — parser quradigan daraxt.
+// Fluxon AST — parser quradigan daraxt.
 //
-// Flux'da statement va expression farqi yumshoq: ko'p narsa expression
+// Fluxon'da statement va expression farqi yumshoq: ko'p narsa expression
 // (if/match qiymat qaytaradi), lekin ba'zilari faqat statement (bind, fn e'lon,
 // each). Shuning uchun ikkala tushunchani ham saqlaymiz.
 

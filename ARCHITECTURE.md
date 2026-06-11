@@ -1,17 +1,17 @@
-# Flux runtime — arxitektura
+# Fluxon runtime — arxitektura
 
 Bu hujjat `runtime/` ichidagi interpretator qanday qurilganini tushuntiradi.
 Contributor (odam yoki AI) yangi imkoniyat qo'shishdan oldin shu yerni o'qisin.
 
-> Tilning **o'zi** qanday ishlashi (sintaksis/semantika): `docs/flux-agent.md`
-> (ixcham) yoki `docs/flux-human.uz.md` (batafsil). Bu hujjat — **implementatsiya**
+> Tilning **o'zi** qanday ishlashi (sintaksis/semantika): `docs/fluxon-agent.md`
+> (ixcham) yoki `docs/fluxon-human.uz.md` (batafsil). Bu hujjat — **implementatsiya**
 > haqida.
 
 ---
 
 ## 1. Umumiy ko'rinish
 
-Flux **tree-walking interpreter** — AST'ni to'g'ridan-to'g'ri yuradi (bytecode/VM
+Fluxon **tree-walking interpreter** — AST'ni to'g'ridan-to'g'ri yuradi (bytecode/VM
 yo'q). Rust edition 2024 da yozilgan. Pipeline:
 
 ```
@@ -28,13 +28,13 @@ manba (.fx)
 Batareyalar (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) alohida
 modullarda (`*_mod.rs`) va `interp.rs` dagi dispatch nuqtasidan ulanadi.
 
-CLI kirish: `runtime/src/main.rs` → `flux run fayl.fx`.
+CLI kirish: `runtime/src/main.rs` → `fluxon run fayl.fx`.
 
 ---
 
 ## 2. Frontend (lexer / parser)
 
-Flux grammatikasi ixcham bo'lgani uchun ikki nozik joy bor — yangi sintaksis
+Fluxon grammatikasi ixcham bo'lgani uchun ikki nozik joy bor — yangi sintaksis
 qo'shsangiz bularni esda tuting:
 
 ### 2.1 INDENT/DEDENT (lexer.rs)
@@ -128,7 +128,7 @@ bo'lsa argument'siz `call_module(id, name, vec![])` chaqiriladi.
 ### 4.1 `http` (http_mod.rs)
 
 - Server: tokio + hyper 1.x. Har request **`spawn_blocking`** ichida bajariladi
-  → Flux'ning sinxron interpretatori tokio worker'larini bloklamaydi, real
+  → Fluxon'ning sinxron interpretatori tokio worker'larini bloklamaydi, real
   parallel ishlaydi (`Value: Send+Sync` shuni ta'minlaydi).
 - `http.on :method "/path/:id" \req -> ...` — Route/Seg, `match_route`.
 - `rep status body` — `{__resp:true status body}` map (builtins).
@@ -146,7 +146,7 @@ bo'lsa argument'siz `call_module(id, name, vec![])` chaqiriladi.
 
 ### 4.2 `db` (db_mod.rs)
 
-- **`Db` trait orqasiga yashiringan.** Flux kodi (`db.*`) hech qachon
+- **`Db` trait orqasiga yashiringan.** Fluxon kodi (`db.*`) hech qachon
   o'zgarmaydi; backend `$DATABASE_URL` sxemasidan tanlanadi (`sqlite:`/`postgres:`
   /`mysql:`). Default **SQLite** (`rusqlite` bundled — server kerak emas).
 - `postgres`/`mysql` hozir `Err` stub — keyin `open_from_env` da **additiv**
@@ -164,7 +164,7 @@ bo'lsa argument'siz `call_module(id, name, vec![])` chaqiriladi.
 Eng ko'p takrorlanadigan contributor ishi. `http_mod.rs`/`db_mod.rs` naqshini
 takrorlang:
 
-1. **Spec'ni o'qing.** `docs/flux-agent.md` da battery sintaksisi belgilangan —
+1. **Spec'ni o'qing.** `docs/fluxon-agent.md` da battery sintaksisi belgilangan —
    bu **manba haqiqat**. O'zingizdan sintaksis o'ylab topmang.
 2. **Yangi modul fayli** yarating: `runtime/src/<nom>_mod.rs`. Ichida:
    `impl Interp { fn <nom>_dispatch(&self, func: &str, args: Vec<Value>) -> ... }`
@@ -181,7 +181,7 @@ takrorlang:
    IO/server bo'lsa, real ishga tushirib tekshiring.
 7. **`Value: Send + Sync` ni buzmang.** Yangi qiymat turi kiritsangiz Send+Sync.
 
-> Eslatma: dependency "yo'q" qoidasi faqat **Flux tili foydalanuvchisiga**
+> Eslatma: dependency "yo'q" qoidasi faqat **Fluxon tili foydalanuvchisiga**
 > taalluqli (ular `npm install` qilmaydi). Runtime ICHIDA Rust crate'lar OK.
 
 ---
@@ -193,7 +193,7 @@ Ikki qatlam:
 - **Rust unit/integratsiya testlari** (`cargo test`) — modul ichidagi
   `#[cfg(test)]` + `main.rs::mod tests` (`.fx` kodini run qilib natija tekshirish,
   `run(src)` yordamchisi). DB testlari `DB_TEST_LOCK` bilan serializatsiya.
-- **`.fx` e2e testlari** (`runtime/tests-fx/`) — Flux'ning **o'zida** yozilgan,
+- **`.fx` e2e testlari** (`runtime/tests-fx/`) — Fluxon'ning **o'zida** yozilgan,
   foydalanuvchi nuqtai-nazaridan tasdiqlovchi testlar. `run_all.sh` bilan ishga
   tushadi. Yangi battery qo'shsangiz shu uslubda `NN_*.fx` fayl qo'shing.
 
@@ -201,7 +201,7 @@ Ikki qatlam:
 
 ## 7. Batareyalar holati
 
-`docs/flux-agent.md` da spetsifikatsiyalangan **barcha batareyalar**
+`docs/fluxon-agent.md` da spetsifikatsiyalangan **barcha batareyalar**
 implementatsiya qilingan:
 
 | Battery | Modul | Izoh |

@@ -1,41 +1,41 @@
-# Flux — The Programming Language (Complete guide for humans)
+# Fluxon — The Programming Language (Complete guide for humans)
 
-> 🌐 **Language:** English (current) · [O'zbek](flux-human.uz.md)
+> 🌐 **Language:** English (current) · [O'zbek](fluxon-human.uz.md)
 
-> **What is Flux?** Flux is a programming language designed for backend systems
+> **What is Fluxon?** Fluxon is a programming language designed for backend systems
 > that AI agents write well. Its philosophy: *"The language adapts to the AI, not
 > the AI to the language."* There is **one** clear way to do each thing, the
 > syntax uses few tokens, and the things you need most (HTTP server, database,
 > AI/LLM calls, cron, queues) are built **into** the language — with no package
 > installs.
 
-Flux files are saved with the `.fx` extension.
+Fluxon files are saved with the `.fx` extension.
 
 This document is the complete, detailed **human** guide. If you want to teach
-Flux to an AI agent, use the shorter `flux-agent.md` file.
+Fluxon to an AI agent, use the shorter `fluxon-agent.md` file.
 
 ---
 
 ## 0. Core ideas (read these first)
 
-The 5 principles that set Flux apart from other languages:
+The 5 principles that set Fluxon apart from other languages:
 
 1. **One task = one way (canonical form).** In other languages you can write the
-   same thing 5 ways (`while`, `for`, `do-while`...). In Flux there is **only
+   same thing 5 ways (`while`, `for`, `do-while`...). In Fluxon there is **only
    `each`** for iteration. There is **only one** way to print to the screen. The
    reason for this rule: the AI does not think "which method should I choose?"
    each time — there is no choice, so there are fewer mistakes.
 
 2. **Few tokens, but readable.** The syntax is as short as possible, but *not
    cryptic*. Keywords are spelled out in full (`each`, `match`, `else`) — because
-   a human or AI seeing Flux for the first time must understand them immediately.
+   a human or AI seeing Fluxon for the first time must understand them immediately.
 
 3. **Batteries included (everything built in).** `http`, `db`, `ai`, `json`,
    `cron`, `queue` — all of these are in the standard library. No `npm install`,
    no `composer require`. You just say `use http` and use it.
 
 4. **AI is a first-class primitive.** In other languages, calling an LLM means
-   installing an SDK, configuring a key, and parsing JSON. In Flux, `ai.json`
+   installing an SDK, configuring a key, and parsing JSON. In Fluxon, `ai.json`
    turns text into structured data in a single line and returns a confidence
    score.
 
@@ -49,16 +49,16 @@ The 5 principles that set Flux apart from other languages:
 
 ### Comments
 There is only one kind of comment — from a `#` character to the end of the line:
-```flux
+```fluxon
 # This is a comment
 x = 5   # This is also a comment
 ```
-Flux has **no** `//` or `/* */`. One way — `#`.
+Fluxon has **no** `//` or `/* */`. One way — `#`.
 
 ### Statements
 Each statement ends at a **new line**. A semicolon (`;`) is **not needed** and is
 not used:
-```flux
+```fluxon
 x = 5
 y = 10
 ```
@@ -66,7 +66,7 @@ y = 10
 ### Blocks
 A block is opened not with `{}` but with **indentation**. Each level is **2
 spaces**. The block ends when the indentation decreases:
-```flux
+```fluxon
 if x > 0
   log "positive"
   log "this line is also inside the block"
@@ -77,7 +77,7 @@ log "outside the block"
 
 ## 2. Values and types
 
-Flux has the following basic types:
+Fluxon has the following basic types:
 
 | Notation | Type | Description |
 |-------|-----|------|
@@ -97,7 +97,7 @@ Flux has the following basic types:
 There is no literal syntax — values come from functions: `fs.readb path`
 (binary file read), `crypto.b64db s` (binary-safe base64 decode),
 `bytes.of s` (text → its UTF-8 bytes). Core operations:
-```flux
+```fluxon
 b = fs.readb "logo.png"     # bytes (nil if the file is missing)
 bytes.len b                  # BYTE count (str.len counts CHARS)
 bytes.str b                  # bytes → text (explicit error if not UTF-8)
@@ -110,14 +110,14 @@ text. `crypto.sha256`/`b64`/`hex` inputs take str or bytes.
 
 **No commas in lists and maps.** Elements are separated by spaces. This is
 intentional — commas waste tokens:
-```flux
+```fluxon
 nums = [1 2 3 4]
 user = {name:"Aziza" age:30 active:true}
 ```
 
 **Putting a variable inside text (interpolation).** With `"${...}"` you embed an
 expression inside text:
-```flux
+```fluxon
 name = "Aziza"
 log "Hello ${name}!"               # → Hello Aziza!
 log "Total: ${price * qty} so'm"   # an expression also works
@@ -129,7 +129,7 @@ For a simple variable you can shorten it to `"$name"`, but for an expression
 `"""`. Content starts on the next line, and the common indentation of the
 lines is stripped automatically — so the block sits naturally inside indented
 code:
-```flux
+```fluxon
 prompt = """
   You are a helpful agent.
   User question: ${question}
@@ -142,7 +142,7 @@ written freely without escaping (handy for JSON/HTML fragments).
 **Symbols — instead of enums.** To represent states, use a symbol instead of
 text. `:new`, `:confirmed` — these are cheaper in tokens and clearer than the
 text `"new"`:
-```flux
+```fluxon
 status = :confirmed
 dir = :in
 ```
@@ -160,12 +160,12 @@ two things are falsy.
 
 ## 3. Variables (bindings)
 
-Flux has **two** kinds of binding, and they do **different things** (which is why
+Fluxon has **two** kinds of binding, and they do **different things** (which is why
 having two does not violate the canonical rule):
 
 ### `=` — immutable
 A value is assigned once, then cannot be changed:
-```flux
+```fluxon
 x = 10
 name = "Aziza"
 ```
@@ -173,7 +173,7 @@ This is the **default** case. Most values do not change.
 
 ### `<-` — mutable
 A variable whose value can be changed later. Reassignment is also done with `<-`:
-```flux
+```fluxon
 total <- 0.0
 total <- total + 5.0     # reassignment
 ```
@@ -187,24 +187,24 @@ total <- total + 5.0     # reassignment
 ## 4. Operators
 
 ### Arithmetic
-```flux
+```fluxon
 +   -   *   /   %        # add, subtract, multiply, divide, remainder
 ```
 **`+` also concatenates strings.** If the operands are numbers it adds; if they
 are text it joins:
-```flux
+```fluxon
 1 + 2          # → 3
 "hel" + "lo"   # → "hello"
 ```
 The type itself decides the difference — one operator, two natural behaviors.
 
 ### Comparison
-```flux
+```fluxon
 ==  !=  <  <=  >  >=
 ```
 
 ### Logical
-```flux
+```fluxon
 &    # and
 |    # or
 !    # not — before a value: !x
@@ -213,13 +213,13 @@ The type itself decides the difference — one operator, two natural behaviors.
 ### Special operators
 
 **`??` — null-coalesce.** If the left side is `nil`, it gives the right side:
-```flux
+```fluxon
 port = env.PORT ?? "8080"     # if PORT is missing, "8080"
 name = user.name ?? "guest"
 ```
 
 **`.` — member access / index.** Map key, list index, length:
-```flux
+```fluxon
 user.name        # map key
 list.0           # first element of the list
 list.len         # length
@@ -229,12 +229,12 @@ list.(i)         # computed index through `.` — same as list[i]
 ```
 
 **`..` — range.** Both ends are inclusive:
-```flux
+```fluxon
 1..5             # [1 2 3 4 5]
 ```
 
 **`|>` — pipe.** Passes a value into a function, removing nested notation:
-```flux
+```fluxon
 result = data |> clean |> format
 # this is equivalent to: format(clean(data))
 ```
@@ -248,14 +248,14 @@ result = data |> clean |> format
 A function is declared with `fn`. Arguments are separated by **spaces** (no
 commas):
 
-```flux
+```fluxon
 fn add a b
   ret a + b
 ```
 
 ### Single-line function
 If the body is a single expression, you can write it on one line with `->`:
-```flux
+```fluxon
 fn double x -> x * 2
 ```
 
@@ -264,7 +264,7 @@ Two ways, but they give the same result:
 - `ret x` — explicit return
 - **The last expression** is returned automatically (without `ret`)
 
-```flux
+```fluxon
 fn add a b
   a + b            # the last expression — returned automatically
 
@@ -280,7 +280,7 @@ fn check x
 **`ret` also works inside a lambda.** This matters most in HTTP handlers. Instead
 of a deep `if/elif/else` pyramid for validation, write a **guard clause** (early
 exit) — the code stays flat:
-```flux
+```fluxon
 # ❌ Deep nesting (bad):           ✅ Guard clause (good):
 http.on :post "/x" \req ->        http.on :post "/x" \req ->
   if req.body.email                 if !req.body.email
@@ -294,13 +294,13 @@ http.on :post "/x" \req ->        http.on :post "/x" \req ->
 
 ### Calling a function
 Arguments are separated by spaces, without parentheses:
-```flux
+```fluxon
 add 2 3            # → 5
 double 4           # → 8
 ```
 Parentheses are only needed for **grouping** (passing the result of one function
 into another):
-```flux
+```fluxon
 double (add 2 3)   # first add 2 3 = 5, then double 5 = 10
 ```
 
@@ -308,7 +308,7 @@ double (add 2 3)   # first add 2 3 = 5, then double 5 = 10
 call without parentheses is defined by its arguments, this is the only way to
 call a function that has no parameters. This clearly distinguishes a name (value)
 from a call:
-```flux
+```fluxon
 fn new_id -> rand.str 8
 new_id()           # CALL → a new random id each time
 new_id             # NOT a call → the function VALUE (for callback/reg)
@@ -318,7 +318,7 @@ new_id             # NOT a call → the function VALUE (for callback/reg)
 
 ### Lambda (anonymous function)
 With the `\` character, used inline:
-```flux
+```fluxon
 \x -> x * 2
 each_map nums \x -> x * 2    # multiply each element by 2
 ```
@@ -328,7 +328,7 @@ each_map nums \x -> x * 2    # multiply each element by 2
 ## 6. Control flow
 
 ### Conditions: `if` / `elif` / `else`
-```flux
+```fluxon
 if x > 0
   log "positive"
 elif x == 0
@@ -342,17 +342,17 @@ understandable at a glance.
 `if` also works as an **expression** (ternary equivalent): it returns a value on
 one line. The `else` branch is required. Wrap calls in the condition in parens.
 
-```flux
+```fluxon
 pad = if h < 10 ("0" + str.str h) else (str.str h)   # leading-zero
 kind = if n % 2 == 0 "even" else "odd"               # simple choice
 r    = if (str.len s) > 0 "full" else "empty"        # call condition → parens
 ```
 
 ### Iteration: `each` (the only loop)
-Flux has **only one** loop — `each`. It iterates over a list, range, or map.
+Fluxon has **only one** loop — `each`. It iterates over a list, range, or map.
 There is **no** `while`, `for`, or `do-while`:
 
-```flux
+```fluxon
 each item in list           # list elements
   log item
 
@@ -367,7 +367,7 @@ Inside a loop:
 - `skip` — move to the next iteration (in other languages `continue`)
 - `stop` — exit the loop (in other languages `break`)
 
-```flux
+```fluxon
 each n in nums
   if n < 0
     skip          # skip negatives
@@ -381,7 +381,7 @@ each n in nums
 
 ### Selecting by value: `match`
 Comparing one value against several variants. Mostly for symbols:
-```flux
+```fluxon
 match status
   :new -> log "new"
   :confirmed -> log "confirmed"
@@ -394,7 +394,7 @@ match status
 > **⚠️ Important:** `match` only works with a **value** (symbol or number). For a
 > boolean condition (like `conf > 0.85`) **always use `if/elif/else`**. Writing
 > `match true` and putting conditions under it is **wrong** — do not do this:
-> ```flux
+> ```fluxon
 > # WRONG:
 > match true
 >   conf > 0.85 -> ...
@@ -407,14 +407,14 @@ match status
 
 ## 7. Errors (error handling)
 
-In Flux a function can return success (`ok`) or an error (`err`). The **one**
+In Fluxon a function can return success (`ok`) or an error (`err`). The **one**
 primary way to work with errors is the `!` operator, and `??` for `nil`.
 
 ### `!` — automatically propagate the error upward
 If you put `!` after a function name: if it returns an error, the error is
 **automatically** propagated to the caller (you do not check it by hand). If it
 succeeds, you get the result:
-```flux
+```fluxon
 fn process id
   user = db.one "select * from users where id=$1" [id]!
   # if db.one returns an error, process also returns that error —
@@ -426,7 +426,7 @@ single character**.
 
 ### `??` — an alternative if nil
 If a value is `nil` (not an error, just empty), provide an alternative with `??`:
-```flux
+```fluxon
 name = user.name ?? "guest"
 each it in items
   p = db.one "...price..." [it.product]
@@ -436,7 +436,7 @@ each it in items
 
 ### `fail` — raise an error
 Raise an error from your own code:
-```flux
+```fluxon
 if qty < 1
   fail "invalid quantity"
 ```
@@ -445,7 +445,7 @@ if qty < 1
 code inside an HTTP handler, it **automatically** turns into a response with that
 status. This replaces `try/catch`: for an expected error, instead of deep nesting
 just `fail`:
-```flux
+```fluxon
 http.on :post "/transfer" \req ->
   acc = db.one "select * from accounts where id=$1" [req.body.from]
   if acc.balance < req.body.amount
@@ -467,7 +467,7 @@ http.on :post "/transfer" \req ->
 ### `use` — import a module
 You import the standard library or your own file. There is no installation
 (`install`):
-```flux
+```fluxon
 use http db ai json        # standard batteries — multiple modules with spaces
 use ./tools                # your own file → tools.function
 ```
@@ -475,9 +475,9 @@ After importing, names live under the module: `db.one`, `http.serve`,
 `tools.create_order`.
 
 **`as` — renaming (alias).** If your own file has the same name as a battery (for
-example an `ai.flux` file and the `ai` battery), there is a clash. Rename your
+example an `ai.fluxon` file and the `ai` battery), there is a clash. Rename your
 own module with `as`:
-```flux
+```fluxon
 use ai                     # the battery
 use ./ai as helper         # your own file → helper.classify (no clash)
 ```
@@ -486,7 +486,7 @@ you do, rename them with `as`.
 
 ### `exp` — export
 Expose a function or value from your file to other files:
-```flux
+```fluxon
 exp fn create_order items customer
   ...
 exp price_limit = 1000
@@ -497,13 +497,13 @@ Only things marked with `exp` are visible from the outside.
 
 ## 9. Batteries — the standard library
 
-This is Flux's most powerful part. **All** the most-needed things are built into
+This is Fluxon's most powerful part. **All** the most-needed things are built into
 the language. You install nothing — you just `use` it and go.
 
 ### 9.1 `http` — server and client
 
 **Server.** You declare a route on a single line:
-```flux
+```fluxon
 use http
 
 http.on :post "/notes" \req -> rep 201 {ok:true}
@@ -542,7 +542,7 @@ http.on :post "/upload" \req ->
 
 **Redirect.** There is no special verb — with `rep` you give a 302 status and a
 `location` key; it becomes the Location header:
-```flux
+```fluxon
 http.on :get "/:code" \req ->
   link = db.one "select * from links where code=$1" [req.params.code]
   link ?? (rep 404 {error:"not found"})
@@ -554,7 +554,7 @@ http.on :get "/:code" \req ->
 `/stats/:code` is always checked before `/:code`.
 
 **Client.** Calling an external API:
-```flux
+```fluxon
 res = http.get "https://api.example.com/data"
 res = http.post url {key:"val"}      # the body becomes JSON automatically
 # res.status, res.body, res.headers (a map, keys lowercased)
@@ -564,7 +564,7 @@ loc = res.headers.location           # or res.headers["content-type"]
 A redirect (3xx) is **not followed by default** — `res.status` is 30x, and
 `res.headers.location` is read. If you need automatic following, add an options
 map:
-```flux
+```fluxon
 res = http.get url {follow:true}         # 3xx → follows Location
 res = http.get url {follow:true max:5}   # hop limit (default 10)
 # res.hops — how many redirects happened
@@ -575,7 +575,7 @@ Exceeding `max` is an error. The options map is the last argument:
 **Custom request headers.** For APIs that require authentication (`x-api-key`,
 `Authorization`, `anthropic-version`...), add `headers` to the options map — this
 is symmetric with `res.headers` in the response:
-```flux
+```fluxon
 res = http.post "https://api.anthropic.com/v1/messages" body {
   headers: {
     "x-api-key": env.ANTHROPIC_API_KEY
@@ -592,7 +592,7 @@ the automatic `application/json`.
 The connection is **automatic**: it is read from the `$DATABASE_URL` environment
 variable. You write no connection code.
 
-```flux
+```fluxon
 use db
 
 # Query — the result is a list of maps
@@ -624,7 +624,7 @@ db.put "agent_memory" {val:v} {agent:aid key:k}
 example checkout: order + line items + decrementing stock), wrap it in a `db.tx`
 block. If an error (`fail` or `!`) occurs inside the block, **all** changes are
 **rolled back** — the DB never stays in a half-finished state:
-```flux
+```fluxon
 db.tx \->
   ord = db.ins "orders" {cust:c.id total:total}
   each it in items
@@ -635,7 +635,7 @@ db.tx \->
 ```
 
 `db.tx` can also return a value (via `ret`):
-```flux
+```fluxon
 ord = db.tx \->
   o = db.ins "orders" {...}
   ret o            # the block value goes outside
@@ -646,7 +646,7 @@ strongest isolation and **automatically retries** on conflict. This means the
 "read → check → modify" pattern is safe. For example, two parallel withdrawals
 from one account — both see the same balance, and they do not both go through (no
 overdraft):
-```flux
+```fluxon
 db.tx \->
   acc = db.one "select * from accounts where id=$1" [aid]
   if acc.balance < amt
@@ -654,7 +654,7 @@ db.tx \->
   db.up "accounts" {balance:acc.balance - amt} {id:aid}   # race-safe
 ```
 > In other languages you would write `SELECT FOR UPDATE`, locks, or mutexes for
-> this. In Flux it is not needed — `db.tx` guarantees it itself. "The language
+> this. In Fluxon it is not needed — `db.tx` guarantees it itself. "The language
 > adapts to the AI": the AI does not think about locks, it just writes inside
 > `db.tx`.
 
@@ -662,7 +662,7 @@ db.tx \->
 transfers, a client may resend a request. Protect it with a unique key (a `uniq`
 column): first check whether it exists, then write the key inside a transaction —
 if it is a duplicate, the `uniq` error → tx rollback:
-```flux
+```fluxon
 old = db.one "select * from transactions where ikey=$1" [key]
 old ?? (ret old)              # already done → return the old result
 db.tx \->
@@ -677,13 +677,13 @@ db.tx \->
 - **A query without parameters** does not need a list: `db.q "select * from links"`.
 - An **aggregate (count/sum)** can return `nil` on an empty table — protect it
   with `?? 0`:
-  ```flux
+  ```fluxon
   r = db.one "select count(*) c, sum(clicks) s from links"
   log "links: ${r.c}, clicks: ${r.s ?? 0}"
   ```
 
-**Schema declaration — `tbl`.** You declare tables in Flux itself:
-```flux
+**Schema declaration — `tbl`.** You declare tables in Fluxon itself:
+```fluxon
 tbl products
   id     serial pk
   owner  int ref:users.id
@@ -709,18 +709,18 @@ bytes) is automatically shortened (with a deterministic hash suffix); your code
 never breaks.
 
 **Declarative migration — `tbl` is the single source of truth.** You only write
-the latest shape of the `tbl`; Flux diffs it against the current DB and runs the
+the latest shape of the `tbl`; Fluxon diffs it against the current DB and runs the
 necessary DDL **itself**:
 - new column → `ADD COLUMN`;
 - column removed from `tbl` → `DROP COLUMN` (the table is first backed up to
-  `_flux_bak_*`);
-- a `tbl` removed entirely → `DROP TABLE` (with backup; **only Flux-managed**
+  `_fluxon_bak_*`);
+- a `tbl` removed entirely → `DROP TABLE` (with backup; **only Fluxon-managed**
   tables — a manually created table is never touched);
 - index added/removed → `CREATE/DROP INDEX`.
 
 Migration is **idempotent** — re-deploying the same `tbl` is safe, nothing
 breaks. No migration SQL needed for schema changes. Type changes and renames are
-**not** automatic — do those manually with `db.q "ALTER TABLE ..."`, and Flux
+**not** automatic — do those manually with `db.q "ALTER TABLE ..."`, and Fluxon
 syncs the rest afterward.
 
 **A `json` column** — when read it **automatically becomes a map/list** (not a
@@ -731,26 +731,26 @@ encoded.
 rounding errors corrupt money. `money` is a whole number of **minor units**
 (tiyin, cents): `15000` = 150.00 so'm. All money math uses `money`/`int` (`int`
 is 64-bit):
-```flux
+```fluxon
 tbl accounts
   id      serial pk
   balance money       # in tiyin, e.g. 15000 = 150.00
 total = price * qty   # int math, not float
 ```
 
-**The `sym` type — for enums.** This is Flux's elegant solution. If a column is
-`sym`: the DB stores **text**, but when Flux reads it, it automatically returns a
+**The `sym` type — for enums.** This is Fluxon's elegant solution. If a column is
+`sym`: the DB stores **text**, but when Fluxon reads it, it automatically returns a
 **symbol**. On writing and filtering, a symbol is automatically converted to
 text. Then `match` works directly:
-```flux
+```fluxon
 tbl tickets
-  category sym         # DB: text ("billing"), Flux: symbol (:billing)
+  category sym         # DB: text ("billing"), Fluxon: symbol (:billing)
   status   sym
 
 # Writing: you give a symbol, the DB stores text
 db.ins "tickets" {category::billing status::new}
 
-# Reading: if the schema says sym, Flux returns a symbol
+# Reading: if the schema says sym, Fluxon returns a symbol
 t = db.one "select * from tickets where id=$1" [id]
 match t.category       # t.category is a symbol, so match works
   :billing -> log "billing matter"
@@ -760,12 +760,12 @@ match t.category       # t.category is a symbol, so match works
 # Filtering: a symbol is passed, automatically converted to text
 db.q "select * from tickets where category=$1" [:billing]
 ```
-**One rule:** a `sym` column — text in the DB, a symbol in Flux, conversion
+**One rule:** a `sym` column — text in the DB, a symbol in Fluxon, conversion
 automatic.
 
 ### 9.3 `ai` — LLM (a first-class primitive)
 
-This is the biggest thing that sets Flux apart from other languages. The LLM is a
+This is the biggest thing that sets Fluxon apart from other languages. The LLM is a
 keyword, not an SDK. **The provider is detected automatically** (OS env or
 `.env`) — you configure nothing:
 
@@ -777,7 +777,7 @@ keyword, not an SDK. **The provider is detected automatically** (OS env or
 This adapts to common standard names like `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` —
 the same `.env` works with other tools.
 
-```flux
+```fluxon
 use ai
 
 # Simple question-and-answer → text
@@ -794,7 +794,7 @@ r = ai.json "Extract the order: ${text}" schema
 ```
 
 **Audit metadata — automatic.** Each `ai.*` result carries metadata under `_`:
-```flux
+```fluxon
 r = ai.json prompt schema
 log r._.conf        # confidence score (0..1)
 log r._.tokens      # tokens used
@@ -802,7 +802,7 @@ log r._.cost        # cost
 log r._.ms          # latency (milliseconds)
 ```
 This is the basis for confidence routing:
-```flux
+```fluxon
 if r._.conf > 0.85
   auto_answer r         # high confidence → automatic
 elif r._.conf >= 0.6
@@ -819,7 +819,7 @@ else
 `ai.run` does **not** execute it itself — it returns to you *what it wants to
 do*. You run the tool (with logging, cost, confirmation) and return the result.
 The loop is **manual** — this gives you full control:
-```flux
+```fluxon
 msgs <- [{role::user content:text}]
 each i in 1..10                          # maximum 10 steps
   r = ai.run msgs tools                  # tools: a list of [{name desc params}]
@@ -845,7 +845,7 @@ Storing and calling a function **by its string name**. Essential for agent tools
 the AI gives you the tool **name** (text), and you must turn it into a function
 and call it.
 
-```flux
+```fluxon
 reg.add "calc" \args -> args.a + args.b          # name → function
 reg.add "search" \args -> http.get "/s?q=${args.q}"
 
@@ -865,7 +865,7 @@ reg.names                                         # a list of all names
 All of these are **core** — they work without `use` (just like `log`).
 
 **`list` — list methods** (on a value, `.method`):
-```flux
+```fluxon
 l.len                  # length
 l.push x               # adds an element → a new list
 l.filter \x -> x > 0   # keeps those matching the condition → a new list
@@ -890,7 +890,7 @@ l.all \x -> x > 0      # do all match → bool (stops at first mismatch)
 > **Important:** to build a list use `l.push x`, **not** `l + [x]`. To filter, use
 > `l.filter` instead of a manual `each` loop; to build text, use `l.join` instead
 > of a manual accumulator:
-> ```flux
+> ```fluxon
 > # Manual (long):              With methods (clean):
 > result <- []                  result = items.filter \t -> t.active
 > each t in items
@@ -903,7 +903,7 @@ l.all \x -> x > 0      # do all match → bool (stops at first mismatch)
 > ```
 
 **`map` — key-value methods** (on a value, `.method`):
-```flux
+```fluxon
 m.set k v              # sets/updates a key → a new map
 m.del k                # removes a key → a new map
 m.merge other          # merges two maps (other's keys win) → a new map
@@ -918,7 +918,7 @@ m.key   m[k]           # read (m[k] — dynamic, variable key)
 > with these methods.
 
 **`str` — text functions:**
-```flux
+```fluxon
 str.len s              # length (number)
 str.slice s 0 3        # the 0..3 range (3 excluded): "hello" → "hel"
 str.up s               # UPPERCASE
@@ -941,7 +941,7 @@ str.repeat "ab" 3      # repeat → "ababab"
 > were the same `.len` it would be confusing.
 
 **`math` — math:**
-```flux
+```fluxon
 math.floor 3.7         # → 3
 math.ceil 3.2          # → 4
 math.abs -5            # → 5
@@ -952,7 +952,7 @@ math.sqrt 9            # → 3.0 (always flt; negative input is an error)
 ```
 
 **`rand` — random:**
-```flux
+```fluxon
 rand.int 1 100         # a random integer in the range 1..100
 rand.str 6             # a random string of 6 characters (short codes)
 ```
@@ -963,7 +963,7 @@ entropy (62⁶) — fine for a short code, but brute-forceable as a secret. For
 session IDs, tokens, and other secrets use at least `rand.str 24` (~140+ bits).
 
 **`time` — time and date:**
-```flux
+```fluxon
 time.now               # the current time (timestamp)
 time.ago 24 :hr        # the time 24 units ago. Units: :sec :min :hr :day
 time.in  60 :min       # the time 60 units later (TTL/expiry). Same units
@@ -979,12 +979,12 @@ time.diff a b          # (a - b) difference in seconds (int); / 60 -> minutes
 > computes `end_at = time.add start_at 30 :min` from a client-supplied `start_at`.
 > Instead of writing raw `now() - interval '24 hours'` in a DB query, use
 > `time.ago` — it is clean and safe:
-> ```flux
+> ```fluxon
 > r = db.one "select count(*) c from tickets where created > $1" [time.ago 24 :hr]
 > ```
 
 **Duration & interval recipes** (interval arithmetic IS available — `time.add`/`diff` exist):
-```flux
+```fluxon
 end_at = time.add start_at dur :min            # duration: start + dur minutes
 mins   = (time.diff end_at start_at) / 60       # gap between two times -> minutes
 overlap = a.start < b.end & a.end > b.start     # do two intervals overlap? (bool)
@@ -995,7 +995,7 @@ buf_start = time.sub start_at 15 :min           # buffer: 15 min before start
 takes an optional zone as a third argument. Wall-clock ↔ UTC conversion is
 DST-aware (NOT a fixed offset), so "09:00 local every day" lands on the correct
 UTC instant across summer/winter transitions:
-```flux
+```fluxon
 utc = time.parse "2026-07-15 09:00:00" "Asia/Tashkent"   # local wall-clock -> UTC
 loc = time.fmt utc "HH:mm" "America/New_York"             # UTC instant -> zone wall-clock
 ```
@@ -1003,14 +1003,14 @@ loc = time.fmt utc "HH:mm" "America/New_York"             # UTC instant -> zone 
 > jump) does not exist and raises an error; an unknown zone name raises too.
 
 ### 9.6 `json`
-```flux
+```fluxon
 use json
 s = json.enc value     # value → JSON text
 v = json.dec str       # JSON text → value
 ```
 
 ### 9.7 `env` — environment variables
-```flux
+```fluxon
 port = env.PORT ?? "8080"      # directly env.NAME
 key = env.AI_KEY
 ```
@@ -1020,7 +1020,7 @@ A standard **Unix 5-field** cron expression: `minute hour day month weekday`.
 Every AI agent knows this format (crontab, GitHub Actions, ...). `cron.on` reads
 the expression **without quotes** — here `*` is not multiplication, it is a cron
 marker:
-```flux
+```fluxon
 use cron
 cron.on 0 * * * * check_prices    # at the start of every hour (minute=0)
 cron.on 30 9 * * * daily_check    # every day at 09:30
@@ -1038,7 +1038,7 @@ process alive, and cron runs in the background at its scheduled times. Order:
 `cron.on` calls go **before** `http.serve`.
 
 For a cron-only script (no server) — `cron.run` takes over the process:
-```flux
+```fluxon
 cron.on 0 9 * * * daily_check
 cron.run                          # blocks: the program does not end, cron keeps running
 ```
@@ -1049,7 +1049,7 @@ cron.run                          # blocks: the program does not end, cron keeps
 
 ### 9.9 `queue` — background queue
 So a webhook can respond quickly, you offload heavy work to the background:
-```flux
+```fluxon
 use queue
 
 queue.on "send" \job -> tools.send job.ph job.body   # the handler
@@ -1075,7 +1075,7 @@ queue.push "send" {ph:phone body:text}               # add to the queue
 For real-time applications (chat, live updates). Where `http` is
 request-response, `ws` is a persistent two-way connection.
 
-```flux
+```fluxon
 use ws
 
 ws.on :connect \conn ->         # a new connection. conn.id — a stable unique id
@@ -1097,13 +1097,13 @@ ws.serve 9000
 - `ws.send conn text` — sends to THIS connection (text; if you need JSON,
   `json.enc`).
 - `ws.data.set conn :key value` / `ws.data.get conn :key` — session state for
-  THIS connection (Flux keeps it until the connection drops, and clears it on
+  THIS connection (Fluxon keeps it until the connection drops, and clears it on
   disconnect).
 - `ws.serve port` — starts the server (blocking).
 
-**Rooms — for broadcast.** Sending to a group at once. Flux manages rooms itself
+**Rooms — for broadcast.** Sending to a group at once. Fluxon manages rooms itself
 — you do not maintain a manual "who is in which room" map:
-```flux
+```fluxon
 ws.room.join conn "ch:5"                          # add the connection to a room
 ws.room.leave conn "ch:5"                         # remove it from the room
 ws.room.send "ch:5" (json.enc {t:"msg" body:b})   # send to EVERYONE in the room
@@ -1115,7 +1115,7 @@ ws.room.members "ch:5"                            # the room members (for presen
 > map is needed.
 
 ### 9.11 `log` — printing to stderr
-```flux
+```fluxon
 log "message"          # to stderr for diagnostics
 ```
 
@@ -1123,7 +1123,7 @@ log "message"          # to stderr for diagnostics
 
 ## 10. A complete small program (all together)
 
-```flux
+```fluxon
 use http db ai json
 
 tbl notes

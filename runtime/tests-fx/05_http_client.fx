@@ -87,7 +87,7 @@ eq r13.body.key "yo'q" "headersiz so'rov → server default"
 r14 = http.get "${base}/html"
 eq r14.status 200 "GET /html status"
 eq r14.headers["content-type"] "text/html" "rep custom content-type"
-eq r14.headers["x-powered-by"] "flux" "rep custom x-powered-by (_→-)"
+eq r14.headers["x-powered-by"] "fluxon" "rep custom x-powered-by (_→-)"
 eq r14.body "<h1>Salom</h1>" "rep custom header bilan body saqlanadi"
 
 # takror Set-Cookie: server ikki alohida qator yuboradi, klient endi ularni

@@ -1,5 +1,5 @@
 # 09 — fs battery (lokal fayl tizimi primitivlari).
-# Ishga: ./target/release/flux run tests-fx/09_fs.fx
+# Ishga: ./target/release/fluxon run tests-fx/09_fs.fx
 #
 # fs.read/write/append/exists/ls/del/mkdirp — barchasi haqiqiy fayl tizimida
 # ishlaydi. Test noyob vaqtinchalik papkada ishlaydi (parallel run'da
@@ -22,7 +22,7 @@ fn truthy v label
     fails <- fails + 1
 
 # --- Noyob ish papkasi ---
-base = "/tmp/flux_fs_${rand.str 8}"
+base = "/tmp/fluxon_fs_${rand.str 8}"
 r_mk = fs.mkdirp base
 eq r_mk :ok "mkdirp -> :ok"
 truthy (fs.exists base) "mkdirp keyin papka mavjud"

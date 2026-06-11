@@ -1,6 +1,6 @@
 # Spec Gaps I Hit
 
-Implementing a complete polls/survey API with AI revealed the following gaps in the Flux spec:
+Implementing a complete polls/survey API with AI revealed the following gaps in the Fluxon spec:
 
 ## 1. **Module Import Path Resolution (CRITICAL)**
 **Gap:** Spec shows `use ./tools` and `use ./ai as helper` for local file imports, but does NOT specify:
@@ -74,7 +74,7 @@ Implementing a complete polls/survey API with AI revealed the following gaps in 
 
 ## 7. **each Loop with Mutable References (AMBIGUOUS)**
 **Gap:** Spec shows `each item in list` but in my code, I do:
-```flux
+```fluxon
 each p in polls
   p.total_votes <- db.one "select sum(votes) v from options..." [p.id]
 ```
@@ -86,7 +86,7 @@ each p in polls
 
 ## 8. **nil Coalescing with Complex Expressions (WORKS BUT STYLE UNCLEAR)**
 **Gap:** Spec shows `a ?? b` for null-coalesce, but my code uses:
-```flux
+```fluxon
 option_id:req.body.option_id ?? (fail 400 "...")
 ```
 **Question:** Can `??` chain with `fail` on the right side? Is this idiomatic?
@@ -97,7 +97,7 @@ option_id:req.body.option_id ?? (fail 400 "...")
 
 ## 9. **Map Literal with nil Values (UNDERSPECIFIED)**
 **Gap:** When building a response, can you return:
-```flux
+```fluxon
 ret {id:poll.id question:poll.question}
 ```
 If `poll.question` is nil, does the key appear in JSON with null, or is it omitted?
@@ -148,4 +148,4 @@ If `poll.question` is nil, does the key appear in JSON with null, or is it omitt
 4. Mutable object references in loops
 
 **Workaround approach:**
-Implemented with reasonable defaults based on other languages' conventions and spec patterns. All 7 Flux files compile assuming standard semantics.
+Implemented with reasonable defaults based on other languages' conventions and spec patterns. All 7 Fluxon files compile assuming standard semantics.

@@ -5,7 +5,7 @@
 # bitta umumiy event-loopda ishlaydi, shuning uchun HTTP handler ichidan
 # ws.room.send chaqirish mumkin (cross-protocol).
 #
-# Ishga: flux run examples/poll.fx
+# Ishga: fluxon run examples/poll.fx
 #   ovoz:   curl -X POST localhost:8080/vote -d '{"opt":"ha"}'
 #   natija: ws://localhost:9000 ga ulanib jonli yangilanishni ko'ring.
 #

@@ -1,4 +1,4 @@
--- Flux Notes REST API
+-- Fluxon Notes REST API
 -- Endpoints:
 --   GET    /notes         list all notes
 --   POST   /notes         create note {title, body}

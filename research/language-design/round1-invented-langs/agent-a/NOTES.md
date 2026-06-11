@@ -1,4 +1,4 @@
-# Flux — design notes
+# Fluxon — design notes
 
 ## Goal
 A language an AI can learn in one look, that writes web/DB/realtime apps with

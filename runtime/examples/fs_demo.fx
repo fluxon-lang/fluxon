@@ -4,7 +4,7 @@
 # Bloklamaydi (server emas) — smoke-test sifatida ham yaroqli. Vaqtinchalik
 # papkada ishlaydi va oxirida o'zini tozalaydi.
 
-dir = "/tmp/flux_fs_demo"
+dir = "/tmp/fluxon_fs_demo"
 
 # Papkani tayyorlash (idempotent — bor bo'lsa xato emas).
 fs.mkdirp dir
@@ -12,7 +12,7 @@ log "papka tayyor:" dir
 
 # Konfig yozish (json.enc bilan) va qayta o'qish.
 conf = "${dir}/conf.json"
-fs.write conf (json.enc {port:8080 name:"flux"})
+fs.write conf (json.enc {port:8080 name:"fluxon"})
 cfg = json.dec (fs.read conf)
 log "o'qilgan port:" cfg.port
 

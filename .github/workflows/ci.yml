@@ -60,11 +60,11 @@ jobs:
       # .fx integratsiya to'plami: tilning O'ZIDA yozilgan e2e testlar. Core
       # (lexer/parser/interp/builtins) o'zgarganda foydalanuvchi darajasidagi
       # buzilishlarni ushlaydi — Rust testlar qamramagan regressiyalar uchun.
-      # run_all.sh debug binary'ni FLUX_BIN orqali oladi (alohida release build
+      # run_all.sh debug binary'ni FLUXON_BIN orqali oladi (alohida release build
       # shart emas); http testi `curl` ishlatadi (runner'larda standart bor).
-      - name: Flux .fx integratsiya testlari (tests-fx/run_all.sh)
+      - name: Fluxon .fx integratsiya testlari (tests-fx/run_all.sh)
         env:
-          FLUX_BIN: target/debug/flux
+          FLUXON_BIN: target/debug/fluxon
         run: bash tests-fx/run_all.sh
 
   # Sifat tekshiruvi: format + clippy lint. Hozircha NON-BLOCKING

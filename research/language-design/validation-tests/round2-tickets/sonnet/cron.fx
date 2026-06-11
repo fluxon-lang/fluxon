@@ -1,4 +1,4 @@
-# cron.flux — scheduled daily report job
+# cron.fluxon — scheduled daily report job
 
 use db cron
 

@@ -1,4 +1,4 @@
-# CLAUDE.md — Flux loyihasida ishlash qoidalari (AI agentlar uchun)
+# CLAUDE.md — Fluxon loyihasida ishlash qoidalari (AI agentlar uchun)
 
 Bu fayl Claude Code va boshqa AI agentlar uchun. Loyihada o'zgarish kiritishdan
 oldin **shu faylni oxirigacha o'qing**. Maqsad: yangi agent boshlang'ich
@@ -11,7 +11,7 @@ holatdan tezroq chiqib, to'g'ri joyda, to'g'ri uslubda ish qilsin.
 
 ## 0. Bu loyiha nima
 
-**Flux** — AI agentlar yaxshi yozadigan backend dasturlash tili. Falsafa:
+**Fluxon** — AI agentlar yaxshi yozadigan backend dasturlash tili. Falsafa:
 *"Til AI'ga moslashadi, AI tilga emas."* Bir ish = bir yo'l (canonical form),
 kam token, batteries-included (`http`/`db`/`ai`/`ws`/...).
 
@@ -60,9 +60,9 @@ Yangi battery yoki o'zgarish kiritishdan oldin tegishli faylni biling:
 | `crypto` battery (sha256/hmac/b64/hex/uuid) | `runtime/src/crypto_mod.rs` |
 | CLI kirish nuqtasi + integratsiya testlari | `runtime/src/main.rs` |
 
-**Spec'ni o'qish kerak bo'lsa:** `docs/flux-agent.md` (~2700 token, ixcham —
-til qanday ishlashini AI uchun yozilgan). Batafsil: `docs/flux-human.uz.md`
-(o'zbekcha) yoki `docs/flux-human.md` (inglizcha).
+**Spec'ni o'qish kerak bo'lsa:** `docs/fluxon-agent.md` (~2700 token, ixcham —
+til qanday ishlashini AI uchun yozilgan). Batafsil: `docs/fluxon-human.uz.md`
+(o'zbekcha) yoki `docs/fluxon-human.md` (inglizcha).
 
 **Battery qo'shish/o'zgartirish naqshi** uchun → [`ARCHITECTURE.md`](ARCHITECTURE.md)
 ning "Yangi battery qo'shish" bo'limi. Naqsh `http_mod.rs` va `db_mod.rs` da
@@ -155,16 +155,16 @@ o'ylang va test bilan himoyalang:
 
 ## 8. Batareyalar holati (hammasi tayyor)
 
-`docs/flux-agent.md` da spetsifikatsiyalangan barcha batareyalar
+`docs/fluxon-agent.md` da spetsifikatsiyalangan barcha batareyalar
 runtime'da **implementatsiya qilingan**: `http`, `db`, `ai`, `auth`, `crypto`,
 `ws`, `cron`, `queue`, `reg` (`ai` — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`,
 Anthropic Messages API orqali; `runtime/src/ai_mod.rs`).
 
-Yangi battery qo'shganda spec (`docs/flux-agent.md`) ni **manba haqiqat** deb
+Yangi battery qo'shganda spec (`docs/fluxon-agent.md`) ni **manba haqiqat** deb
 oling — sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan
 bir xil.
 
 ## 9. Kutilmagan xatolar va kamchiliklar
 
-Hozirda `flux` ichida yetishmayotgan qismlar bo'lishi mumkin, yoki xato va kamchiliklar bo'lishi mumkin
+Hozirda `fluxon` ichida yetishmayotgan qismlar bo'lishi mumkin, yoki xato va kamchiliklar bo'lishi mumkin
 bunday holatda chiqgan muamo haqida github issue yordamida repoga bildirish kerak bo'ladi. 

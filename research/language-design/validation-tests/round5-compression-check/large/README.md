@@ -1,6 +1,6 @@
-# Job Board Platform — Flux Implementation
+# Job Board Platform — Fluxon Implementation
 
-A production-grade job matching platform with AI-powered candidate scoring, realtime notifications, and atomic transactions. Demonstrates advanced Flux features: schema definitions, transactions, AI integration, websockets, cron jobs, and modular architecture.
+A production-grade job matching platform with AI-powered candidate scoring, realtime notifications, and atomic transactions. Demonstrates advanced Fluxon features: schema definitions, transactions, AI integration, websockets, cron jobs, and modular architecture.
 
 ## Architecture
 
@@ -46,10 +46,10 @@ A production-grade job matching platform with AI-powered candidate scoring, real
 - 9:00 AM: Log open jobs, today's applications, shortlist rate (%)
 - Demonstrates `cron.dy`, `time.ago`, aggregation queries
 
-## Key Flux Usage
+## Key Fluxon Usage
 
 ### Schema & Types
-```flux
+```fluxon
 tbl jobs
   id           serial pk
   salary_min   money              # Stored as cents, type-safe
@@ -58,7 +58,7 @@ tbl jobs
 ```
 
 ### Transactions (Atomic)
-```flux
+```fluxon
 result = db.tx \->
   app = db.ins "applications" {...}
   rt.create_notification cand_id msg
@@ -66,14 +66,14 @@ result = db.tx \->
 ```
 
 ### AI Integration
-```flux
+```fluxon
 match_result = ai.json prompt {score:flt reasons:str}
 if match_result._.conf > 0.85
   status = :shortlisted
 ```
 
 ### Modular Imports
-```flux
+```fluxon
 use ./matching as match_mod
 use ./realtime as rt
 match_mod.score_match job candidate
@@ -81,7 +81,7 @@ rt.create_notification user_id body
 ```
 
 ### WebSocket Rooms
-```flux
+```fluxon
 ws.on :connect \conn -> conn.data.user_id = nil
 ws.room.join conn "user:5"
 ws.room.send "user:5" msg
@@ -94,12 +94,12 @@ ws.room.send "user:5" msg
 ### 1. **Symbol Type in DB Queries — No Explicit Conversion Shown**
 - **Gap:** The spec shows `db.ins "tickets" {status::new}` (symbol → DB), and `match t.status` (symbol ← DB).
 - **Issue:** How does the engine auto-convert symbols to/from string storage? No syntax shown for manual conversion.
-- **Assumption:** Implicit auto-conversion for `sym`-typed columns. If a column is declared `sym`, DB <→ Flux automatically converts string ↔ symbol.
+- **Assumption:** Implicit auto-conversion for `sym`-typed columns. If a column is declared `sym`, DB <→ Fluxon automatically converts string ↔ symbol.
 - **Code:** I used symbols directly in `db.ins` and `db.q` without explicit conversion, assuming this works.
 
 ### 2. **`db.up` Syntax for Updates — None vs NULL**
 - **Gap:** Spec shows `db.up "orders" {total:1500} {id:oid}`. No mention of how to represent "don't update this field" vs "set to nil".
-- **Issue:** Building `updates` map conditionally, then passing to `db.up` — will Flux reject if I set a key to `nil` or ignore it?
+- **Issue:** Building `updates` map conditionally, then passing to `db.up` — will Fluxon reject if I set a key to `nil` or ignore it?
 - **Assumption:** Passing `nil` values to maps ignores them or skips those columns in UPDATE. Code uses conditional `.set` to avoid nil keys.
 
 ### 3. **Map Building/Mutation — `.set` vs Assignment**
@@ -116,7 +116,7 @@ ws.room.send "user:5" msg
 
 ### 5. **Query String Parameters (`req.query`) — No Type Coercion Documented**
 - **Gap:** Spec shows `req.query` but doesn't state: do values come as strings? Are they auto-parsed?
-- **Issue:** `page = str.int (req.query.page ?? "1")` — is this necessary, or does Flux auto-cast?
+- **Issue:** `page = str.int (req.query.page ?? "1")` — is this necessary, or does Fluxon auto-cast?
 - **Assumption:** `req.query.*` returns strings; must manually convert with `str.int`, `str.float`, etc.
 - **Code:** Explicit `str.int` calls on all pagination/numeric params.
 
@@ -128,8 +128,8 @@ ws.room.send "user:5" msg
 
 ### 7. **JSON Column Storage — No Explicit Example**
 - **Gap:** Spec mentions `json` type: "o'qiganda avto map/list, yozganda avto enkod" but no real-world schema example.
-- **Issue:** How do you read/write `json` columns in Flux? Is it transparent (you pass a map, it's auto-serialized)?
-- **Assumption:** Transparent: pass Flux map/list, DB auto-encodes; read from DB auto-decodes to Flux native types.
+- **Issue:** How do you read/write `json` columns in Fluxon? Is it transparent (you pass a map, it's auto-serialized)?
+- **Assumption:** Transparent: pass Fluxon map/list, DB auto-encodes; read from DB auto-decodes to Fluxon native types.
 - **Code:** Not used in this app (all columns are scalar or sym), but schema is extensible.
 
 ### 8. **Routing Precedence with Multiple Dynamic Segments**
@@ -153,7 +153,7 @@ ws.room.send "user:5" msg
 ### 11. **Filter Operators in Queries — `ilike` Not in Spec**
 - **Gap:** Spec shows basic SQL in `db.q` but doesn't document supported SQL operators (WHERE, LIKE, ILIKE, etc.).
 - **Issue:** Used `ilike` for case-insensitive search without confirmation it's available.
-- **Assumption:** Standard Postgres operators are available since Flux uses Postgres (`$DATABASE_URL`).
+- **Assumption:** Standard Postgres operators are available since Fluxon uses Postgres (`$DATABASE_URL`).
 - **Code:** `(title ilike $2 or description ilike $2)` for job search.
 
 ### 12. **Time Arithmetic in Queries**
@@ -240,6 +240,6 @@ curl -X POST http://localhost:8080/jobs/1/summarize
 
 ## Conclusion
 
-The Flux spec is **learnable and comprehensive** in its compressed form. All major features are present and examples are clear. The gaps listed above are **minor ambiguities** about edge cases (map mutations, query operators, type coercion) that a developer can reasonably infer from context or from Postgres/HTTP standards. **No critical feature is missing**—the spec successfully encodes a production system in minimal syntax.
+The Fluxon spec is **learnable and comprehensive** in its compressed form. All major features are present and examples are clear. The gaps listed above are **minor ambiguities** about edge cases (map mutations, query operators, type coercion) that a developer can reasonably infer from context or from Postgres/HTTP standards. **No critical feature is missing**—the spec successfully encodes a production system in minimal syntax.
 
 The language design rewards terseness (no `;`, no `{}`, symbol-first thinking) while remaining expressive through batteries (http, db, ai, ws, cron all built-in).

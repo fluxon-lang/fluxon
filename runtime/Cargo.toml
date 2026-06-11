@@ -1,7 +1,17 @@
 [package]
-name = "flux"
+name = "fluxon"
 version = "0.1.0"
 edition = "2024"
+description = "AI agentlar yaxshi yozadigan batteries-included backend dasturlash tili"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fluxon-lang/fluxon"
+homepage = "https://github.com/fluxon-lang/fluxon"
+readme = "README.md"
+keywords = ["language", "interpreter", "backend", "ai"]
+categories = ["compilers", "development-tools"]
+# Nom-egallash release'i: ulkan misol/test papkalarini paketga qo'shmaymiz
+# (kompilyatsiyaga shart emas, faqat hajmni oshiradi). src/ va README yetarli.
+exclude = ["examples/", "tests-fx/", "tests/"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
@@ -44,7 +54,7 @@ base64 = "0.22"
 # auth battery: parol hash (argon2id — bcrypt'dan afzal, default xavfsiz).
 # Salt avtomatik (PHC string ichida), `auth.check` doimiy-vaqt taqqoslash.
 argon2 = "0.5"
-# Rekursiya xavfsizligi (issue #90): chuqur Flux rekursiyasida native stack'ni
+# Rekursiya xavfsizligi (issue #90): chuqur Fluxon rekursiyasida native stack'ni
 # segmentlab o'stiradi (rustc ham shu yondashuvni ishlatadi). Shunda chuqurlik
 # limiti (MAX_CALL_DEPTH) native stack hajmiga emas, faqat hisoblagichga bog'liq —
 # 2MB'lik spawn_blocking thread'ida ham abort o'rniga graceful xato.

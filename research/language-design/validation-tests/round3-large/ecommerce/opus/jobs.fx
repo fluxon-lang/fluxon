@@ -1,4 +1,4 @@
-# jobs.flux — fon vazifalar (cron)
+# jobs.fluxon — fon vazifalar (cron)
 # Har kuni 02:00 da: kam zaxiradagi mahsulotlar va so'nggi 24 soat daromadi.
 # Fayl nomi "cron" emas (batareya bilan to'qnashmasin uchun) — jobs.
 use db cron

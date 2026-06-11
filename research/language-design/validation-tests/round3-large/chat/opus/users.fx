@@ -1,4 +1,4 @@
-# users.flux — user management: create users, lookup, presence helpers.
+# users.fluxon — user management: create users, lookup, presence helpers.
 use db
 
 # Create a new user. Defaults status to :offline until they connect.

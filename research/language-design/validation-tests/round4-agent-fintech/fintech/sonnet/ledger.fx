@@ -1,8 +1,8 @@
 # ledger.fx — core double-entry ledger operations
 #
 # SPEC GAP NOTE: All ledger mutations MUST be called from within a db.tx block
-# to be atomic. Flux db.tx rolls back on any fail/! inside the block, which
-# gives us atomicity. However, there is no SELECT FOR UPDATE exposed by Flux,
+# to be atomic. Fluxon db.tx rolls back on any fail/! inside the block, which
+# gives us atomicity. However, there is no SELECT FOR UPDATE exposed by Fluxon,
 # so concurrent transfers updating the same balance row can race. We perform an
 # optimistic balance read + update inside db.tx; the DB's row-level locking at
 # the UPDATE statement level provides the last line of defense, but the balance
@@ -40,7 +40,7 @@ exp fn get_balance account_id
   db.one "select * from balances where account_id=$1" [account_id]
 
 # Ensure a balance row exists (upsert-like: insert if missing).
-# SPEC GAP: No upsert in Flux. We do a read-then-insert which is racy on
+# SPEC GAP: No upsert in Fluxon. We do a read-then-insert which is racy on
 # first-time creation if two requests race. Only affects initial setup.
 exp fn ensure_balance account_id
   existing = db.one "select id from balances where account_id=$1" [account_id]

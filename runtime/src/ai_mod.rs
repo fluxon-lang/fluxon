@@ -1,6 +1,6 @@
-// Flux ai battery — LLM birlamchi primitiv (Anthropic Claude + OpenAI GPT).
+// Fluxon ai battery — LLM birlamchi primitiv (Anthropic Claude + OpenAI GPT).
 //
-// Til API (docs/flux-agent.md):
+// Til API (docs/fluxon-agent.md):
 //   txt = ai.ask "savol ${x}"                         # -> matn (str)
 //   r   = ai.json "extract: ${t}" {intent::a items:[...]}   # -> map + r._ metadata
 //   r   = ai.run msgs tools                           # tool-loop'ning BIR qadami
@@ -13,9 +13,9 @@
 //
 // Falsafa: "til AI'ga moslashadi". `ai.run` AYNAN bitta qadam qaytaradi (tool'ni
 // O'ZI bajarmaydi) — loop foydalanuvchi qo'lida bo'lsin (log/narx/tasdiq nazorati).
-// Tool'ni `reg.call` orqali Flux tomonda chaqirasiz, natijani msgs'ga qo'shasiz.
+// Tool'ni `reg.call` orqali Fluxon tomonda chaqirasiz, natijani msgs'ga qo'shasiz.
 //
-// PROVAYDER AUTO-DETECT (Flux foydalanuvchisi hech narsa sozlamaydi):
+// PROVAYDER AUTO-DETECT (Fluxon foydalanuvchisi hech narsa sozlamaydi):
 //   - `.env`/muhitda ANTHROPIC_API_KEY bo'lsa -> Claude (default claude-opus-4-8)
 //   - OPENAI_API_KEY bo'lsa -> GPT (default gpt-4o)
 //   - Ikkalasi bo'lsa Anthropic ustun. Override: $AI_PROVIDER (anthropic|openai).
@@ -60,7 +60,7 @@ const MAX_TOKENS: i64 = 4096;
 const DEFAULT_AI_TIMEOUT_SECS: u64 = 120;
 
 // Qo'llab-quvvatlanadigan LLM provayderlari. Battery O'ZI aniqlaydi (auto) —
-// Flux foydalanuvchisi hech narsa sozlamaydi: `.env`da standart provayder kaliti
+// Fluxon foydalanuvchisi hech narsa sozlamaydi: `.env`da standart provayder kaliti
 // (ANTHROPIC_API_KEY / OPENAI_API_KEY) bo'lsa kifoya.
 #[derive(Clone, Copy, PartialEq)]
 enum Provider {
@@ -236,7 +236,7 @@ impl Interp {
     // ai.run msgs tools -> tool-loop'ning BIR qadami.
     //   msgs:  [{role::user content:str} ...]  (role sym yoki str)
     //   tools: [{name desc params} ...]        (params — JSON-schema map)
-    // Natija (kind nomi spec'dan — docs/flux-human.md):
+    // Natija (kind nomi spec'dan — docs/fluxon-human.md):
     //   :final -> {kind::final text:str}
     //   :call  -> {kind::call tool:str args:map id:str calls:[{tool args id} ...]}
     // Model parallel bir nechta tool chaqirsa, hammasi `calls` ro'yxatida bo'ladi
@@ -254,7 +254,7 @@ impl Interp {
             _ => return Err(Flow::err("ai.run: tools (list) bo'lishi kerak".to_string())),
         };
 
-        // msgs Flux shaklidan Anthropic shakliga: {role content} -> {role, content}.
+        // msgs Fluxon shaklidan Anthropic shakliga: {role content} -> {role, content}.
         // role sym (:user) yoki str ("user") bo'lishi mumkin. tool natijasi
         // xabari ({role::tool name content}) ham o'tkaziladi.
         let api_msgs: Vec<Value> = msgs.iter().map(normalize_msg).collect();
@@ -292,7 +292,7 @@ impl Interp {
         Ok(Value::Map(out))
     }
 
-    // Provayderga mos POST so'rov. messages — Flux normalize qilingan list;
+    // Provayderga mos POST so'rov. messages — Fluxon normalize qilingan list;
     // system/tools opsional. Provayder auto-detect qilinadi, request/response
     // formati ham provayderga qarab tanlanadi.
     fn call_api(
@@ -691,7 +691,7 @@ fn user_msg(content: &str) -> Value {
     Value::Map(m)
 }
 
-// Flux xabarini Anthropic shakliga keltiradi. role sym (:user) yoki str bo'lishi
+// Fluxon xabarini Anthropic shakliga keltiradi. role sym (:user) yoki str bo'lishi
 // mumkin -> har doim str. tool natijasi xabari ({role::tool name content}) esa
 // Anthropic'da user roli + tool_result blok bo'lib ketadi.
 fn normalize_msg(msg: &Value) -> Value {
@@ -734,7 +734,7 @@ fn normalize_msg(msg: &Value) -> Value {
     Value::Map(out)
 }
 
-// Flux tool ta'rifini ({name desc params}) Anthropic shakliga
+// Fluxon tool ta'rifini ({name desc params}) Anthropic shakliga
 // ({name description input_schema}) keltiradi.
 fn normalize_tool(tool: &Value) -> Value {
     let m = match tool {
@@ -836,7 +836,7 @@ fn empty_object_schema() -> Value {
     Value::Map(obj)
 }
 
-// Flux tip nomini JSON-schema tipiga: str->string, int->integer, flt->number,
+// Fluxon tip nomini JSON-schema tipiga: str->string, int->integer, flt->number,
 // bool->boolean. Boshqasi o'z holicha (list/object foydalanuvchi bersa).
 fn json_type(t: &str) -> String {
     match t {

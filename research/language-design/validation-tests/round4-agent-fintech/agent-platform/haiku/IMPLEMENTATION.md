@@ -1,8 +1,8 @@
-# AI Agent Platform in Flux — Implementation Notes
+# AI Agent Platform in Fluxon — Implementation Notes
 
 ## Overview
 
-This is a **complete, production-grade AI agent platform backend** written in Flux. It demonstrates the language's capability to handle:
+This is a **complete, production-grade AI agent platform backend** written in Fluxon. It demonstrates the language's capability to handle:
 
 - Complex data modeling with multiple schemas
 - Agentic tool-calling loops
@@ -87,13 +87,13 @@ This is the heart of the system. When a user sends a message:
 **Problem:** The spec has no way to call a function by its string name at runtime.
 
 In `builtin_tools.fx`, I need to dispatch tools like:
-```flux
+```fluxon
 tool_name = "web_search"  # string from AI
 dispatch_builtin tool_name agent_id input_map
 ```
 
 **What I did:** Used a massive `match` statement:
-```flux
+```fluxon
 match tool_name
   "web_search" -> ret tool_web_search ...
   "calculator" -> ret tool_calculator ...
@@ -156,7 +156,7 @@ match tool_name
 - If a map value might be nil: `json.enc value` returns nil or error?
 
 **Code example:**
-```flux
+```fluxon
 params_schema = {intent: ":new|:other" items: [{id:int}]}
 encoded = json.enc params_schema    # → string
 db.ins "tools" {params_schema: encoded}
@@ -167,7 +167,7 @@ parsed = json.dec row.params_schema  # → back to map
 ```
 
 **What's unclear:**
-- Does `json.enc` accept all Flux values, or only maps/lists?
+- Does `json.enc` accept all Fluxon values, or only maps/lists?
 - What does `json.dec nil` return?
 - If I pass `nil` to `db.ins`, does the column become NULL or a JSON "null"?
 
@@ -201,7 +201,7 @@ parsed = json.dec row.params_schema  # → back to map
 **Problem:** Building up lists in loops is verbose.
 
 **Spec provides:**
-```flux
+```fluxon
 tools <- []
 each t in rows
   tools <- tools.push t
@@ -213,7 +213,7 @@ each t in rows
 - For large datasets, this could be inefficient
 
 **Example from my code:**
-```flux
+```fluxon
 messages <- []
 each m in rows
   msg_obj = {...}
@@ -221,7 +221,7 @@ each m in rows
 ```
 
 This works but feels like it should be:
-```flux
+```fluxon
 messages = rows.map \r -> {...}
 ```
 
@@ -234,21 +234,21 @@ messages = rows.map \r -> {...}
 ```json
 {
   "name": "web_search",
-  "input": {"query": "flux language"}
+  "input": {"query": "fluxon language"}
 }
 ```
 
 I need to extract `input.query` where the key is dynamic (passed at runtime).
 
 **What I did:**
-```flux
+```fluxon
 tool_name = tc.name
 input_params = tc.input
 query = input_params.query  # Works if key is known
 ```
 
 But if I don't know the key in advance, I need `m[k]` (dynamic access):
-```flux
+```fluxon
 value = input_params[dynamic_key]  # Spec says this is allowed
 ```
 
@@ -274,14 +274,14 @@ This worked in my tests, so the spec seems correct.
 
 **What would fix it:**
 - A schema validation builtin: `validate input_map schema_map`
-- Or documentation on how to do JSON Schema validation in Flux
+- Or documentation on how to do JSON Schema validation in Fluxon
 
 ### 8. **Error Handling in the Loop**
 
 **Problem:** If a tool call fails (webhook returns 500), what happens?
 
 **What I did:**
-```flux
+```fluxon
 if found_tool.webhook_url
   wh_res = http.post found_tool.webhook_url input_params
   if wh_res.status >= 200 & wh_res.status < 300
@@ -307,7 +307,7 @@ if found_tool.webhook_url
 - Compare ages: `time.ago 30 :day`
 
 **What the spec provides:**
-```flux
+```fluxon
 time.now                            # hozir (timestamp)
 time.ago 24 :hr                     # 24 soat oldin
 time.fmt t "..."                    # formatlash
@@ -325,7 +325,7 @@ time.fmt t "..."                    # formatlash
 ### 10. **Confidence and Safety Routing**
 
 **Problem:** The spec shows:
-```flux
+```fluxon
 if r._.conf > 0.85
   auto r
 elif r._.conf >= 0.6
@@ -382,7 +382,7 @@ else
 ### 14. **Symbol vs. String for Status/Handler Kind**
 
 **Problem:** The schema has:
-```flux
+```fluxon
 tbl agents
   status sym
 tbl tools
@@ -393,10 +393,10 @@ When I create an agent, I pass `:active`. When I filter: `where status=$1 [:acti
 
 **What I did:**
 - Used symbols (`:active`, `:builtin`, `:webhook`) in code
-- Let Flux auto-convert to/from strings in DB operations
+- Let Fluxon auto-convert to/from strings in DB operations
 
 **What the spec says:**
-- `sym` type: "DB'da matn saqlanadi, Flux o'qiganda symbol qaytaradi — avtomat"
+- `sym` type: "DB'da matn saqlanadi, Fluxon o'qiganda symbol qaytaradi — avtomat"
 - So yes, auto-conversion should happen.
 
 **What's unclear:**
@@ -408,12 +408,12 @@ My implementation assumes yes, and it should work based on the spec.
 ### 15. **Schema Queries with Date Formatting**
 
 **Problem:** I need to get usage data for a specific date:
-```flux
+```fluxon
 date_str = "2025-06-04"
 rows = db.q "select * from agent_usage where date=$1" [date_str]
 ```
 
-But Flux's `time.fmt` and the DB schema don't clearly align.
+But Fluxon's `time.fmt` and the DB schema don't clearly align.
 
 **What I did:**
 - Used `time.fmt t "YYYY-MM-DD"` (assumed standard format)
@@ -427,7 +427,7 @@ But Flux's `time.fmt` and the DB schema don't clearly align.
 
 **Problem:** List methods are called as `.method()`, but string functions are called as `str.method()`:
 
-```flux
+```fluxon
 list.push x                  # list method
 str.split s sep              # string module function
 ```
@@ -505,8 +505,8 @@ Return to client
 
 The fundamental problem: **string-to-function mapping**.
 
-Flux doesn't provide reflection. So:
-```flux
+Fluxon doesn't provide reflection. So:
+```fluxon
 # Input from AI:
 {name: "web_search" input: {query: "..."}}
 
@@ -524,13 +524,13 @@ fn = getattr(tools_module, tool_name)
 result = fn(**input)
 ```
 
-Flux has no equivalent.
+Fluxon has no equivalent.
 
 ---
 
 ## Conclusion
 
-**Flux is expressive and practical for this domain**, but has critical gaps for hard agentic systems:
+**Fluxon is expressive and practical for this domain**, but has critical gaps for hard agentic systems:
 
 1. No dynamic dispatch (reflection API)
 2. Tool-loop semantics underspecified

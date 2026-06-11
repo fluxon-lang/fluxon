@@ -1,11 +1,11 @@
-// Flux parser — tokenlardan AST quradi.
+// Fluxon parser — tokenlardan AST quradi.
 //
 // Ikki qatlam:
 //   1) Statement/blok darajasi (recursive descent): Indent/Dedent/Newline
 //      tokenlariga tayanadi.
 //   2) Expression darajasi (precedence climbing): operatorlar ustuvorligi.
 //
-// Eng nozik joy — QAVSSIZ CHAQIRISH. Flux'da `f a b` = chaqiruv, `a + b` =
+// Eng nozik joy — QAVSSIZ CHAQIRISH. Fluxon'da `f a b` = chaqiruv, `a + b` =
 // operator. Yechim: eng yuqori ("application") darajada ketma-ket "atom"larni
 // yig'amiz; agar bittadan ortiq atom yonma-yon kelsa, birinchisi callee,
 // qolganlari argument. Atom — operator yoki blok-chegara tokeniga duch
@@ -669,7 +669,7 @@ impl Parser {
                         }
                         // Field nomi: oddiy ident yoki KALIT SO'Z (`time.in`, `x.match`).
                         // Kalit so'zlar member pozitsiyasida nom sifatida ishlaydi —
-                        // bu Flux falsafasi (til AI'ga moslashadi): AI tabiiy `time.in`
+                        // bu Fluxon falsafasi (til AI'ga moslashadi): AI tabiiy `time.in`
                         // yozadi, `in` global kalit so'z bo'lsa ham field bo'la oladi.
                         tok => match keyword_as_name(&tok) {
                             Some(name) => {
@@ -885,7 +885,7 @@ impl Parser {
             } else {
                 // kalit: ident, kalit so'z (`{in: 1}`) yoki string-literal.
                 // Kalit so'z map kalitida ham nom sifatida ishlaydi — field access
-                // (`m.in`) bilan simmetrik, Flux falsafasiga mos.
+                // (`m.in`) bilan simmetrik, Fluxon falsafasiga mos.
                 let key = match self.peek().clone() {
                     Tok::Str(parts) => {
                         self.advance();
@@ -1110,7 +1110,7 @@ fn is_cron_on(callee: &Expr) -> bool {
 
 // `.` dan keyingi field nomi: kalit so'z bo'lsa ham uning matnli nomini qaytaradi.
 // `time.in`, `x.match`, `x.if` kabi member nomlari kalit so'z bilan to'qnashmasin —
-// member pozitsiyasida grammatik ma'no yo'q, faqat nom kerak (Flux: til AI'ga moslashadi).
+// member pozitsiyasida grammatik ma'no yo'q, faqat nom kerak (Fluxon: til AI'ga moslashadi).
 // Manba: lexer scan_ident dagi kalit so'z jadvalining teskarisi.
 // Map qiymat pozitsiyasidagi bare tip nomini (`{a:str}`) sym sifatida talqin
 // qiladi (`{a::str}` bilan teng). Bu `ai.json`/tool schema'da docs va'da qilgan
@@ -1127,7 +1127,7 @@ fn schema_type_sym(value: Expr) -> Expr {
 }
 
 // Schema kontekstida tip nomi sifatida tan olinadigan identifikatorlar.
-// `tbl` ustun tiplaridan (docs/flux-agent.md) JSON-schema'ga ma'no beradiganlar.
+// `tbl` ustun tiplaridan (docs/fluxon-agent.md) JSON-schema'ga ma'no beradiganlar.
 fn is_schema_type_name(name: &str) -> bool {
     matches!(name, "str" | "int" | "flt" | "bool" | "json" | "sym")
 }

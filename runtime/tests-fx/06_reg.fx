@@ -1,5 +1,5 @@
 # 06 — reg battery (funksiya registri, dinamik dispatch).
-# Ishga: ./target/release/flux run tests-fx/06_reg.fx
+# Ishga: ./target/release/fluxon run tests-fx/06_reg.fx
 #
 # reg — funksiyani STRING nomi bilan saqlash/chaqirish. Asosiy foydalanish:
 # AI agent tool-loop'lari (model tool nomini tanlaydi, kod reg.call bilan bajaradi).

@@ -6,20 +6,20 @@ This is a **data-centric microservice** (single monolithic server) for a realtim
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ HTTP REST API Layer (main.flux)                             │
+│ HTTP REST API Layer (main.fluxon)                             │
 │ 26 endpoints across users, channels, messages, AI, realtime │
 └─────────────────────────────────────────────────────────────┘
           ↓                    ↓                    ↓
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
 │ Domain Logic     │  │ Realtime Layer   │  │ AI Services      │
-│ (modules)        │  │ (realtime.flux)  │  │ (ai_service.flux)│
-│ • users.flux     │  │ • presence       │  │ • moderation     │
-│ • channels.flux  │  │ • typing         │  │ • summarize      │
-│ • messages.flux  │  │ • broadcasting   │  │ • topics         │
+│ (modules)        │  │ (realtime.fluxon)  │  │ (ai_service.fluxon)│
+│ • users.fluxon     │  │ • presence       │  │ • moderation     │
+│ • channels.fluxon  │  │ • typing         │  │ • summarize      │
+│ • messages.fluxon  │  │ • broadcasting   │  │ • topics         │
 └──────────────────┘  └──────────────────┘  └──────────────────┘
           ↓                    ↓                    ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ PostgreSQL (schema.flux) + Queue (cron_jobs.flux)          │
+│ PostgreSQL (schema.fluxon) + Queue (cron_jobs.fluxon)          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,13 +33,13 @@ main.http.on :post "/channels/:id/messages"
     ↓
 require_auth (check X-User-Id header)
     ↓
-msg_mod.create_message (messages.flux)
+msg_mod.create_message (messages.fluxon)
     ├─ Check user is channel member
     ├─ ai_mod.check_message_moderation (AI classification)
     ├─ db.ins "messages" (persist)
     └─ Queue moderation job if flagged
     ↓
-rt_mod.ws_send_message (realtime.flux)
+rt_mod.ws_send_message (realtime.fluxon)
     ├─ broadcast_event to channel_id
     └─ queue.push "broadcast"
     ↓
@@ -93,8 +93,8 @@ mark_inactive_users
 
 ## State Management
 
-### In-Memory (realtime.flux)
-```flux
+### In-Memory (realtime.fluxon)
+```fluxon
 active_connections <- {}           # {channel_id: [user_id, ...]}
 typing_indicators <- {}            # {channel_id: {user_id: timestamp}}
 presence_per_channel <- {}         # {channel_id: {user_id: timestamp}}
@@ -132,7 +132,7 @@ queue.on "moderate_message" \ handler
 ## Module Dependencies
 
 ```
-main.flux
+main.fluxon
 ├── schema (imports db)
 ├── users
 ├── channels
@@ -150,14 +150,14 @@ main.flux
 
 ## Concurrency Model
 
-### Design (Flux is silent, so assumed):
+### Design (Fluxon is silent, so assumed):
 - **HTTP handlers run concurrently** (standard web server model)
 - **Shared mutable state is racy** without locking
 - **Database has its own locks** for row-level conflicts
 - **Queue handlers run serially** (single-threaded queue processor)
 
 ### Race Conditions in This Implementation
-```flux
+```fluxon
 active_connections <- {}  # ✗ RACY
 # Thread 1: active_connections[1] <- [5]
 # Thread 2: active_connections[1] <- [5, 6]  (overwrites thread 1)
@@ -180,7 +180,7 @@ Content-Type: application/json
 **In production:** Replace with JWT or OAuth2.
 
 **Current implementation:**
-```flux
+```fluxon
 fn get_user_from_req req
   user_id_str = req.headers.user_id
   user = user_mod.get_user (str.int user_id_str)
@@ -211,20 +211,20 @@ GET /channels/1/messages?limit=20&before=450
 ## Error Handling Strategy
 
 ### Propagation (`!` operator)
-```flux
+```fluxon
 user = db.one "..." [id]!     # Crash if not found
 ```
 Use when client error → bad request.
 
 ### Nil-coalesce (`??`)
-```flux
+```fluxon
 limit = req.query.limit ?? 20
 count = result.cnt ?? 0
 ```
 Use when default is sensible.
 
 ### Explicit fail
-```flux
+```fluxon
 if !is_member
   fail "User not member of channel"
 ```
@@ -232,7 +232,7 @@ Use for business logic violations.
 
 ### Missing: Typed error responses
 Currently, failures become generic 500s. Should have:
-```flux
+```fluxon
 rep 404 {error:"Channel not found", code:"CHANNEL_NOT_FOUND"}
 rep 400 {error:"Invalid status", code:"INVALID_STATUS"}
 ```
@@ -240,21 +240,21 @@ rep 400 {error:"Invalid status", code:"INVALID_STATUS"}
 ## Performance Characteristics
 
 ### Bottlenecks
-1. **Message history N+1 query** (messages.flux:get_channel_history)
-   ```flux
+1. **Message history N+1 query** (messages.fluxon:get_channel_history)
+   ```fluxon
    messages <- []
    each msg in rows
      user = db.one "select ... where id = $1" [msg.user]  # ✗ N queries
    ```
    Should batch: `SELECT ... WHERE user IN (...)`
 
-2. **Presence cleanup** (realtime.flux:cleanup_typing_indicators)
-   ```flux
+2. **Presence cleanup** (realtime.fluxon:cleanup_typing_indicators)
+   ```fluxon
    each ch_id, ti in typing_indicators  # Full rebuild each call
    ```
-   Should use expiring TTL (Redis, not Flux maps).
+   Should use expiring TTL (Redis, not Fluxon maps).
 
-3. **Spam detection heuristic** (ai_service.flux:detect_spam_user)
+3. **Spam detection heuristic** (ai_service.fluxon:detect_spam_user)
    - No indexing on (user, created) → full table scan
    - Should add DB index
 
@@ -266,14 +266,14 @@ rep 400 {error:"Invalid status", code:"INVALID_STATUS"}
 - Add database indexes on foreign keys and commonly-filtered columns
 - Batch AI calls (multiple messages summarized in one request)
 - Cache hot data (channel member lists, recent messages) in Redis
-- Use connection pooling for DB (Flux should handle this)
+- Use connection pooling for DB (Fluxon should handle this)
 
 ## Deployment Model
 
 ### Single-Server (Dev/Small)
 ```
 ┌──────────────────────────┐
-│ Flux App                 │
+│ Fluxon App                 │
 │ • HTTP on :8080          │
 │ • In-memory presence     │
 │ • PostgreSQL connection  │
@@ -292,7 +292,7 @@ rep 400 {error:"Invalid status", code:"INVALID_STATUS"}
 └──────────────────────────┘
      ↓ ↓ ↓
 ┌────────────┬────────────┬────────────┐
-│ Flux #1    │ Flux #2    │ Flux #3    │
+│ Fluxon #1    │ Fluxon #2    │ Fluxon #3    │
 │ mem :lost  │ mem :lost  │ mem :lost  │
 └────────────┴────────────┴────────────┘
                     ↕ ↕ ↕
@@ -313,8 +313,8 @@ rep 400 {error:"Invalid status", code:"INVALID_STATUS"}
 ## Testing Strategy
 
 ### Unit Tests (not included)
-```flux
-# users.test.flux
+```fluxon
+# users.test.fluxon
 use ./users
 u = create_user "alice" "alice@ex.com"
 assert u.username == "alice"
@@ -325,7 +325,7 @@ assert u.email == "alice@ex.com"
 ```bash
 # Setup
 export DATABASE_URL="postgresql://test:test@localhost/chat_test"
-# Run Flux app
+# Run Fluxon app
 # Execute HTTP requests via curl
 # Verify DB state
 # Cleanup
@@ -396,6 +396,6 @@ export DATABASE_URL="postgresql://test:test@localhost/chat_test"
 
 ---
 
-**Total Implementation:** 1067 lines of Flux across 8 files.
+**Total Implementation:** 1067 lines of Fluxon across 8 files.
 **Time to write (educational):** ~2 hours (learning spec → implementation).
 **Production-readiness:** 70% (core features solid, realtime/concurrency/scalability gaps remain).

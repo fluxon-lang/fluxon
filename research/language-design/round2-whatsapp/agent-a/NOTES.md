@@ -1,4 +1,4 @@
-# Flux — Design Notes
+# Fluxon — Design Notes
 
 ## Philosophy
 A terse, batteries-included server language where the AI/LLM is a first-class
@@ -20,7 +20,7 @@ or token math.
 
 **DB with no ORM ceremony.** `db.ins "table" {..}`, `db.up`, `db.one`, `db.q`.
 Tables declared with `tbl` in the same language as the code. `$DATABASE_URL` is
-read implicitly, so there is zero connection code in `main.flux`.
+read implicitly, so there is zero connection code in `main.fluxon`.
 
 **Webhook = one line.** `http.on :post "/path" handler` + `http.serve`. `rep`
 auto-encodes JSON. No router, no middleware tax.
@@ -43,7 +43,7 @@ outreach + Sunday briefing fits in ~30 lines.
   so they are allowed to look different per constraint 3.
 - ONE bind (`=`) vs ONE mutable bind (`<-`) — distinct operations, distinct syntax.
 
-## Tradeoffs / where the project stressed Flux
+## Tradeoffs / where the project stressed Fluxon
 - **Significant whitespace + deep nesting**: the `briefing` cron with a join and a
   loop pushes indentation; a richer query helper or pipelines would flatten it.
 - **No native pattern-binding in `match`** (e.g. destructuring order shapes) — I
@@ -52,7 +52,7 @@ outreach + Sunday briefing fits in ~30 lines.
 - **Single-tenant shortcut** (`users limit 1`) — multi-tenant routing would need
   an owner resolved from the inbound number; the language handles it fine, the
   demo just didn't need it.
-- **`_.conf` confidence is provider-magic**: Flux assumes the LLM battery returns
+- **`_.conf` confidence is provider-magic**: Fluxon assumes the LLM battery returns
   calibrated confidence. Real life needs a logprob/self-eval strategy; the spec
   hides that behind the battery deliberately.
 - Multi-line SQL strings work but blunt the terseness win — a query builder was

@@ -15,5 +15,5 @@ q.on "send" \job -> tools.send job.ph job.body
 # Register weekly outreach + Sunday briefing.
 cron.register
 
-log "Flux ops assistant up on :8080"
+log "Fluxon ops assistant up on :8080"
 http.serve 8080

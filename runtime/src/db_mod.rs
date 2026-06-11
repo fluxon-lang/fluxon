@@ -1,13 +1,13 @@
-// Flux DB battery — db.q/one/ins/up/del/put va db.tx.
+// Fluxon DB battery — db.q/one/ins/up/del/put va db.tx.
 //
-// ARXITEKTURA: backend `Db` trait orqasiga yashiringan. Flux kodi (`db.*`) hech
+// ARXITEKTURA: backend `Db` trait orqasiga yashiringan. Fluxon kodi (`db.*`) hech
 // qachon o'zgarmaydi; backend bitta config nuqtasidan (`$DATABASE_URL` sxemasi)
 // almashtiriladi. Bugun to'liq SQLite (rusqlite, bundled — server kerak emas);
 // postgres/mysql keyin additiv ulanadi (hozir `Err` stub).
 //
 // Dialekt farqlari (placeholder uslubi, RETURNING, ON CONFLICT, identifikator
 // quoting, BEGIN/SAVEPOINT sintaksisi) trait ichida. SQLite `$1` placeholder'ni
-// native qo'llaydi, shuning uchun Flux'ning spec'dagi `$1` uslubi rewrite'siz
+// native qo'llaydi, shuning uchun Fluxon'ning spec'dagi `$1` uslubi rewrite'siz
 // o'tadi.
 //
 // Tranzaksiya qo'lda BEGIN/COMMIT/ROLLBACK/SAVEPOINT SQL orqali boshqariladi
@@ -54,7 +54,7 @@ pub struct IndexDef {
     pub unique: bool,
 }
 
-// DB'dagi mavjud Flux index ma'lumoti — diff (drop) uchun. Unique holati nomga
+// DB'dagi mavjud Fluxon index ma'lumoti — diff (drop) uchun. Unique holati nomga
 // kodlangan (`idx_` vs `uniq_` prefiks), shu sabab faqat nom yetarli.
 pub struct IndexInfo {
     pub name: String,
@@ -96,21 +96,21 @@ pub trait Db: Send + Sync {
     fn build_upsert(&self, table: &str, set: &[String], key: &[String]) -> String;
     fn build_create_table(&self, table: &str, cols: &[ColDef]) -> String;
 
-    // Jadval ustunlarining (nom, flux-tip) ro'yxati — DB sxemasidan introspeksiya.
+    // Jadval ustunlarining (nom, fluxon-tip) ro'yxati — DB sxemasidan introspeksiya.
     // `tbl` e'lon qilinmagan process json ustunni shu orqali topadi (issue #63).
     // Faqat json aniq tiklanadi (sym/bool SQLite'da TEXT/INTEGER bo'lib matnan
     // farqlanmaydi). Jadval topilmasa bo'sh ro'yxat.
     fn column_types(&self, table: &str) -> Result<Vec<(String, String)>, String>;
 
-    // Flux boshqaradigan indekslar (jadval bo'yicha): nom + unique flag. Faqat
+    // Fluxon boshqaradigan indekslar (jadval bo'yicha): nom + unique flag. Faqat
     // `idx_`/`uniq_` prefiksli, foydalanuvchi-yaratgan (origin='c') indekslar —
     // auto-migration ularni diff qiladi. `sqlite_autoindex_*`/UNIQUE-constraint/
     // pk indekslariga TEGMAYDI.
-    fn flux_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String>;
+    fn fluxon_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String>;
 
-    // `_flux_schema` meta-jadvalidagi Flux yaratgan jadval nomlari. DROP TABLE
-    // faqat shu ro'yxatdagi jadvallarga (Flux yaratmagan jadval saqlanadi).
-    fn flux_tables(&self) -> Result<Vec<String>, String>;
+    // `_fluxon_schema` meta-jadvalidagi Fluxon yaratgan jadval nomlari. DROP TABLE
+    // faqat shu ro'yxatdagi jadvallarga (Fluxon yaratmagan jadval saqlanadi).
+    fn fluxon_tables(&self) -> Result<Vec<String>, String>;
 
     // Jadvaldagi mavjud FOREIGN KEY cheklovlari (introspeksiya). Migration buni
     // `ref:tbl.col` deklaratsiyasi bilan solishtiradi — farq bo'lsa rebuild.
@@ -320,25 +320,25 @@ impl Db for SqliteDb {
         r
     }
 
-    fn flux_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String> {
+    fn fluxon_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String> {
         let conn = self.pool.checkout()?;
-        let r = sqlite_flux_indexes(&conn, table);
+        let r = sqlite_fluxon_indexes(&conn, table);
         self.pool.checkin(conn);
         r
     }
 
-    fn flux_tables(&self) -> Result<Vec<String>, String> {
+    fn fluxon_tables(&self) -> Result<Vec<String>, String> {
         let conn = self.pool.checkout()?;
         let r = (|| {
             let mut stmt = conn
-                .prepare("SELECT table_name FROM _flux_schema")
-                .map_err(|e| sql_err("_flux_schema o'qish", e))?;
+                .prepare("SELECT table_name FROM _fluxon_schema")
+                .map_err(|e| sql_err("_fluxon_schema o'qish", e))?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| sql_err("_flux_schema o'qish", e))?;
+                .map_err(|e| sql_err("_fluxon_schema o'qish", e))?;
             let mut out = Vec::new();
             for r in rows {
-                out.push(r.map_err(|e| sql_err("_flux_schema o'qish", e))?);
+                out.push(r.map_err(|e| sql_err("_fluxon_schema o'qish", e))?);
             }
             Ok(out)
         })();
@@ -475,7 +475,7 @@ impl Db for SqliteDb {
 }
 
 // SQLite jadval ustunlarini introspeksiya qiladi: pragma_table_info'dan e'lon
-// qilingan tipni olib Flux tip nomiga aylantiradi. Jadval bo'lmasa bo'sh ro'yxat.
+// qilingan tipni olib Fluxon tip nomiga aylantiradi. Jadval bo'lmasa bo'sh ro'yxat.
 fn sqlite_column_types(conn: &Connection, table: &str) -> Result<Vec<(String, String)>, String> {
     let mut stmt = conn
         .prepare("SELECT name, type FROM pragma_table_info(?1)")
@@ -484,7 +484,7 @@ fn sqlite_column_types(conn: &Connection, table: &str) -> Result<Vec<(String, St
         .query_map([table], |row| {
             let name: String = row.get(0)?;
             let decl: String = row.get(1)?;
-            Ok((name, sqlite_decl_to_flux_type(&decl)))
+            Ok((name, sqlite_decl_to_fluxon_type(&decl)))
         })
         .map_err(|e| sql_err("pragma_table_info", e))?;
     let mut out = Vec::new();
@@ -494,10 +494,10 @@ fn sqlite_column_types(conn: &Connection, table: &str) -> Result<Vec<(String, St
     Ok(out)
 }
 
-// Flux boshqaradigan indekslarni o'qiydi: pragma_index_list'dan origin='c'
+// Fluxon boshqaradigan indekslarni o'qiydi: pragma_index_list'dan origin='c'
 // (CREATE INDEX) VA nom `idx_`/`uniq_` prefiksli bo'lganlarni. `sqlite_autoindex_*`
 // (origin='u'/'pk') va boshqa qo'lda yaratilgan indekslarga TEGMAYDI.
-fn sqlite_flux_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexInfo>, String> {
+fn sqlite_fluxon_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexInfo>, String> {
     let mut stmt = conn
         .prepare("SELECT name, origin FROM pragma_index_list(?1)")
         .map_err(|e| sql_err("pragma_index_list", e))?;
@@ -511,7 +511,7 @@ fn sqlite_flux_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexInfo>,
     let mut out = Vec::new();
     for r in rows {
         let (name, origin) = r.map_err(|e| sql_err("pragma_index_list", e))?;
-        // Faqat Flux yaratgan (CREATE INDEX) + bizning prefikslarimiz.
+        // Faqat Fluxon yaratgan (CREATE INDEX) + bizning prefikslarimiz.
         if origin == "c" && (name.starts_with("idx_") || name.starts_with("uniq_")) {
             out.push(IndexInfo { name });
         }
@@ -563,7 +563,7 @@ fn sqlite_fk_violations(conn: &Connection, table: &str) -> Result<i64, String> {
 // to'qnashadi. Bo'sh nom topilguncha sanoq qo'shamiz: `_fk`, `_fk_2`, `_fk_3`...
 // Har backup ataylab saqlanadi, shu sabab clobber emas — yangi nom.
 fn unique_rebuild_backup_name(conn: &Connection, table: &str, ts: u64) -> Result<String, String> {
-    let base = format!("_flux_bak_{table}_{ts}_fk");
+    let base = format!("_fluxon_bak_{table}_{ts}_fk");
     let mut name = base.clone();
     let mut n = 2;
     while sqlite_table_exists(conn, &name)? {
@@ -612,7 +612,7 @@ fn sqlite_rebuild_table(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let tmp = format!("_flux_rebuild_{table}");
+    let tmp = format!("_fluxon_rebuild_{table}");
     // foreign_keys OFF tx'dan tashqarida; rebuild davomida FK enforce qilinmaydi
     // (drop/rename parent-child tartibidan qat'i nazar ishlasin).
     conn.execute_batch("PRAGMA foreign_keys=OFF")
@@ -683,10 +683,10 @@ fn sqlite_rebuild_table(
     result
 }
 
-// E'lon qilingan SQLite tipini Flux tip nomiga moslaydi. Hozir faqat json
+// E'lon qilingan SQLite tipini Fluxon tip nomiga moslaydi. Hozir faqat json
 // ahamiyatli (sqlval_to_value uni map/list'ga dekod qiladi); qolgani matn bo'lib
 // qaytadi va maxsus konversiyaga tushmaydi.
-fn sqlite_decl_to_flux_type(decl: &str) -> String {
+fn sqlite_decl_to_fluxon_type(decl: &str) -> String {
     if decl.eq_ignore_ascii_case("json") {
         "json".to_string()
     } else {
@@ -849,7 +849,7 @@ pub fn build_create_table_sql(table: &str, cols: &[ColDef]) -> String {
 // migratsiya vaqti (backup nomini noyob qilish uchun; idempotent bo'lishi shart
 // emas — qayta-run yangi backup yaratadi, bu xavfsizlik uchun ataylab).
 pub fn build_backup(table: &str, ts: u64) -> String {
-    let bak = format!("_flux_bak_{table}_{ts}");
+    let bak = format!("_fluxon_bak_{table}_{ts}");
     format!(
         "CREATE TABLE {} AS SELECT * FROM {}",
         q_ident(&bak),
@@ -946,7 +946,7 @@ impl Drop for SqliteTx {
 // ==================== backend tanlash (yagona config nuqtasi) ====================
 
 pub fn open_from_env() -> Result<Arc<dyn Db>, String> {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:flux.db".to_string());
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:fluxon.db".to_string());
     match url.split_once(':') {
         Some(("sqlite", rest)) => Ok(Arc::new(SqliteDb::open(rest)?)),
         Some(("postgres", _)) | Some(("postgresql", _)) => {
@@ -1236,7 +1236,7 @@ impl Interp {
             d.set(n);
             n
         });
-        let name = format!("flux_sp_{depth}");
+        let name = format!("fluxon_sp_{depth}");
 
         let sp_res = CURRENT_TX.with(|c| {
             c.borrow()
@@ -1569,7 +1569,7 @@ fn str_at(spec: &[Value], i: usize) -> String {
 // --- Value <-> SqlVal va schema-aware konversiya ---
 
 impl Interp {
-    // Flux map'ni (ustun, qiymat) ro'yxatlariga ajratadi. BTreeMap tartibi
+    // Fluxon map'ni (ustun, qiymat) ro'yxatlariga ajratadi. BTreeMap tartibi
     // deterministik — bog'lash bilan mos keladi.
     fn map_to_cols(
         &self,
@@ -1600,7 +1600,7 @@ impl Interp {
         Ok(vals)
     }
 
-    // Flux Value -> SqlVal (yozishda). json ustunga map/list -> json_encode.
+    // Fluxon Value -> SqlVal (yozishda). json ustunga map/list -> json_encode.
     fn value_to_sqlval(&self, table: &str, col: &str, v: &Value) -> Result<SqlVal, Flow> {
         Ok(match v {
             Value::Int(n) => SqlVal::Int(*n),
@@ -1645,7 +1645,7 @@ impl Interp {
         })
     }
 
-    // Qatorni Flux map'ga aylantiradi, schema bo'yicha sym/json/bool tiklanadi.
+    // Qatorni Fluxon map'ga aylantiradi, schema bo'yicha sym/json/bool tiklanadi.
     fn row_to_value(&self, table: Option<&str>, row: Row) -> Value {
         let mut m = BTreeMap::new();
         for (col, cell) in row {
@@ -1699,7 +1699,7 @@ impl Interp {
     }
 }
 
-// SqlVal -> Flux Value, ustun tipi bo'yicha post-process.
+// SqlVal -> Fluxon Value, ustun tipi bo'yicha post-process.
 fn sqlval_to_value(cell: SqlVal, col_type: Option<&str>) -> Value {
     let base = match cell {
         SqlVal::Int(n) => Value::Int(n),
@@ -1711,7 +1711,7 @@ fn sqlval_to_value(cell: SqlVal, col_type: Option<&str>) -> Value {
         SqlVal::Null => Value::Nil,
     };
     match (col_type, &base) {
-        // sym ustun: DB matn -> Flux symbol.
+        // sym ustun: DB matn -> Fluxon symbol.
         (Some("sym"), Value::Str(s)) => Value::Sym(s.clone()),
         // json ustun: matn -> dekod qilingan map/list.
         (Some("json"), Value::Str(s)) => json_decode(s).unwrap_or(base),
@@ -2323,7 +2323,7 @@ mod tests {
         // Ikkala backup ham saqlangan (turli nom: `_fk` va `_fk_2`).
         let baks = db
             .query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '_flux_bak_posts_7_fk%' ORDER BY name",
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '_fluxon_bak_posts_7_fk%' ORDER BY name",
                 &[],
             )
             .unwrap();
@@ -2429,7 +2429,7 @@ mod tests {
         // global (tx'siz) so'rov pooldan BOSHQA connection olib ishlayveradi va
         // uncommitted yozuvni ko'rmaydi. WAL snapshot kerak — fayl DB ishlatamiz
         // (shared-cache :memory: WAL'ni qo'llamaydi).
-        let path = std::env::temp_dir().join("flux_dbmod_pool_promise.db");
+        let path = std::env::temp_dir().join("fluxon_dbmod_pool_promise.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));

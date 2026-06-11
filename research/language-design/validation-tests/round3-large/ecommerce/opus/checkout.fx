@@ -1,4 +1,4 @@
-# checkout.flux — savatchani buyurtmaga aylantirish
+# checkout.fluxon — savatchani buyurtmaga aylantirish
 # MUHIM: har item uchun zaxira tekshiriladi, jami DB narxidan hisoblanadi
 # (mijoz narxiga ishonilmaydi), zaxira kamaytiriladi, savat :converted
 # bo'ladi, order + order_items yaratiladi. Bironta item yetishmasa — butun

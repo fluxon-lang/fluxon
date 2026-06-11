@@ -4,7 +4,7 @@
 # ai -> ANTHROPIC_API_KEY naqshiga mos). Hech narsa sozlash shart emas:
 #
 #   export AUTH_SECRET=sirli-kalit
-#   flux run examples/auth_demo.fx
+#   fluxon run examples/auth_demo.fx
 #
 # (Server BLOKLAMAYDI — bu demo to'g'ridan-to'g'ri chiqib ketadi. Haqiqiy
 #  auth oqimi uchun examples/middleware.fx ga qarang.)

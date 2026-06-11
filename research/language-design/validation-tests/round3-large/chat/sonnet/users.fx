@@ -1,4 +1,4 @@
-# users.flux — Foydalanuvchi REST endpointlari va yordamchi funksiyalar
+# users.fluxon — Foydalanuvchi REST endpointlari va yordamchi funksiyalar
 
 use http db
 use ./schema

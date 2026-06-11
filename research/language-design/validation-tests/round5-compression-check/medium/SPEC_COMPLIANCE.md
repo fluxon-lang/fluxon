@@ -1,17 +1,17 @@
-# Flux Spec Compliance — Features Used
+# Fluxon Spec Compliance — Features Used
 
-This document lists every Flux language feature used in the polls API implementation, validated against the spec.
+This document lists every Fluxon language feature used in the polls API implementation, validated against the spec.
 
 ## Core Language Features (✓ All Used)
 
 ### Comments
-```flux
+```fluxon
 # Comment to end of line
 ```
 **File:** All files use `#` comments. ✓
 
 ### Variable Bindings
-```flux
+```fluxon
 x = 10              # immutable (standard)
 total <- 0          # mutable; reassign: total <- total + 5
 ```
@@ -22,7 +22,7 @@ total <- 0          # mutable; reassign: total <- total + 5
 ✓
 
 ### Types
-```flux
+```fluxon
 42 int · 3.14 flt · "hi" str · true bool · nil · :ok sym
 [1 2 3] list · {a:1 b:2} map
 ```
@@ -37,7 +37,7 @@ total <- 0          # mutable; reassign: total <- total + 5
 ✓
 
 ### String Interpolation
-```flux
+```fluxon
 "$x" or "${expr}"
 ```
 **Files:**
@@ -46,7 +46,7 @@ total <- 0          # mutable; reassign: total <- total + 5
 ✓
 
 ### Operators
-```flux
+```fluxon
 + - * / %
 == != < <= > >=
 & | !
@@ -66,7 +66,7 @@ total <- 0          # mutable; reassign: total <- total + 5
 ✓
 
 ### Functions
-```flux
+```fluxon
 fn name arg1 arg2
   ret value
 fn name arg -> arg * 2   # single-line
@@ -79,7 +79,7 @@ fn name arg -> arg * 2   # single-line
 ✓
 
 ### Control Flow
-```flux
+```fluxon
 if/elif/else
 each item in list
 match status
@@ -91,7 +91,7 @@ match status
 ✓
 
 ### Error Handling
-```flux
+```fluxon
 fail [status] "message"
 !  (propagate error)
 ?? (null coalesce)
@@ -105,7 +105,7 @@ fail [status] "message"
 ## Module System
 
 ### use declarations
-```flux
+```fluxon
 use http db ai json
 use ./tools
 use ./ai as helper
@@ -120,7 +120,7 @@ use ./ai as helper
 ✓
 
 ### Exports
-```flux
+```fluxon
 exp fn create_order ...
 ```
 **All public functions in models, api_summary marked `exp`.**
@@ -129,7 +129,7 @@ exp fn create_order ...
 ## Batteries (stdlib)
 
 ### http
-```flux
+```fluxon
 http.on :post "/path" \req -> rep 201 {...}
 http.on :get "/path" \req -> rep 200 {...}
 http.serve 8080
@@ -141,7 +141,7 @@ http.serve 8080
 ✓
 
 ### db
-```flux
+```fluxon
 db.q "select..." [params]     → list of maps
 db.one "select..." [params]   → map or nil
 db.ins "table" {...}          → full row with id
@@ -159,7 +159,7 @@ db.tx \-> ... ret value       → atomic transaction
 ✓
 
 ### ai (LLM)
-```flux
+```fluxon
 txt = ai.ask "question"
 r = ai.json "prompt" {schema}
 r._.conf, r._.tokens, r._.cost, r._.ms
@@ -171,7 +171,7 @@ r._.conf, r._.tokens, r._.cost, r._.ms
 ✓
 
 ### time
-```flux
+```fluxon
 time.now
 time.ago 24 :hr
 ```
@@ -180,7 +180,7 @@ time.ago 24 :hr
 ✓
 
 ### log
-```flux
+```fluxon
 log "message"
 ```
 **File: cron_tasks.fx**
@@ -188,7 +188,7 @@ log "message"
 ✓
 
 ### cron
-```flux
+```fluxon
 cron.wk :sun 18 0 fn
 cron.dy 9 0 fn
 cron.hr 30 fn
@@ -198,7 +198,7 @@ cron.hr 30 fn
 ✓
 
 ### str
-```flux
+```fluxon
 str.len s
 str.slice s a b
 str.up s
@@ -215,7 +215,7 @@ str.str x
 ✓
 
 ### json
-```flux
+```fluxon
 json.enc v
 json.dec s
 ```
@@ -226,7 +226,7 @@ json.dec s
 ## Advanced Features
 
 ### Symbols in Database
-```flux
+```fluxon
 db.ins "table" {status::new}
 t = db.one "select * from..." [id]
 match t.status
@@ -241,7 +241,7 @@ db.q "select..." [:symbol]
 ✓
 
 ### Transaction & Atomicity
-```flux
+```fluxon
 db.tx \-> ... ret value
 ```
 - `cast_vote`: Atomic insert response + increment vote count
@@ -250,7 +250,7 @@ db.tx \-> ... ret value
 ✓
 
 ### Null Coalescing
-```flux
+```fluxon
 x ?? default
 ```
 - Aggregates: `(poll_votes.v ?? 0)`
@@ -258,7 +258,7 @@ x ?? default
 ✓
 
 ### Validation with fail
-```flux
+```fluxon
 if condition
   fail status "message"
 ```
@@ -287,4 +287,4 @@ if condition
 - ai.run (manual tool loop)
 - money type
 
-**Conclusion:** This is a production-grade API covering nearly all Flux language features across 7 well-organized files.
+**Conclusion:** This is a production-grade API covering nearly all Fluxon language features across 7 well-organized files.

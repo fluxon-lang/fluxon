@@ -1,5 +1,5 @@
 ### db (Postgres, $DATABASE_URL auto)
-```flux
+```fluxon
 rows = db.q "select * from t where owner=$1" [oid]   # → list of maps
 one  = db.one "select * from users where id=$1" [id] # → map or nil
 row  = db.ins "orders" {cust:5 status::new}          # → full row (with id)
@@ -12,16 +12,16 @@ Aggregate may be nil → `?? 0`: `db.one "select count(*) c, sum(x) s from t"`.
 
 For reads (`db.q`/`db.one`) write raw SQL. Build the WHERE clause yourself; for
 a multi-value match use `or` (one `$N` per value — there is no list parameter):
-```flux
+```fluxon
 db.q "select * from bookings where tenant_id=$1 and (status=$2 or status=$3) order by start_at limit $4" [tid :pending :confirmed 50]
 ```
 Group/aggregate is raw SQL too:
-```flux
+```fluxon
 db.q "select resource_id, count(*) c, sum(total_cents) rev from bookings where tenant_id=$1 group by resource_id order by rev desc" [tid]
 ```
 
 Transaction — atomic, rollback on `fail`/`!`, returns a value:
-```flux
+```fluxon
 res = db.tx \->
   ord = db.ins "orders" {cust:c total:t}
   each it in items
@@ -30,14 +30,14 @@ res = db.tx \->
 ```
 `db.tx` auto-serializable + retry → "read-check-update" is race-safe (no lock
 needed). Idempotency: `uniq` column + ins inside tx (duplicate → rollback):
-```flux
+```fluxon
 old = db.one "select * from txns where ikey=$1" [key]
 old ?? (ret old)
 db.tx \-> db.ins "txns" {ikey:key ...}   # duplicate → uniq error → rollback
 ```
 
 Schema = `tbl`:
-```flux
+```fluxon
 tbl products
   id    serial pk
   owner int ref:users.id
@@ -47,8 +47,8 @@ tbl products
 Types: serial int flt str bool json now sym money (`int` 64-bit). Modifiers:
 `pk uniq null ref:tbl.col`. Multi-column: `uniq(agent, key)`.
 `json` column: auto map/list on read, auto-encode on write.
-`sym` column: text in DB, symbol in Flux (auto-converts):
-```flux
+`sym` column: text in DB, symbol in Fluxon (auto-converts):
+```fluxon
 db.ins "tickets" {status::new}
 t = db.one "select * from tickets where id=$1" [id]
 match t.status

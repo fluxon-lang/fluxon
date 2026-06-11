@@ -1,6 +1,6 @@
 # Resly — Multi-tenant booking + analytics backend
-# O'zbek tilida Flux'da yozilgan SaaS backend
-# Ishga tushirish: export AUTH_SECRET=test && flux run resly.fx
+# O'zbek tilida Fluxon'da yozilgan SaaS backend
+# Ishga tushirish: export AUTH_SECRET=test && fluxon run resly.fx
 # DATABASE_URL avto topiladi
 
 use http db auth json time

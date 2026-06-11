@@ -1,6 +1,6 @@
 # Realtime WebSocket handling
-# NOTE: This file demonstrates Flux's queue/pubsub patterns.
-# True WebSocket/bidirectional streaming is NOT fully specified in the Flux spec.
+# NOTE: This file demonstrates Fluxon's queue/pubsub patterns.
+# True WebSocket/bidirectional streaming is NOT fully specified in the Fluxon spec.
 # We improvise here using queue as a message bus.
 
 use db
@@ -66,7 +66,7 @@ exp fn ws_user_disconnect channel_id user_id
   # Remove from presence
   pc <- presence_per_channel[channel_id] ?? {}
   if pc[user_id]
-    # In a real language, delete pc[user_id], but Flux maps don't have delete
+    # In a real language, delete pc[user_id], but Fluxon maps don't have delete
     # Workaround: rebuild map without this key
     new_pc <- {}
     each k, v in pc
@@ -162,7 +162,7 @@ exp fn get_active_users channel_id
   ret conns
 
 # Broadcast event to all users in a channel
-# (In real Flux, this would push to a message queue or WebSocket server)
+# (In real Fluxon, this would push to a message queue or WebSocket server)
 fn broadcast_event channel_id event
   # Queue the event for broadcasting
   # In production: pub/sub system, Redis, or actual WebSocket server

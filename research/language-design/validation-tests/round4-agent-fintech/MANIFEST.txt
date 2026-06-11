@@ -1,10 +1,10 @@
 ================================================================================
-FLUX FINTECH BACKEND - COMPLETE MANIFEST
+FLUXON FINTECH BACKEND - COMPLETE MANIFEST
 ================================================================================
 
-PROJECT: Fintech Backend in Flux
+PROJECT: Fintech Backend in Fluxon
 DOMAIN: Payments, Ledger, Double-Entry Accounting
-LANGUAGE: Flux (AI-native backend language)
+LANGUAGE: Fluxon (AI-native backend language)
 STATUS: COMPLETE
 DATE: 2026-06-05
 
@@ -45,7 +45,7 @@ INDEX.md (2,000 words)
     - Spec gaps summary
     - Design decisions
     - Testing recommendations
-    - Flux strengths/weaknesses
+    - Fluxon strengths/weaknesses
   Time to read: 5-10 minutes
 
 FINTECH_SUMMARY.txt (3,000 words)
@@ -58,7 +58,7 @@ FINTECH_SUMMARY.txt (3,000 words)
     - Spec gaps identified (13)
     - Correctness analysis
     - Production readiness assessment
-    - Recommendations for Flux v2
+    - Recommendations for Fluxon v2
     - Key statistics
   Time to read: 10-15 minutes
 
@@ -232,7 +232,7 @@ README.md (11 KB, ~2,000 words)
   Time to read: 20-30 minutes
 
 SPEC_GAPS.md (12 KB, ~2,000 words)
-  Purpose: Detailed analysis of Flux spec ambiguities and how we worked around them
+  Purpose: Detailed analysis of Fluxon spec ambiguities and how we worked around them
   Audience: Language designers, researchers, advanced engineers
   Sections:
     1. Critical Gaps (13 detailed)
@@ -297,7 +297,7 @@ DEPLOYMENT CHECKLIST
 
 Prerequisites:
   [ ] PostgreSQL database (Postgres 12+)
-  [ ] Flux runtime installed
+  [ ] Fluxon runtime installed
   [ ] DATABASE_URL environment variable set
   [ ] AI_KEY environment variable set (for LLM features)
 
@@ -339,7 +339,7 @@ KEY METRICS
 ================================================================================
 
 CODE METRICS:
-  Total Flux code:           1,129 lines
+  Total Fluxon code:           1,129 lines
   Modules:                   9 (.fx files)
   HTTP endpoints:            17
   Database tables:           8
@@ -416,9 +416,9 @@ FOR RUNNING THIS CODE:
   6. Monitor first 30 days in production closely
   7. Have manual remediation procedures ready
 
-FOR IMPROVING FLUX:
+FOR IMPROVING FLUXON:
   1. Read SPEC_GAPS.md carefully
-  2. Implement recommendations for Flux v2
+  2. Implement recommendations for Fluxon v2
   3. Add decimal type (critical for fintech)
   4. Document db.tx isolation level
   5. Add structured error handling
@@ -444,7 +444,7 @@ QUESTIONS ABOUT THE CODE:
 QUESTIONS ABOUT SPEC GAPS:
   - See SPEC_GAPS.md (400+ words per gap)
   - See recommendations at end of SPEC_GAPS.md
-  - Consider implementing recommendations for Flux v2
+  - Consider implementing recommendations for Fluxon v2
 
 QUESTIONS ABOUT CORRECTNESS:
   - See README.md "Correctness & Risk" section
@@ -457,7 +457,7 @@ VERSION HISTORY
 
 v1.0 - 2026-06-05
   - Initial implementation
-  - 9 modules, 1,129 lines of Flux
+  - 9 modules, 1,129 lines of Fluxon
   - 17 HTTP endpoints
   - 13 spec gaps identified
   - ~10,500 words documentation
@@ -467,12 +467,12 @@ v1.0 - 2026-06-05
 LICENSE & USAGE
 ================================================================================
 
-This code is part of the Flux language validation test suite.
+This code is part of the Fluxon language validation test suite.
 Use it to:
-  - Validate Flux spec completeness
-  - Test Flux correctness for fintech domains
+  - Validate Fluxon spec completeness
+  - Test Fluxon correctness for fintech domains
   - Identify gaps in language definition
-  - Prototype Flux implementations
+  - Prototype Fluxon implementations
 
 Do not use in production without:
   - Validating all critical assumptions
@@ -485,11 +485,11 @@ Do not use in production without:
 END OF MANIFEST
 ================================================================================
 
-Project:        Fintech Backend in Flux
+Project:        Fintech Backend in Fluxon
 Status:         COMPLETE
 Date:           2026-06-05
 Author:         Claude Haiku 4.5
-Total Files:    14 (9 Flux modules + 5 docs)
+Total Files:    14 (9 Fluxon modules + 5 docs)
 Total Lines:    1,129 code + ~10,500 documentation
 Production Ready: ~85% (pending spec clarifications)
 

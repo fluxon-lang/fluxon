@@ -1,4 +1,4 @@
-# Flux
+# Fluxon
 
 > 🌐 **Language:** English (current) · [O'zbek](README.uz.md)
 
@@ -12,7 +12,7 @@ even the simplest task requires an extra package. For an AI agent that is noise:
 every "decision point" is a potential mistake, every redundant character is
 wasted context.
 
-Flux is built differently — by measuring what AI writes easily and reliably, and
+Fluxon is built differently — by measuring what AI writes easily and reliably, and
 shaping the language around that.
 
 ```fx
@@ -44,7 +44,7 @@ boilerplate.
    choose?" — there is no choice, so there are fewer mistakes.
 
 2. **Few tokens, but readable.** The syntax is short, but not cryptic. Keywords
-   are spelled out in full (`each`, `match`, `else`) — an AI seeing Flux for the
+   are spelled out in full (`each`, `match`, `else`) — an AI seeing Fluxon for the
    first time understands it immediately.
 
 3. **Batteries included.** `http`, `db` (transactions + concurrency guarantees),
@@ -63,7 +63,7 @@ boilerplate.
 
 ## How this language was designed (methodology)
 
-Flux was built through **stress testing** — with evidence, not guesswork:
+Fluxon was built through **stress testing** — with evidence, not guesswork:
 
 1. **Research:** we studied which code patterns AI writes most reliably and with
    the fewest tokens (declarative DSLs, canonical form, batteries — see the
@@ -71,7 +71,7 @@ Flux was built through **stress testing** — with evidence, not guesswork:
 2. **Invention:** several AI models were each given the task "invent a language
    for AI." Independently, multiple models converged on the same ideas — and
    that convergence showed there is a "correct" design.
-3. **Testing:** the Flux spec was handed to AI models that had **never seen** the
+3. **Testing:** the Fluxon spec was handed to AI models that had **never seen** the
    language (opus, sonnet, haiku), which were asked to write real projects. Each
    "spec gap" a model hit exposed a real shortcoming of the language.
 4. **Refinement:** the gaps found were closed, then re-tested. Over several
@@ -85,11 +85,11 @@ This whole process is preserved in full in the `research/` folder.
 ## Repository structure
 
 ```
-flux-lang/
+fluxon-lang/
 ├── docs/
-│   ├── flux-human.md      # detailed guide (for humans, English)
-│   ├── flux-human.uz.md   # detailed guide (for humans, Uzbek)
-│   └── flux-agent.md      # compact spec (for AI agents — ~2700 tokens)
+│   ├── fluxon-human.md      # detailed guide (for humans, English)
+│   ├── fluxon-human.uz.md   # detailed guide (for humans, Uzbek)
+│   └── fluxon-agent.md      # compact spec (for AI agents — ~2700 tokens)
 ├── examples/              # working example projects
 │   ├── support-tickets/   # AI classification + confidence routing
 │   ├── ecommerce/         # catalog, cart, checkout (transaction), AI recommendations
@@ -98,7 +98,7 @@ flux-lang/
     └── language-design/
         ├── round1-invented-langs/   # AIs invent languages
         ├── round2-whatsapp/         # invention driven by a real project
-        └── validation-tests/        # testing Flux on fresh AIs
+        └── validation-tests/        # testing Fluxon on fresh AIs
 ```
 
 ---
@@ -118,10 +118,10 @@ exists (Rust, tree-walking interpreter) — it can run `.fx` files.
   (JWT + password hashing), **`ws`** (websocket), **`cron`**, **`queue`**,
   **`reg`** (tool registry).
 
-Every battery specified in `docs/flux-agent.md` is available. One caveat: the
+Every battery specified in `docs/fluxon-agent.md` is available. One caveat: the
 `db` battery currently ships only the **SQLite** backend — although the spec
 headlines it as Postgres, `postgres:`/`mysql:` `DATABASE_URL` schemes are still
-stubs (they return an error). Flux `db.*` code is backend-neutral, so those
+stubs (they return an error). Fluxon `db.*` code is backend-neutral, so those
 backends can be added without changing user code.
 
 Run it:
@@ -135,7 +135,7 @@ cargo run -- run examples/demo.fx
 
 ## Contributing
 
-Flux is open source — we welcome your help.
+Fluxon is open source — we welcome your help.
 
 - **Human contributors:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, build,
   test, PR process.
@@ -151,6 +151,6 @@ MIT
 
 ---
 
-> **Note.** Flux is not being built to replace or outcompete existing global
+> **Note.** Fluxon is not being built to replace or outcompete existing global
 > programming languages. The goal is just one: to be **the programming language
 > AI knows best and likes most**.

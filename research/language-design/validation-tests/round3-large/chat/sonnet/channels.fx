@@ -1,4 +1,4 @@
-# channels.flux — Kanal yaratish, qo'shilish, chiqish va ro'yxat endpointlari
+# channels.fluxon — Kanal yaratish, qo'shilish, chiqish va ro'yxat endpointlari
 
 use http db
 use ./schema

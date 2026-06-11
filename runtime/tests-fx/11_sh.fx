@@ -1,5 +1,5 @@
 # 11 — sh battery (tashqi shell buyruqlari).
-# Ishga: ./target/release/flux run tests-fx/11_sh.fx
+# Ishga: ./target/release/fluxon run tests-fx/11_sh.fx
 #
 # sh.run cmd -> {stdout: str  stderr: str  code: int}. Buyruq shell orqali boradi,
 # shuning uchun `&&`, quvur (|) ishlaydi. Bu testlar Unix shell (sh) ni nazarda

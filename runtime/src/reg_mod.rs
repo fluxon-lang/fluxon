@@ -1,11 +1,11 @@
-// Flux reg battery — funksiya registri (dinamik dispatch).
+// Fluxon reg battery — funksiya registri (dinamik dispatch).
 //
 // Funksiyani STRING nomi bilan saqlash/chaqirish imkonini beradi. Asosiy
 // foydalanish — AI agent tool-loop'lari: model "qaysi tool'ni" string nomi
 // bilan tanlaydi, kod esa `reg.call name args` orqali uni bajaradi (`match`-switch
 // EMAS — tool'lar runtime'da qo'shiladi).
 //
-// Til API (docs/flux-agent.md):
+// Til API (docs/fluxon-agent.md):
 //   reg.add "calc" \args -> args.a + args.b   # nom bilan ro'yxatga olish
 //   out = reg.call "calc" {a:2 b:3}           # nom bilan chaqirish -> 5
 //   reg.has "calc"                            # bool

@@ -1,6 +1,6 @@
 // WS battery end-to-end testi — haqiqiy WebSocket klient bilan.
 //
-// `flux` binary'ni subprocess sifatida ishga tushiramiz (ws_chat.fx serverini),
+// `fluxon` binary'ni subprocess sifatida ishga tushiramiz (ws_chat.fx serverini),
 // keyin tokio-tungstenite klient bilan ulanib connect/message/room broadcast
 // hayot tsiklini tekshiramiz. Bu unit test emas, to'liq oqim integratsiyasi:
 // handshake -> :connect hello -> join -> say broadcast -> ikkinchi klientga yetib
@@ -17,7 +17,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-// Berilgan port uchun ws skriptini vaqtinchalik faylga yozib, flux serverini
+// Berilgan port uchun ws skriptini vaqtinchalik faylga yozib, fluxon serverini
 // ishga tushiradi. Serverni o'chirish uchun `Child` qaytaradi.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     spawn_server_env(port, script, &[])
@@ -26,18 +26,18 @@ fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
 // `spawn_server` ning env o'zgaruvchilarini beradigan varianti. Env faqat shu
 // subprocess'ga ta'sir qiladi (boshqa testlar bilan poyga yo'q).
 fn spawn_server_env(port: u16, script: &str, env: &[(&str, &str)]) -> (Child, std::path::PathBuf) {
-    let path = std::env::temp_dir().join(format!("flux_ws_test_{}.fx", port));
+    let path = std::env::temp_dir().join(format!("fluxon_ws_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
     f.write_all(script.as_bytes()).expect("temp fx yozish");
     drop(f);
 
-    let bin = env!("CARGO_BIN_EXE_flux");
+    let bin = env!("CARGO_BIN_EXE_fluxon");
     let mut cmd = Command::new(bin);
     cmd.arg("run").arg(&path);
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let child = cmd.spawn().expect("flux serverini ishga tushirish");
+    let child = cmd.spawn().expect("fluxon serverini ishga tushirish");
     (child, path)
 }
 
@@ -301,7 +301,7 @@ async fn cron_run_does_not_block_http_serve() {
 }
 
 // Server o'zi davriy ping yuboradi — half-open (o'lik) ulanishlarni aniqlash
-// uchun (issue #107). Ping oralig'ini `FLUX_WS_PING_SECS=1` bilan tezlashtiramiz
+// uchun (issue #107). Ping oralig'ini `FLUXON_WS_PING_SECS=1` bilan tezlashtiramiz
 // va klient ~1s ichida Ping frame'ini olishini tekshiramiz.
 const PING_SCRIPT: &str = r#"
 use ws
@@ -316,7 +316,7 @@ ws.serve PORT
 async fn server_sends_periodic_ping() {
     let port = 9315;
     let script = PING_SCRIPT.replace("PORT", &port.to_string());
-    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let (child, path) = spawn_server_env(port, &script, &[("FLUXON_WS_PING_SECS", "1")]);
     let _killer = Killer(child);
     wait_port(port).await;
 
@@ -362,7 +362,7 @@ async fn long_handler_does_not_kill_connection() {
     let port = 9316;
     let script = SLOW_HANDLER_SCRIPT.replace("PORT", &port.to_string());
     // Ping oralig'i 1s: 2.5s handler 2 oraliqdan oshadi → burst xavfi.
-    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let (child, path) = spawn_server_env(port, &script, &[("FLUXON_WS_PING_SECS", "1")]);
     let _killer = Killer(child);
     wait_port(port).await;
 
@@ -395,7 +395,7 @@ async fn long_handler_does_not_kill_connection() {
 async fn slow_handler_with_outstanding_ping_keeps_connection() {
     let port = 9317;
     let script = SLOW_HANDLER_SCRIPT.replace("PORT", &port.to_string());
-    let (child, path) = spawn_server_env(port, &script, &[("FLUX_WS_PING_SECS", "1")]);
+    let (child, path) = spawn_server_env(port, &script, &[("FLUXON_WS_PING_SECS", "1")]);
     let _killer = Killer(child);
     wait_port(port).await;
 
