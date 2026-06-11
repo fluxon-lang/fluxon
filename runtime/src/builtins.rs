@@ -261,7 +261,24 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
         // (abs bilan bir uslub), aralash int/flt da ham tur yo'qolmaydi.
         "min" | "max" => {
             let y = arg_num(&args, 1, &format!("math.{}", func))?;
-            let pick_first = if func == "min" { x <= y } else { x >= y };
+            // int/int i64 da aniq taqqoslanadi: f64 orqali 2^53 dan katta
+            // qo'shni qiymatlar yaxlitlanib teng chiqib qolardi.
+            let pick_first = match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => {
+                    if func == "min" {
+                        a <= b
+                    } else {
+                        a >= b
+                    }
+                }
+                _ => {
+                    if func == "min" {
+                        x <= y
+                    } else {
+                        x >= y
+                    }
+                }
+            };
             Ok(if pick_first {
                 args[0].clone()
             } else {
@@ -1586,6 +1603,16 @@ mod math_tests {
         assert!(matches!(
             math_module("min", vec![Value::Int(5), Value::Flt(5.0)]),
             Ok(Value::Int(5))
+        ));
+        // 2^53 dan katta qo'shni int'lar f64 da bir xil yaxlitlanadi —
+        // int/int yo'l i64 da aniq taqqoslashi kerak (PR #152 review).
+        assert!(matches!(
+            math_module("min", vec![Value::Int(i64::MAX), Value::Int(i64::MAX - 1)]),
+            Ok(Value::Int(v)) if v == i64::MAX - 1
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(i64::MAX - 1), Value::Int(i64::MAX)]),
+            Ok(Value::Int(v)) if v == i64::MAX
         ));
     }
 
