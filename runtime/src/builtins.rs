@@ -88,7 +88,7 @@ pub fn install(env: &Env) {
 pub fn is_module(name: &str) -> bool {
     matches!(
         name,
-        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh"
+        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh" | "bytes"
     )
 }
 
@@ -103,6 +103,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "io" => io_module(func, args),
         "fs" => fs_module(func, args),
         "sh" => sh_module(func, args),
+        "bytes" => bytes_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }
@@ -235,6 +236,52 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
         },
         _ => Err(Flow::err(format!(
             "str modulida '{}' funksiyasi yo'q",
+            func
+        ))),
+    }
+}
+
+// ---------------- bytes (ikkilik ma'lumot, issue #132) ----------------
+//
+// bytes qiymatining literal sintaksisi yo'q — funksiya orqali yaratiladi
+// (fs.readb, crypto.b64db, bytes.of). str.len BELGI sanaydi, bytes.len BAYT —
+// ikkalasi ataylab alohida o'lchov.
+fn bytes_module(func: &str, args: Vec<Value>) -> R {
+    match func {
+        // bytes.of s -> matnning UTF-8 baytlari. bytes berilsa o'zi qaytadi
+        // (idempotent — konversiya zanjirlarida qulay).
+        "of" => match arg(&args, 0, "bytes.of")? {
+            Value::Bytes(b) => Ok(Value::Bytes(b.clone())),
+            Value::Str(s) | Value::Sym(s) => Ok(Value::Bytes(Arc::new(s.clone().into_bytes()))),
+            other => Err(Flow::err(format!(
+                "bytes.of: argument str yoki bytes bo'lishi kerak, {} berildi",
+                other.type_name()
+            ))),
+        },
+        // bytes.str b -> UTF-8 matn; yaroqsiz baytlarda aniq xato (jim buzilmaydi —
+        // crypto.b64d bilan bir xil printsip).
+        "str" => {
+            let b = arg_bytes(&args, 0, "bytes.str")?;
+            String::from_utf8(b.as_ref().clone())
+                .map(Value::Str)
+                .map_err(|_| Flow::err("bytes.str: baytlar UTF-8 matn emas".to_string()))
+        }
+        "len" => Ok(Value::Int(arg_bytes(&args, 0, "bytes.len")?.len() as i64)),
+        // bytes.slice b a c — str.slice semantikasi (chegaralar clamp, a >= b ->
+        // bo'sh), lekin bayt indekslarida.
+        "slice" => {
+            let b = arg_bytes(&args, 0, "bytes.slice")?;
+            let a = arg_int(&args, 1, "bytes.slice")? as usize;
+            let c = arg_int(&args, 2, "bytes.slice")? as usize;
+            let a = a.min(b.len());
+            let c = c.min(b.len());
+            if a >= c {
+                return Ok(Value::Bytes(Arc::new(Vec::new())));
+            }
+            Ok(Value::Bytes(Arc::new(b[a..c].to_vec())))
+        }
+        _ => Err(Flow::err(format!(
+            "bytes modulida '{}' funksiyasi yo'q (of/str/len/slice)",
             func
         ))),
     }
@@ -601,26 +648,40 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
                 Err(e) => Err(Flow::err(format!("fs.read {}: {}", path, e))),
             }
         }
+        // fs.readb path -> fayl baytlari (bytes), yo'q bo'lsa nil. fs.read'ning
+        // ikkilik juftligi (issue #132) — rasm/PDF kabi UTF-8 bo'lmagan fayllar
+        // fs.read'da xato beradi, bular shu orqali o'qiladi.
+        "readb" => {
+            let path = arg_str(&args, 0, "fs.readb")?;
+            match std::fs::read(&path) {
+                Ok(b) => Ok(Value::Bytes(Arc::new(b))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
+                Err(e) => Err(Flow::err(format!("fs.readb {}: {}", path, e))),
+            }
+        }
         // fs.write path content -> faylni ustiga yozadi (oldingi mazmun o'chadi).
         // Oraliq papkalar mavjud bo'lishi kerak (kerak bo'lsa fs.mkdirp).
+        // content str YOKI bytes — yozish uchun alohida "writeb" kerak emas,
+        // chunki manba turi yo'lni o'zgartirmaydi (o'qishdan farqli).
         "write" => {
             let path = arg_str(&args, 0, "fs.write")?;
-            let content = arg_str(&args, 1, "fs.write")?;
-            std::fs::write(&path, content)
+            let content = arg_bytes(&args, 1, "fs.write")?;
+            std::fs::write(&path, content.as_slice())
                 .map_err(|e| Flow::err(format!("fs.write {}: {}", path, e)))?;
             Ok(Value::Sym("ok".into()))
         }
-        // fs.append path content -> mavjud fayl oxiriga qo'shadi (yo'q bo'lsa yaratadi).
+        // fs.append path content -> mavjud fayl oxiriga qo'shadi (yo'q bo'lsa
+        // yaratadi). content str yoki bytes (fs.write bilan bir xil).
         "append" => {
             use std::io::Write;
             let path = arg_str(&args, 0, "fs.append")?;
-            let content = arg_str(&args, 1, "fs.append")?;
+            let content = arg_bytes(&args, 1, "fs.append")?;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
                 .map_err(|e| Flow::err(format!("fs.append {}: {}", path, e)))?;
-            f.write_all(content.as_bytes())
+            f.write_all(content.as_slice())
                 .map_err(|e| Flow::err(format!("fs.append {}: {}", path, e)))?;
             Ok(Value::Sym("ok".into()))
         }
@@ -965,6 +1026,12 @@ pub fn json_encode(v: &Value) -> String {
             format!("[{}]", parts.join(","))
         }
         Value::Map(m) => json_encode_map(m),
+        // JSON'da ikkilik tur yo'q — baytlar base64 matn bo'lib tushadi
+        // (yo'qotishsiz; null/buzilgan matndan foydaliroq).
+        Value::Bytes(b) => {
+            use base64::Engine;
+            json_str(&base64::engine::general_purpose::STANDARD.encode(b.as_slice()))
+        }
         // ctx oddiy map kabi kodlanadi (snapshot) — javob body'siga tushsa.
         Value::Ctx(c) => json_encode_map(&c.lock().unwrap()),
         Value::Fn(_) | Value::Native(_) => "null".into(),
@@ -1491,6 +1558,21 @@ pub(crate) fn arg_str(args: &[Value], i: usize, who: &str) -> Result<String, Flo
         Value::Sym(s) => Ok(s.clone()),
         other => Err(Flow::err(format!(
             "{}: {}-argument str bo'lishi kerak, {} berildi",
+            who,
+            i + 1,
+            other.type_name()
+        ))),
+    }
+}
+// Ikkilik argumentni o'qiydi. str/sym ham qabul qilinadi (UTF-8 baytlari) —
+// crypto kabi iste'molchilar matn va bytes'ni bitta yo'l bilan qabul qilsin
+// (AI ikki alohida funksiya nomini o'rganmasin).
+pub(crate) fn arg_bytes(args: &[Value], i: usize, who: &str) -> Result<Arc<Vec<u8>>, Flow> {
+    match arg(args, i, who)? {
+        Value::Bytes(b) => Ok(b.clone()),
+        Value::Str(s) | Value::Sym(s) => Ok(Arc::new(s.clone().into_bytes())),
+        other => Err(Flow::err(format!(
+            "{}: {}-argument bytes yoki str bo'lishi kerak, {} berildi",
             who,
             i + 1,
             other.type_name()
@@ -2265,6 +2347,171 @@ mod fs_tests {
     #[test]
     fn fs_is_module() {
         assert!(is_module("fs"));
+    }
+
+    // Ikkilik aylana (issue #132): bytes yoziladi, fs.readb aynan o'sha
+    // baytlarni qaytaradi — UTF-8 bo'lmagan tarkib ham buzilmaydi.
+    #[test]
+    fn write_bytes_then_readb() {
+        let dir = tmp_dir("write_readb");
+        let f = path_str(&dir, "bin.dat");
+        let data = vec![0xff, 0x00, 0xfe, 0x88, 0x01];
+        match fs_module(
+            "write",
+            vec![Value::Str(f.clone()), Value::Bytes(Arc::new(data.clone()))],
+        ) {
+            Ok(Value::Sym(s)) if s == "ok" => {}
+            _ => panic!("fs.write bytes bilan :ok qaytarishi kerak"),
+        }
+        match fs_module("readb", vec![Value::Str(f.clone())]) {
+            Ok(Value::Bytes(b)) => assert_eq!(*b, data),
+            _ => panic!("fs.readb bytes qaytarishi kerak"),
+        }
+        // Matnli fayl ham readb bilan o'qiladi (baytlari).
+        match fs_module("read", vec![Value::Str(f)]) {
+            Err(Flow::Error(_)) => {} // UTF-8 emas — fs.read aniq xato beradi
+            _ => panic!("fs.read UTF-8 bo'lmagan faylda xato berishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // fs.readb yo'q faylda nil (fs.read bilan simmetrik).
+    #[test]
+    fn readb_missing_is_nil() {
+        let dir = tmp_dir("readb_missing");
+        match fs_module("readb", vec![Value::Str(path_str(&dir, "yoq.bin"))]) {
+            Ok(Value::Nil) => {}
+            _ => panic!("yo'q fayl nil qaytarishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // fs.append bytes bilan ham ishlaydi (str + bytes aralash yozish).
+    #[test]
+    fn append_bytes() {
+        let dir = tmp_dir("append_bytes");
+        let f = path_str(&dir, "mix.dat");
+        let _ = fs_module(
+            "write",
+            vec![Value::Str(f.clone()), Value::Str("ab".into())],
+        );
+        let _ = fs_module(
+            "append",
+            vec![Value::Str(f.clone()), Value::Bytes(Arc::new(vec![0xff]))],
+        );
+        match fs_module("readb", vec![Value::Str(f)]) {
+            Ok(Value::Bytes(b)) => assert_eq!(*b, vec![b'a', b'b', 0xff]),
+            _ => panic!("fs.readb bytes qaytarishi kerak"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bytes_tests {
+    use super::*;
+
+    fn b(v: &[u8]) -> Value {
+        Value::Bytes(Arc::new(v.to_vec()))
+    }
+
+    // of/str aylanasi: matn -> baytlar -> matn (diakritikali ham — UTF-8).
+    #[test]
+    fn of_str_roundtrip() {
+        let src = "salom o'zbek";
+        match bytes_module("of", vec![Value::Str(src.into())]) {
+            Ok(Value::Bytes(by)) => {
+                assert_eq!(by.as_slice(), src.as_bytes());
+                match bytes_module("str", vec![Value::Bytes(by)]) {
+                    Ok(Value::Str(s)) => assert_eq!(s, src),
+                    _ => panic!("bytes.str matn qaytarishi kerak"),
+                }
+            }
+            _ => panic!("bytes.of bytes qaytarishi kerak"),
+        }
+    }
+
+    // bytes.of bytes'da idempotent (qayta o'rash yo'q).
+    #[test]
+    fn of_idempotent() {
+        match bytes_module("of", vec![b(&[1, 2, 3])]) {
+            Ok(Value::Bytes(by)) => assert_eq!(*by, vec![1, 2, 3]),
+            _ => panic!("bytes.of bytes'ni o'zicha qaytarishi kerak"),
+        }
+    }
+
+    // bytes.str yaroqsiz UTF-8'da aniq xato (jim buzilmaydi).
+    #[test]
+    fn str_invalid_utf8_errors() {
+        match bytes_module("str", vec![b(&[0xff, 0xfe])]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("UTF-8")),
+            _ => panic!("bytes.str yaroqsiz UTF-8'da xato berishi kerak"),
+        }
+    }
+
+    // bytes.len BAYT sanaydi (str.len belgi sanashidan farqli) — "o'" 2 belgi,
+    // lekin ' (U+2019) 3 bayt.
+    #[test]
+    fn len_counts_bytes() {
+        match bytes_module("len", vec![b(&[1, 2, 3, 4])]) {
+            Ok(Value::Int(4)) => {}
+            _ => panic!("bytes.len 4 qaytarishi kerak"),
+        }
+        match bytes_module("len", vec![Value::Str("o'".into())]) {
+            Ok(Value::Int(n)) => assert_eq!(n, "o'".len() as i64),
+            _ => panic!("bytes.len str'da bayt sonini qaytarishi kerak"),
+        }
+    }
+
+    // bytes.slice str.slice semantikasi: clamp, a >= b -> bo'sh.
+    #[test]
+    fn slice_clamps() {
+        match bytes_module(
+            "slice",
+            vec![b(&[1, 2, 3, 4]), Value::Int(1), Value::Int(3)],
+        ) {
+            Ok(Value::Bytes(by)) => assert_eq!(*by, vec![2, 3]),
+            _ => panic!("bytes.slice bytes qaytarishi kerak"),
+        }
+        match bytes_module("slice", vec![b(&[1, 2, 3]), Value::Int(2), Value::Int(100)]) {
+            Ok(Value::Bytes(by)) => assert_eq!(*by, vec![3]),
+            _ => panic!("bytes.slice chegarani clamp qilishi kerak"),
+        }
+        match bytes_module("slice", vec![b(&[1, 2, 3]), Value::Int(2), Value::Int(1)]) {
+            Ok(Value::Bytes(by)) => assert!(by.is_empty()),
+            _ => panic!("a >= b bo'sh bytes qaytarishi kerak"),
+        }
+    }
+
+    // Tenglik, ko'rinish va turlar — Value darajasidagi shartnoma.
+    #[test]
+    fn value_contract() {
+        assert!(b(&[1, 2]).equals(&b(&[1, 2])));
+        assert!(!b(&[1, 2]).equals(&b(&[1, 3])));
+        assert!(!b(&[1, 2]).equals(&Value::Str("\u{1}\u{2}".into())));
+        assert_eq!(b(&[1, 2]).type_name(), "bytes");
+        // Display xom baytlarni oqizmaydi — o'lchamli belgi.
+        assert_eq!(format!("{}", b(&[1, 2, 3])), "<bytes 3>");
+        assert!(b(&[]).truthy()); // bo'sh bytes ham rost (bo'sh str kabi)
+    }
+
+    // JSON'da bytes base64 matn bo'lib tushadi (yo'qotishsiz).
+    #[test]
+    fn json_encodes_base64() {
+        assert_eq!(json_encode(&b(&[0xff, 0x00])), "\"/wA=\"");
+    }
+
+    #[test]
+    fn bytes_is_module() {
+        assert!(is_module("bytes"));
+    }
+
+    #[test]
+    fn unknown_func_errors() {
+        match bytes_module("yoq", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("bytes modulida")),
+            _ => panic!("Flow::Error kutilgan edi"),
+        }
     }
 }
 

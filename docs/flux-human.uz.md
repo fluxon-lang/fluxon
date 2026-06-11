@@ -91,8 +91,24 @@ Flux'da quyidagi asosiy tiplar bor:
 | `[1 2 3]` | `list` | Ro'yxat — elementlar **bo'shliq** bilan ajraladi |
 | `{a:1 b:2}` | `map` | Kalit-qiymat juftliklari — **bo'shliq** bilan ajraladi |
 | `:ok` | `sym` | Belgi (symbol) — enum/teg uchun |
+| — | `bytes` | Ikkilik ma'lumot (binary) — literal yo'q, funksiyadan keladi |
 
 ### Muhim nozikliklar
+
+**Ikkilik ma'lumot (`bytes`).** Rasm, PDF, arxiv kabi matn bo'lmagan
+ma'lumotlar uchun. Literal sintaksisi yo'q — qiymat funksiyalardan keladi:
+`fs.readb yo'l` (faylni ikkilik o'qish), `crypto.b64db s` (base64'ni ikkilik
+ochish), `bytes.of s` (matn → UTF-8 baytlari). Asosiy amallar:
+```flux
+b = fs.readb "rasm.png"     # bytes (fayl yo'q bo'lsa nil)
+bytes.len b                  # bayt soni (str.len esa BELGI sanaydi)
+bytes.str b                  # bytes → matn (UTF-8 bo'lmasa aniq xato)
+bytes.slice b 0 4            # qism baytlar
+fs.write "nusxa.png" b       # fs.write/append str ham, bytes ham oladi
+rep 200 b {content_type:"image/png"}   # HTTP'da xom ikkilik javob
+```
+Log/interpolatsiyada bytes `<bytes N>` ko'rinishida chiqadi — xom baytlar
+matnga sizib chiqmaydi. `crypto.sha256`/`b64`/`hex` kirishlari str yoki bytes.
 
 **Ro'yxat va map'da vergul YO'Q.** Elementlar bo'shliq bilan ajraladi. Bu
 ataylab — vergullar token isrof qiladi:

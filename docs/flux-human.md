@@ -89,8 +89,24 @@ Flux has the following basic types:
 | `[1 2 3]` | `list` | List — elements separated by **spaces** |
 | `{a:1 b:2}` | `map` | Key-value pairs — separated by **spaces** |
 | `:ok` | `sym` | Symbol — for enums/tags |
+| — | `bytes` | Binary data — no literal, comes from functions |
 
 ### Important subtleties
+
+**Binary data (`bytes`).** For non-text data like images, PDFs, archives.
+There is no literal syntax — values come from functions: `fs.readb path`
+(binary file read), `crypto.b64db s` (binary-safe base64 decode),
+`bytes.of s` (text → its UTF-8 bytes). Core operations:
+```flux
+b = fs.readb "logo.png"     # bytes (nil if the file is missing)
+bytes.len b                  # BYTE count (str.len counts CHARS)
+bytes.str b                  # bytes → text (explicit error if not UTF-8)
+bytes.slice b 0 4            # sub-bytes
+fs.write "copy.png" b        # fs.write/append accept str or bytes
+rep 200 b {content_type:"image/png"}   # raw binary HTTP response
+```
+In logs/interpolation bytes render as `<bytes N>` — raw bytes never leak into
+text. `crypto.sha256`/`b64`/`hex` inputs take str or bytes.
 
 **No commas in lists and maps.** Elements are separated by spaces. This is
 intentional — commas waste tokens:
