@@ -260,24 +260,24 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
         // min/max argumentning o'zini qaytaradi — int kirsa int qoladi
         // (abs bilan bir uslub), aralash int/flt da ham tur yo'qolmaydi.
         "min" | "max" => {
+            // arg_num ikkinchi argument son ekanini tekshiradi (x birinchini).
             let y = arg_num(&args, 1, &format!("math.{}", func))?;
-            // int/int i64 da aniq taqqoslanadi: f64 orqali 2^53 dan katta
-            // qo'shni qiymatlar yaxlitlanib teng chiqib qolardi.
-            let pick_first = match (&args[0], &args[1]) {
-                (Value::Int(a), Value::Int(b)) => {
-                    if func == "min" {
-                        a <= b
-                    } else {
-                        a >= b
-                    }
-                }
-                _ => {
-                    if func == "min" {
-                        x <= y
-                    } else {
-                        x >= y
-                    }
-                }
+            use std::cmp::Ordering;
+            // Taqqoslash yo'qotishsiz: int f64 ga o'tkazilsa 2^53 dan katta
+            // qo'shni qiymatlar yaxlitlanib teng chiqadi va tie qoidasi
+            // noto'g'ri tomonni qaytaradi. int/int — i64 da, aralash —
+            // cmp_int_flt bilan; faqat flt/flt f64 da qoladi (u aniq).
+            let ord = match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                (Value::Int(a), Value::Flt(b)) => cmp_int_flt(*a, *b),
+                (Value::Flt(a), Value::Int(b)) => cmp_int_flt(*b, *a).reverse(),
+                // NaN tartibsiz — Equal deb olamiz (saralash bilan bir xil).
+                _ => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            };
+            let pick_first = if func == "min" {
+                ord != Ordering::Greater
+            } else {
+                ord != Ordering::Less
             };
             Ok(if pick_first {
                 args[0].clone()
@@ -312,6 +312,31 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             "math modulida '{}' funksiyasi yo'q",
             func
         ))),
+    }
+}
+
+// i64 ni f64 bilan yo'qotishsiz taqqoslash: i64→f64 o'tkazish 2^53 dan keyin
+// yaxlitlaydi, shuning uchun f64 tomon i64 chegaralariga solishtiriladi-da,
+// butun va kasr qismlari alohida taqqoslanadi. NaN — Equal (saralashdagi
+// kelishuv bilan bir xil).
+fn cmp_int_flt(a: i64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    if b.is_nan() {
+        return Equal;
+    }
+    // i64::MAX as f64 = 2^63 (yuqoriga yaxlitlangan) — b shu qiymatdan boshlab
+    // har qanday i64 dan katta. i64::MIN as f64 = -2^63 esa aniq ifodalanadi.
+    if b >= i64::MAX as f64 {
+        return Less;
+    }
+    if b < i64::MIN as f64 {
+        return Greater;
+    }
+    // Endi b.trunc() i64 ga sig'adi va cast yo'qotishsiz.
+    match a.cmp(&(b.trunc() as i64)) {
+        Equal if b.fract() > 0.0 => Less,
+        Equal if b.fract() < 0.0 => Greater,
+        ord => ord,
     }
 }
 
@@ -1613,6 +1638,36 @@ mod math_tests {
         assert!(matches!(
             math_module("max", vec![Value::Int(i64::MAX - 1), Value::Int(i64::MAX)]),
             Ok(Value::Int(v)) if v == i64::MAX
+        ));
+        // Aralash int/flt da ham yaxlitlanish bo'lmasin (PR #152 review):
+        // 2^53+1 (int) f64 ga o'tsa 2^53 ga teng chiqib qolardi.
+        let big = (1i64 << 53) + 1; // 9007199254740993
+        let big_f = (1i64 << 53) as f64; // 9007199254740992.0
+        assert!(matches!(
+            math_module("min", vec![Value::Int(big), Value::Flt(big_f)]),
+            Ok(Value::Flt(v)) if v == big_f
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Flt(big_f), Value::Int(big)]),
+            Ok(Value::Int(v)) if v == big
+        ));
+        // flt i64 oralig'idan tashqarida bo'lsa ham to'g'ri tomon yutadi.
+        assert!(matches!(
+            math_module("max", vec![Value::Int(i64::MAX), Value::Flt(1e19)]),
+            Ok(Value::Flt(v)) if v == 1e19
+        ));
+        assert!(matches!(
+            math_module("min", vec![Value::Int(i64::MIN), Value::Flt(-1e19)]),
+            Ok(Value::Flt(v)) if v == -1e19
+        ));
+        // kasr qismi hal qiluvchi bo'lgan holat: 3 < 3.5, -3 > -3.5.
+        assert!(matches!(
+            math_module("max", vec![Value::Int(3), Value::Flt(3.5)]),
+            Ok(Value::Flt(v)) if v == 3.5
+        ));
+        assert!(matches!(
+            math_module("max", vec![Value::Int(-3), Value::Flt(-3.5)]),
+            Ok(Value::Int(-3))
         ));
     }
 
