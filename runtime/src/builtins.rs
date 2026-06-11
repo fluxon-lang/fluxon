@@ -88,7 +88,7 @@ pub fn install(env: &Env) {
 pub fn is_module(name: &str) -> bool {
     matches!(
         name,
-        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh" | "crypto"
+        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh"
     )
 }
 
@@ -103,9 +103,6 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "io" => io_module(func, args),
         "fs" => fs_module(func, args),
         "sh" => sh_module(func, args),
-        // crypto — toza modul (IO'siz), lekin battery sifatida alohida faylda
-        // (auth bilan bir oilada — kriptografik primitivlar).
-        "crypto" => crate::crypto_mod::crypto_module(func, args),
         _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
     }
 }

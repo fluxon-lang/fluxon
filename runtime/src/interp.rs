@@ -1269,6 +1269,12 @@ impl Interp {
                     if id == "reg" && self.lookup(id, env).is_err() {
                         return self.reg_dispatch(name, vec![]);
                     }
+                    // `crypto.uuid` argumentsiz -> Call emas, Field bo'lib keladi
+                    // (time.now kabi). `crypto` e'lon qilinmagan bo'lsa battery
+                    // funksiyasi sifatida chaqiramiz.
+                    if id == "crypto" && self.lookup(id, env).is_err() {
+                        return crate::crypto_mod::crypto_module(name, vec![]);
+                    }
                     // `cron.run` argumentsiz -> Call emas, Field bo'lib keladi. cron
                     // o'zgaruvchi sifatida e'lon qilinmagan bo'lsa, argumentsiz cron
                     // funksiyasi (run) sifatida chaqiramiz. (Aks holda `cron` ident
@@ -1575,6 +1581,13 @@ impl Interp {
                 // e'lon qilingan bo'lsa, modul emas — o'zgaruvchi ustun.
                 if modname == "auth" && self.lookup(modname, env).is_err() {
                     return self.auth_dispatch(name, argv);
+                }
+                // crypto — kriptografik primitivlar (issue #131). Holatsiz va
+                // Interp'ga muhtoj emas, lekin auth/ai kabi battery: `crypto`
+                // nomi e'lon qilingan bo'lsa (masalan `use ./crypto`), u ustun —
+                // shuning uchun shartsiz is_module ro'yxatiga kirmaydi.
+                if modname == "crypto" && self.lookup(modname, env).is_err() {
+                    return crate::crypto_mod::crypto_module(name, argv);
                 }
                 if crate::builtins::is_module(modname) {
                     return crate::builtins::call_module(modname, name, argv);

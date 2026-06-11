@@ -14,9 +14,10 @@
 // imzolari hex'da keladi — `crypto.hmac` natijasi to'g'ridan-to'g'ri
 // taqqoslanadi, qo'shimcha konversiya kerak emas.
 //
-// Holatsiz va Interp'ga muhtoj emas (env o'qimaydi, IO yo'q) — shuning uchun
-// `str`/`math` kabi builtins::call_module orqali ulanadi. Argument'siz
-// `crypto.uuid` (Field bo'lib keladi) ham o'sha is_module yo'li bilan ishlaydi.
+// Holatsiz va Interp'ga muhtoj emas (env o'qimaydi, IO yo'q), lekin auth/ai
+// kabi battery sifatida ulanadi (interp::eval_call + Field, lookup tekshiruvi
+// bilan): foydalanuvchi `crypto` nomini e'lon qilgan bo'lsa (masalan
+// `use ./crypto`), uniki ustun — shartsiz is_module ro'yxatiga kirmaydi.
 
 use base64::Engine;
 use base64::alphabet;

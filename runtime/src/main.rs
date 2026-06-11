@@ -2979,4 +2979,16 @@ u = crypto.uuid
             .expect_err("yaroqsiz base64 xato berishi kerak");
         assert!(err.contains("base64"), "kutilmagan xato: {}", err);
     }
+
+    // Issue #131 (review): foydalanuvchi `crypto` nomini e'lon qilgan bo'lsa
+    // (masalan `use ./crypto` moduli), battery emas — uniki ustun. auth/ai
+    // bilan bir xil shadowing xatti-harakati, Call ham Field yo'li ham.
+    #[test]
+    fn crypto_lokal_nom_battery_dan_ustun() {
+        run(r#"
+crypto = {sha256: \s -> "meniki ${s}" uuid: 7}
+((crypto.sha256 "x") == "meniki x") | (fail "lokal crypto.sha256 ustun bo'lmadi")
+((crypto.uuid) == 7) | (fail "lokal crypto.uuid ustun bo'lmadi")
+"#);
+    }
 }
