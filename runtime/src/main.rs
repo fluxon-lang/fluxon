@@ -2842,4 +2842,115 @@ x = "x=${"a\"}b"}"
 (x == "x=a\"}b") | (fail "escape qilingan tirnoq noto'g'ri ishlandi: ${x}")
 "#);
     }
+
+    // Issue #130: """ blok satr — umumiy chekinish kesiladi, yopuvchi """
+    // o'z qatorida bo'lsa oxirida \n qolmaydi.
+    #[test]
+    fn blok_satr_dedent_va_trailing_yoq() {
+        run(r#"
+s = """
+  salom
+  dunyo
+  """
+(s == "salom\ndunyo") | (fail "blok satr dedent xato: ${s}")
+"#);
+    }
+
+    // Issue #130: blok satr ichida ${expr} va $ident interpolatsiya ishlaydi.
+    #[test]
+    fn blok_satr_interpolatsiya() {
+        run(r#"
+name = "flux"
+n = 2
+s = """
+  salom ${name}!
+  n+1 = ${n + 1}
+  qisqa: $name
+  """
+(s == "salom flux!\nn+1 = 3\nqisqa: flux") | (fail "blok satr interpolatsiya xato: ${s}")
+"#);
+    }
+
+    // Issue #130: bo'sh qator \n bo'ladi, `"` va `""` escape'siz erkin —
+    // JSON/HTML parchalari to'g'ridan-to'g'ri yoziladi.
+    #[test]
+    fn blok_satr_bosh_qator_va_tirnoq() {
+        run(r#"
+s = """
+  a "quoted"
+
+  {"json": true}
+  """
+(s == "a \"quoted\"\n\n{\"json\": true}") | (fail "blok satr tirnoq/bo'sh qator xato: ${s}")
+"#);
+    }
+
+    // Issue #130: minimal chekinishdan chuqurroq qatorlar nisbiy joyini saqlaydi
+    // (SQL/prompt ichki strukturasi buzilmasin).
+    #[test]
+    fn blok_satr_nisbiy_chekinish() {
+        run(r#"
+s = """
+  SELECT *
+    FROM t
+  """
+(s == "SELECT *\n  FROM t") | (fail "nisbiy chekinish saqlanishi kerak: ${s}")
+"#);
+    }
+
+    // Issue #130: yopuvchi """ kontent qatorining oxirida ham kelishi mumkin.
+    #[test]
+    fn blok_satr_kontent_qatorida_yopilish() {
+        run(r#"
+s = """
+  bitta qator"""
+(s == "bitta qator") | (fail "kontent qatorida yopilish xato: ${s}")
+"#);
+    }
+
+    // Issue #130: blok satr indentatsiyali blok (fn tanasi) ichida ham ishlaydi —
+    // satr ichidagi qatorlar INDENT/DEDENT chiqarmaydi.
+    #[test]
+    fn blok_satr_fn_ichida() {
+        run(r#"
+fn f x ->
+  s = """
+    ichki ${x}
+    """
+  ret s
+((f "a") == "ichki a") | (fail "blok satr fn ichida xato")
+"#);
+    }
+
+    // Issue #130: uchta ketma-ket tirnoq kerak bo'lsa \""" yoziladi.
+    #[test]
+    fn blok_satr_escape_uchta_tirnoq() {
+        run(r#"
+s = """
+  uchta: \"""
+  """
+(s == "uchta: \"\"\"") | (fail "escape tirnoq xato: ${s}")
+"#);
+    }
+
+    // Issue #130: ochuvchi """ dan keyin shu qatorda matn — aniq xato
+    // (kanonik bitta yo'l: kontent yangi qatordan).
+    #[test]
+    fn blok_satr_ochilishda_matn_xato() {
+        let err = run_source("s = \"\"\"matn\nx\"\"\"\n")
+            .expect_err("ochuvchi qatordagi matn xato berishi kerak");
+        assert!(err.contains("yangi qatordan"), "kutilmagan xato: {}", err);
+    }
+
+    // Issue #130: yopilmagan blok satr aniq xato beradi (ochilgan qator bilan).
+    #[test]
+    fn blok_satr_yopilmagan_xato() {
+        let err =
+            run_source("s = \"\"\"\n  abc\n").expect_err("yopilmagan blok satr xato berishi kerak");
+        assert!(
+            err.contains("yopilmagan blok satr") && err.contains("1-qatorda"),
+            "kutilmagan xato: {}",
+            err
+        );
+    }
 }

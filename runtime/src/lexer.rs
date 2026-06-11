@@ -209,7 +209,13 @@ impl<'a> Lexer<'a> {
         let c = self.peek();
         match c {
             b'0'..=b'9' => return self.scan_number(),
-            b'"' => return self.scan_string(),
+            b'"' => {
+                // `"""` — ko'p qatorli blok satr (issue #130), aks holda oddiy satr.
+                if self.peek_or(1) == b'"' && self.peek_or(2) == b'"' {
+                    return self.scan_block_string();
+                }
+                return self.scan_string();
+            }
             b':' => {
                 // Noaniqlik: `:open` symbolmi yoki `key:` map ajratuvchimi?
                 // Qoida (misollardan): agar `:` BEVOSITA atom oxiriga (ident/son/
@@ -448,92 +454,8 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     break;
                 }
-                b'\\' => {
-                    self.advance();
-                    let e = self.peek_or(0);
-                    self.advance();
-                    match e {
-                        b'n' => buf.push('\n'),
-                        b't' => buf.push('\t'),
-                        b'r' => buf.push('\r'),
-                        b'"' => buf.push('"'),
-                        b'\\' => buf.push('\\'),
-                        b'$' => buf.push('$'),
-                        _ => {
-                            buf.push('\\');
-                            buf.push(e as char);
-                        }
-                    }
-                }
-                b'$' => {
-                    let expr_line = self.line;
-                    self.advance();
-                    if self.peek_or(0) == b'{' {
-                        // ${ ifoda }
-                        self.advance(); // {
-                        if !buf.is_empty() {
-                            parts.push(StrPart::Lit(std::mem::take(&mut buf)));
-                        }
-                        // Chegarani topishda ichki string literallarni hisobga
-                        // olamiz — aks holda `${"a } b"}` dagi string ichidagi
-                        // `}` interpolatsiyani erta yopadi (issue #106).
-                        let mut depth = 1;
-                        let mut in_str = false;
-                        let estart = self.pos;
-                        while !self.at_end() && depth > 0 {
-                            let c = self.peek();
-                            if in_str {
-                                match c {
-                                    // escape: `\` + keyingi belgi birga o'tadi,
-                                    // string ichidagi `\"` yopuvchi emas.
-                                    b'\\' => {
-                                        self.advance();
-                                        if self.peek_or(0) == b'\n' {
-                                            self.advance_newline();
-                                        } else if !self.at_end() {
-                                            self.advance();
-                                        }
-                                        continue;
-                                    }
-                                    b'"' => in_str = false,
-                                    _ => {}
-                                }
-                            } else {
-                                match c {
-                                    b'"' => in_str = true,
-                                    b'{' => depth += 1,
-                                    b'}' => {
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            break;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            // Ko'p qatorli `${...}` da qator hisobini saqlaymiz.
-                            if c == b'\n' {
-                                self.advance_newline();
-                            } else {
-                                self.advance();
-                            }
-                        }
-                        let expr = std::str::from_utf8(&self.src[estart..self.pos])
-                            .unwrap()
-                            .to_string();
-                        self.advance(); // yopuvchi }
-                        parts.push(StrPart::Expr(expr, expr_line));
-                    } else if self.is_ident_start(self.peek_or(0)) {
-                        // $ident qisqartma
-                        if !buf.is_empty() {
-                            parts.push(StrPart::Lit(std::mem::take(&mut buf)));
-                        }
-                        let id = self.read_ident();
-                        parts.push(StrPart::Expr(id, expr_line));
-                    } else {
-                        buf.push('$');
-                    }
-                }
+                b'\\' => self.scan_escape(&mut buf),
+                b'$' => self.scan_dollar(&mut buf, &mut parts),
                 b'\n' => {
                     return Err(format!("{}-qatorda satr ko'p qatorga cho'zildi", line));
                 }
@@ -547,6 +469,167 @@ impl<'a> Lexer<'a> {
             parts.push(StrPart::Lit(buf));
         }
         self.push_at(Tok::Str(parts), line, col);
+        Ok(())
+    }
+
+    // Satr ichidagi `\x` escape ketma-ketligini buf ga ochadi.
+    fn scan_escape(&mut self, buf: &mut String) {
+        self.advance(); // '\'
+        let e = self.peek_or(0);
+        self.advance();
+        match e {
+            b'n' => buf.push('\n'),
+            b't' => buf.push('\t'),
+            b'r' => buf.push('\r'),
+            b'"' => buf.push('"'),
+            b'\\' => buf.push('\\'),
+            b'$' => buf.push('$'),
+            _ => {
+                buf.push('\\');
+                buf.push(e as char);
+            }
+        }
+    }
+
+    // Satr ichidagi `$` ni qayta ishlaydi: `${expr}` / `$ident` interpolatsiya,
+    // aks holda oddiy `$` belgi. Oddiy va blok satrlar uchun umumiy.
+    fn scan_dollar(&mut self, buf: &mut String, parts: &mut Vec<StrPart>) {
+        let expr_line = self.line;
+        self.advance();
+        if self.peek_or(0) == b'{' {
+            // ${ ifoda }
+            self.advance(); // {
+            if !buf.is_empty() {
+                parts.push(StrPart::Lit(std::mem::take(buf)));
+            }
+            // Chegarani topishda ichki string literallarni hisobga
+            // olamiz — aks holda `${"a } b"}` dagi string ichidagi
+            // `}` interpolatsiyani erta yopadi (issue #106).
+            let mut depth = 1;
+            let mut in_str = false;
+            let estart = self.pos;
+            while !self.at_end() && depth > 0 {
+                let c = self.peek();
+                if in_str {
+                    match c {
+                        // escape: `\` + keyingi belgi birga o'tadi,
+                        // string ichidagi `\"` yopuvchi emas.
+                        b'\\' => {
+                            self.advance();
+                            if self.peek_or(0) == b'\n' {
+                                self.advance_newline();
+                            } else if !self.at_end() {
+                                self.advance();
+                            }
+                            continue;
+                        }
+                        b'"' => in_str = false,
+                        _ => {}
+                    }
+                } else {
+                    match c {
+                        b'"' => in_str = true,
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Ko'p qatorli `${...}` da qator hisobini saqlaymiz.
+                if c == b'\n' {
+                    self.advance_newline();
+                } else {
+                    self.advance();
+                }
+            }
+            let expr = std::str::from_utf8(&self.src[estart..self.pos])
+                .unwrap()
+                .to_string();
+            self.advance(); // yopuvchi }
+            parts.push(StrPart::Expr(expr, expr_line));
+        } else if self.is_ident_start(self.peek_or(0)) {
+            // $ident qisqartma
+            if !buf.is_empty() {
+                parts.push(StrPart::Lit(std::mem::take(buf)));
+            }
+            let id = self.read_ident();
+            parts.push(StrPart::Expr(id, expr_line));
+        } else {
+            buf.push('$');
+        }
+    }
+
+    // Ko'p qatorli blok satr: `"""` ... `"""` (issue #130).
+    //
+    // Qoidalar (kanonik bitta yo'l):
+    //   - ochuvchi `"""` dan keyin shu qatorda kontent bo'lmaydi — yangi qatordan;
+    //   - bo'sh bo'lmagan qatorlarning eng kichik umumiy chekinishi kesiladi
+    //     (blok kod indentatsiyasiga tabiiy joylashadi);
+    //   - yopuvchi `"""` o'z qatorida bo'lsa, o'sha qator kontentga kirmaydi —
+    //     natijada oxirida `\n` qolmaydi;
+    //   - `${expr}` / `$ident` interpolatsiya va `\x` escape'lar oddiy satrdagidek;
+    //   - `"` va `""` erkin yoziladi; uchta ketma-ket `"` kerak bo'lsa `\"""`.
+    fn scan_block_string(&mut self) -> LexResult<()> {
+        let line = self.line;
+        let col = self.col;
+        self.advance(); // "
+        self.advance(); // "
+        self.advance(); // "
+        // Ochuvchi `"""` qatorining qolgan qismi faqat bo'shliq bo'lishi mumkin.
+        while !self.at_end() && (self.peek() == b' ' || self.peek() == b'\r') {
+            self.advance();
+        }
+        if self.at_end() || self.peek() != b'\n' {
+            return Err(format!(
+                "{}-qatorda \"\"\" dan keyin matn — blok satr kontenti yangi qatordan boshlanadi",
+                line
+            ));
+        }
+        self.advance_newline();
+
+        // Chekinishni keyin kesish uchun har qator alohida yig'iladi. Escape
+        // bilan kiritilgan `\n` Lit ichida qoladi va qator hisoblanmaydi.
+        let mut lines: Vec<Vec<StrPart>> = Vec::new();
+        let mut parts: Vec<StrPart> = Vec::new();
+        let mut buf = String::new();
+        loop {
+            if self.at_end() {
+                return Err(format!(
+                    "{}-qatorda yopilmagan blok satr (\"\"\" yetishmaydi)",
+                    line
+                ));
+            }
+            match self.peek() {
+                b'"' if self.peek_or(1) == b'"' && self.peek_or(2) == b'"' => {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    break;
+                }
+                b'\n' => {
+                    self.advance_newline();
+                    if !buf.is_empty() {
+                        parts.push(StrPart::Lit(std::mem::take(&mut buf)));
+                    }
+                    lines.push(std::mem::take(&mut parts));
+                }
+                // CRLF fayllarda `\r` qator oxiri belgisi — kontentga kirmaydi.
+                b'\r' if self.peek_or(1) == b'\n' => self.advance(),
+                b'\\' => self.scan_escape(&mut buf),
+                b'$' => self.scan_dollar(&mut buf, &mut parts),
+                _ => self.push_utf8_char(&mut buf),
+            }
+        }
+        if !buf.is_empty() {
+            parts.push(StrPart::Lit(buf));
+        }
+        lines.push(parts);
+
+        self.push_at(Tok::Str(dedent_block_lines(lines)), line, col);
         Ok(())
     }
 
@@ -603,6 +686,73 @@ impl<'a> Lexer<'a> {
             spaced,
         });
     }
+}
+
+// Blok satr qatorlarini yakuniy StrPart oqimiga yig'adi: yopuvchi `"""`
+// qatorini chiqarib tashlaydi, umumiy minimal chekinishni kesadi va
+// qatorlarni `\n` bilan ulaydi. Bo'sh (faqat bo'shliq) qatorlar `\n` ga
+// aylanadi — ulardagi chekinish chiqishga o'tmaydi va min hisobiga kirmaydi.
+fn dedent_block_lines(mut lines: Vec<Vec<StrPart>>) -> Vec<StrPart> {
+    fn is_blank(line: &[StrPart]) -> bool {
+        match line {
+            [] => true,
+            [StrPart::Lit(s)] => s.chars().all(|c| c == ' '),
+            _ => false,
+        }
+    }
+    // Yopuvchi `"""` o'z qatorida bo'lsa, oxirgi "qator" faqat uning
+    // chekinishidan iborat — kontent emas (va trailing `\n` ham bo'lmaydi).
+    if lines.last().is_some_and(|l| is_blank(l)) {
+        lines.pop();
+    }
+    // Min chekinish: qator boshi Lit bilan boshlansa — bosh bo'shliqlar soni,
+    // interpolatsiya bilan boshlansa — 0 (manbada chekinish yo'q degani).
+    let mut min_indent = usize::MAX;
+    for l in &lines {
+        if is_blank(l) {
+            continue;
+        }
+        let ind = match l.first() {
+            Some(StrPart::Lit(s)) => s.chars().take_while(|&c| c == ' ').count(),
+            _ => 0,
+        };
+        min_indent = min_indent.min(ind);
+    }
+    if min_indent == usize::MAX {
+        min_indent = 0;
+    }
+
+    let mut out: Vec<StrPart> = Vec::new();
+    let mut buf = String::new();
+    for (i, l) in lines.into_iter().enumerate() {
+        if i > 0 {
+            buf.push('\n');
+        }
+        if is_blank(&l) {
+            continue;
+        }
+        for (j, p) in l.into_iter().enumerate() {
+            match p {
+                StrPart::Lit(mut s) => {
+                    if j == 0 {
+                        // faqat bosh bo'shliqlar — ASCII, bayt chegarasi xavfsiz
+                        s.drain(..min_indent);
+                    }
+                    buf.push_str(&s);
+                }
+                e @ StrPart::Expr(..) => {
+                    if !buf.is_empty() {
+                        out.push(StrPart::Lit(std::mem::take(&mut buf)));
+                    }
+                    out.push(e);
+                }
+            }
+        }
+    }
+    if !buf.is_empty() || out.is_empty() {
+        out.push(StrPart::Lit(buf));
+    }
+    out
 }
 
 fn utf8_len(b: u8) -> usize {
