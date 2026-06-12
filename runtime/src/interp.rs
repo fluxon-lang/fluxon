@@ -237,6 +237,11 @@ pub struct Interp {
     // (default, hech qanday header qo'shilmaydi). `routes` kabi top-level
     // to'ldiradi, server thread'lari o'qiydi.
     pub cors: Arc<Mutex<Option<crate::http_mod::CorsConfig>>>,
+    // Static fayl mount'lari (issue #134). `http.static` to'ldiradi, server
+    // thread'lari o'qiydi: aniq route topilmaganda prefiksga mos papkadan fayl
+    // beriladi (route prioriteti: aniq route > static). `routes` kabi top-level
+    // to'ldiradi, server thread'lari o'qiydi.
+    pub statics: Arc<Mutex<Vec<crate::http_mod::StaticMount>>>,
     // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
     // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
     // qayta tiklaydi. `new_arc` o'rnatadi.
@@ -322,6 +327,7 @@ impl Interp {
             routes: Arc::new(Mutex::new(Vec::new())),
             middlewares: Arc::new(Mutex::new(Vec::new())),
             cors: Arc::new(Mutex::new(None)),
+            statics: Arc::new(Mutex::new(Vec::new())),
             this: OnceLock::new(),
             globals_frozen: OnceLock::new(),
             db: OnceLock::new(),
@@ -347,6 +353,13 @@ impl Interp {
     // nisbatan hal qilinadi. main.rs `run`dan oldin bir marta chaqiradi.
     pub fn set_base(&self, dir: &std::path::Path) {
         *self.current_base.lock().unwrap() = dir.to_path_buf();
+    }
+
+    // Joriy bajarilayotgan faylning katalogi. pub(crate): `http.static` nisbiy
+    // katalogni (`"./public"`) `use ./fayl` bilan bir xil qoidada — skript fayli
+    // katalogiga nisbatan — hal qiladi.
+    pub(crate) fn base_dir(&self) -> PathBuf {
+        self.current_base.lock().unwrap().clone()
     }
 
     // `env.NOM` qiymatini topadi. Ustunlik: OS env (std::env) > .env fayl.
