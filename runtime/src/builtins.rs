@@ -42,14 +42,10 @@ pub fn install(env: &Env) {
             })),
         );
     };
-    add(
-        "log",
-        Box::new(|args: Vec<Value>| {
-            let parts: Vec<String> = args.iter().map(|v| v.to_text()).collect();
-            eprintln!("{}", parts.join(" "));
-            Ok(Value::Nil)
-        }),
-    );
+    // `log` global funksiya EMAS — darajali dispatch battery (issue #139):
+    // `log.debug`/`log.info`/`log.warn`/`log.err`, bare `log` = info. $LOG_LEVEL
+    // va $LOG_FORMAT'ni o'qish kerakligi uchun Interp'da (log_dispatch) ushlanadi,
+    // bu yerda global o'rnatilmaydi (ai/crypto bilan bir xil naqsh).
     // assert cond ["xabar"] — test primitivi (issue #136). Shart truthy bo'lsa
     // jim davom etadi (hisoblagich +1), aks holda runtime xato — bajarish
     // to'xtaydi va `fluxon test` faylni FAIL deb belgilaydi. Operatorli shart
@@ -117,6 +113,89 @@ pub fn install(env: &Env) {
             Ok(Value::Map(m))
         }),
     );
+}
+
+// ---------------- log darajalari (issue #139) ----------------
+//
+// `log` darajali logger: `log.debug`/`log.info`/`log.warn`/`log.err`, bare
+// `log` = info. Darajalar tartiblangan (debug < info < warn < err) — $LOG_LEVEL
+// minimal darajani belgilaydi, undan PAST xabarlar jim chiqarilmaydi. $LOG_FORMAT
+// =json bo'lsa har qator JSON obyekt (time/level/msg) — log agregatorlar uchun.
+//
+// env'larni Interp o'qiydi (OS env + .env, db/ai konvensiyasi) va shu yerga
+// uzatadi; bu funksiya holatsiz va sof formatlash/filtr mantig'i.
+
+// Daraja tartibi (kichik = past). Noma'lum nom info kabi qaraladi (xavfsiz default).
+fn log_level_rank(name: &str) -> u8 {
+    match name {
+        "debug" => 0,
+        "info" => 1,
+        "warn" => 2,
+        // `err` kanonik, `error` ham qabul (LOG_LEVEL'da odam yozishi mumkin).
+        "err" | "error" => 3,
+        _ => 1,
+    }
+}
+
+// Log qatorini formatlaydi. `min_level` (=$LOG_LEVEL) berilgan va xabar darajasi
+// undan past bo'lsa None qaytaradi (filtrlangan — hech narsa chiqmaydi). `json`
+// (=$LOG_FORMAT=json) da strukturali qator, aks holda `[LEVEL] xabar`.
+pub fn format_log(
+    level: &str,
+    args: &[Value],
+    min_level: Option<&str>,
+    json: bool,
+) -> Option<String> {
+    if let Some(min) = min_level
+        && log_level_rank(level) < log_level_rank(min)
+    {
+        return None;
+    }
+    let msg: String = args
+        .iter()
+        .map(|v| v.to_text())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if json {
+        // Vaqt UTC, time.now bilan bir xil format. json_str to'g'ri escape qiladi —
+        // xabar ichidagi tirnoq/yangi qator JSON'ni buzmaydi.
+        Some(format!(
+            "{{\"time\":{},\"level\":{},\"msg\":{}}}",
+            json_str(&fmt_unix(now_unix())),
+            json_str(level),
+            json_str(&msg)
+        ))
+    } else {
+        Some(format!("[{}] {}", level.to_uppercase(), msg))
+    }
+}
+
+// format_log natijasini stderr'ga chiqaradi (filtrlangan bo'lsa jim). Eski `log`
+// kabi stderr'ga `\n` qo'shadi — stdout (io.print/prompt) bilan aralashmasin.
+pub fn emit_log(level: &str, args: &[Value], min_level: Option<&str>, json: bool) {
+    if let Some(line) = format_log(level, args, min_level, json) {
+        eprintln!("{}", line);
+    }
+}
+
+// `log` qiymat sifatida (callback `xs.each log`, saqlash `f log`) ishlatilganda
+// qaytariladigan info-darajali Native shim — eski global `log` bilan moslik
+// (issue #139). To'g'ridan-to'g'ri `log "..."` chaqiruvi apply_callee'da env-aware
+// log_dispatch'dan o'tadi; bu shim faqat qiymat pozitsiyasi uchun va Interp'siz,
+// shuning uchun $LOG_LEVEL/$LOG_FORMAT'ni OS env'dan o'qiydi (.env bu yo'lda
+// ko'rilmaydi — qiymat sifatida log ishlatish kamdan-kam holat).
+pub fn log_value_shim() -> Value {
+    Value::Native(Arc::new(NativeFn {
+        name: "log".into(),
+        func: Box::new(|args: Vec<Value>| {
+            let min = std::env::var("LOG_LEVEL").ok();
+            let json = std::env::var("LOG_FORMAT")
+                .map(|s| s.eq_ignore_ascii_case("json"))
+                .unwrap_or(false);
+            emit_log("info", &args, min.as_deref(), json);
+            Ok(Value::Nil)
+        }),
+    }))
 }
 
 // --- modul nomimi? ---
@@ -1650,6 +1729,93 @@ fn arg_num(args: &[Value], i: usize, who: &str) -> Result<f64, Flow> {
             i + 1,
             other.type_name()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    fn s(x: &str) -> Value {
+        Value::Str(x.to_string())
+    }
+
+    // Darajasiz (filtrsiz) — har xabar `[LEVEL] matn` shaklida chiqadi.
+    #[test]
+    fn text_format_prefiks() {
+        assert_eq!(
+            format_log("info", &[s("salom")], None, false),
+            Some("[INFO] salom".to_string())
+        );
+        assert_eq!(
+            format_log("err", &[s("yiqildi")], None, false),
+            Some("[ERR] yiqildi".to_string())
+        );
+    }
+
+    // Bir nechta argument bo'sh joy bilan birlashadi (eski `log` xatti-harakati).
+    #[test]
+    fn text_multi_arg() {
+        assert_eq!(
+            format_log("warn", &[s("a"), Value::Int(2), s("b")], None, false),
+            Some("[WARN] a 2 b".to_string())
+        );
+    }
+
+    // $LOG_LEVEL filtri: minimal darajadan PAST xabarlar None (jim).
+    #[test]
+    fn level_filter() {
+        // min=warn -> debug/info jim, warn/err chiqadi.
+        assert_eq!(format_log("debug", &[s("x")], Some("warn"), false), None);
+        assert_eq!(format_log("info", &[s("x")], Some("warn"), false), None);
+        assert!(format_log("warn", &[s("x")], Some("warn"), false).is_some());
+        assert!(format_log("err", &[s("x")], Some("warn"), false).is_some());
+    }
+
+    // `error` ham `err` kabi tartiblanadi (LOG_LEVEL'da odam yozishi mumkin).
+    #[test]
+    fn error_alias() {
+        assert_eq!(format_log("warn", &[s("x")], Some("error"), false), None);
+        assert!(format_log("err", &[s("x")], Some("error"), false).is_some());
+    }
+
+    // Noma'lum LOG_LEVEL info kabi qaraladi — debug filtrlanadi, info o'tadi.
+    #[test]
+    fn unknown_min_level_info() {
+        assert_eq!(format_log("debug", &[s("x")], Some("qqq"), false), None);
+        assert!(format_log("info", &[s("x")], Some("qqq"), false).is_some());
+    }
+
+    // JSON rejim: strukturali qator, daraja va xabar to'g'ri, tirnoq escape qilinadi.
+    #[test]
+    fn json_format() {
+        let line = format_log("warn", &[s("buzildi")], None, true).unwrap();
+        assert!(
+            line.starts_with("{\"time\":\""),
+            "time maydoni yo'q: {}",
+            line
+        );
+        assert!(line.contains("\"level\":\"warn\""), "daraja yo'q: {}", line);
+        assert!(line.contains("\"msg\":\"buzildi\""), "xabar yo'q: {}", line);
+        // Dekoder bilan qaytarib o'qiladi — yaroqli JSON ekanini tasdiqlaydi.
+        let Ok(Value::Map(m)) = json_decode(&line) else {
+            panic!("yaroqsiz JSON: {}", line);
+        };
+        assert!(matches!(m.get("level"), Some(Value::Str(s)) if s == "warn"));
+        assert!(matches!(m.get("msg"), Some(Value::Str(s)) if s == "buzildi"));
+    }
+
+    // JSON xabar ichidagi tirnoq/yangi qator JSON'ni buzmaydi (escape).
+    #[test]
+    fn json_escapes_message() {
+        let line = format_log("info", &[s("a\"b\nc")], None, true).unwrap();
+        assert!(json_decode(&line).is_ok(), "escape buzildi: {}", line);
+    }
+
+    // JSON rejimda ham filtr ishlaydi.
+    #[test]
+    fn json_respects_filter() {
+        assert_eq!(format_log("debug", &[s("x")], Some("info"), true), None);
     }
 }
 

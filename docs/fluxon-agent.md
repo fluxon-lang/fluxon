@@ -453,8 +453,17 @@ loc = time.fmt utc "HH:mm" "America/New_York"            # UTC instant -> zone w
 
 ### json / env / log
 ```fluxon
-json.enc v · json.dec s · env.PORT ?? "8080" · log "message"
+json.enc v · json.dec s · env.PORT ?? "8080"
+log "message"                        # = log.info; leveled logger below
 ```
+
+`log` levels (debug < info < warn < err); bare `log` = `log.info`:
+```fluxon
+log.debug "detail"   log.info "msg"   log.warn "careful"   log.err "failed"
+```
+- `$LOG_LEVEL` (debug/info/warn/err) — minimum level; lower is silenced. Unset → all.
+- `$LOG_FORMAT=json` — each line a JSON object `{time, level, msg}` (for log aggregators).
+- text mode prints `[LEVEL] message`. All levels go to stderr.
 
 ### io (terminal input/output)
 `log` always adds `\n` to stderr; for an interactive CLI (REPL, agent, wizard):

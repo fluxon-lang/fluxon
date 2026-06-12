@@ -262,6 +262,46 @@ mod tests {
         run_source(src).unwrap_or_else(|e| panic!("xato: {}", e));
     }
 
+    // Issue #139: darajali log — `log.debug/info/warn/err` va bare `log` (=info)
+    // dispatch'ga ulangan va xatosiz ishlaydi (stderr'ga chiqaradi, nil qaytaradi).
+    // Filtr/format $LOG_LEVEL/$LOG_FORMAT bilan; format mantig'i builtins::log_tests
+    // da unit-test qilingan. Bu yerda faqat sintaksis/dispatch tekshiriladi.
+    #[test]
+    fn log_darajalari() {
+        run(r#"
+log "bare = info"
+log.debug "tafsilot"
+log.info "ma'lumot"
+log.warn "ogohlantirish"
+log.err "xato"
+log.info "interpolatsiya ${1 + 1}"
+"#);
+    }
+
+    // Issue #139: `log` qiymat sifatida (callback/saqlash) ishlashda davom etadi —
+    // eski global `log` Native bilan moslik (info-darajali shim). PR #163 review.
+    #[test]
+    fn log_qiymat_sifatida_callback() {
+        run(r#"
+fn call f -> f "qiymat orqali"
+call log
+[1, 2, 3].map log
+g = log
+g "saqlangan funksiya"
+"#);
+    }
+
+    // Issue #139: foydalanuvchi `log` nomli o'zgaruvchi e'lon qilsa, u ustun
+    // (battery'ni soyalaydi) — eski shadowing invarianti buzilmaydi.
+    #[test]
+    fn log_ozgaruvchi_sifatida_shadow() {
+        run(r#"
+fn log_id v -> v
+log = (log_id 42)
+(log == 42) | (fail "log o'zgaruvchi sifatida shadow bo'lmadi")
+"#);
+    }
+
     // Issue #93: `log !x` da `!` callee'ga postfix Try bo'lib yopishar edi —
     // `Call(Try(log), [x])` — inkor jim yo'qolardi. Endi bo'shliqdan keyingi
     // `!` prefiks not sifatida argument boshlaydi.

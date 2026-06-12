@@ -1136,9 +1136,26 @@ ws.room.members "ch:5"                            # the room members (for presen
 > membership and presence are managed inside `ws.room` — no manual shared-state
 > map is needed.
 
-### 9.11 `log` — printing to stderr
+### 9.11 `log` — printing to stderr (leveled)
 ```fluxon
-log "message"          # to stderr for diagnostics
+log "message"          # = log.info, to stderr for diagnostics
+log.debug "detail"
+log.info  "msg"
+log.warn  "careful"
+log.err   "failed"
+```
+
+Levels are ordered: `debug < info < warn < err`. Bare `log` = `log.info` (old
+code keeps working). Control the noise in production via env:
+
+- `$LOG_LEVEL` (debug/info/warn/err) — minimum level; anything **below** it is
+  silenced. Unset → everything prints.
+- `$LOG_FORMAT=json` — each line a JSON object (`{time, level, msg}`) for log
+  aggregators (Loki/ELK). Otherwise a human-readable `[LEVEL] message`.
+
+```sh
+LOG_LEVEL=warn ./app          # only warn and err
+LOG_FORMAT=json ./app         # {"time":"...","level":"info","msg":"..."}
 ```
 
 ---

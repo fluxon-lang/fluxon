@@ -378,6 +378,23 @@ impl Interp {
         }
     }
 
+    // log.<level> / bare `log` -> darajali log (issue #139). $LOG_LEVEL minimal
+    // darajani filtrlaydi, $LOG_FORMAT=json strukturali (JSON) qator beradi.
+    // env_lookup OS env + .env faylni ko'radi (db/ai bilan bir xil konvensiya),
+    // shuning uchun call_module emas — Interp'ga muhtoj.
+    fn log_dispatch(&self, level: &str, argv: Vec<Value>) -> EvalResult {
+        let min = match self.env_lookup("LOG_LEVEL") {
+            Value::Str(s) => Some(s),
+            _ => None,
+        };
+        let json = matches!(
+            self.env_lookup("LOG_FORMAT"),
+            Value::Str(s) if s.eq_ignore_ascii_case("json")
+        );
+        crate::builtins::emit_log(level, &argv, min.as_deref(), json);
+        Ok(Value::Nil)
+    }
+
     // DB backend'ni lazy ochadi (birinchi `db.*` da). Ochilganda tbl schema
     // registry'ni replay qilib auto-migration (`CREATE TABLE IF NOT EXISTS`)
     // bajaradi — `tbl` e'lon qilingan jadvallar zero-setup paydo bo'ladi.
@@ -1178,7 +1195,21 @@ impl Interp {
                 }
                 Ok(Value::Str(out))
             }
-            Expr::Ident(name) => self.lookup(name, env),
+            Expr::Ident(name) => match self.lookup(name, env) {
+                Ok(v) => Ok(v),
+                // `log` qiymat sifatida (callback `xs.each log`, `f log`) — eski
+                // global `log` bilan moslik uchun info-darajali shim (issue #139).
+                // To'g'ridan-to'g'ri `log "..."` chaqiruvi apply_callee'da oldinroq
+                // ushlanadi (bu yo'lga tushmaydi). `log` o'zgaruvchi e'lon qilingan
+                // bo'lsa lookup Ok beradi — u ustun.
+                Err(e) => {
+                    if name == "log" {
+                        Ok(crate::builtins::log_value_shim())
+                    } else {
+                        Err(e)
+                    }
+                }
+            },
             Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
@@ -1282,6 +1313,18 @@ impl Interp {
                     // yagona argumentsizi, lekin umumiy tutamiz.)
                     if crate::builtins::is_module(id) && self.lookup(id, env).is_err() {
                         return crate::builtins::call_module(id, name, vec![]);
+                    }
+                    // `log.info` argumentsiz (xabarsiz) -> Field bo'lib keladi.
+                    // `log` o'zgaruvchi emas bo'lsa bo'sh xabarli darajaga
+                    // yo'naltiramiz (issue #139). Noma'lum daraja — aniq xato.
+                    if id == "log" && self.lookup(id, env).is_err() {
+                        return match name.as_str() {
+                            "debug" | "info" | "warn" | "err" => self.log_dispatch(name, vec![]),
+                            _ => Err(Flow::err(format!(
+                                "log.{} yo'q (debug/info/warn/err)",
+                                name
+                            ))),
+                        };
                     }
                     // `reg.names` argumentsiz -> Call emas, Field bo'lib keladi
                     // (time.now kabi). `reg` o'zgaruvchi sifatida e'lon qilinmagan
@@ -1660,6 +1703,18 @@ impl Interp {
                 if modname == "crypto" && self.lookup(modname, env).is_err() {
                     return crate::crypto_mod::crypto_module(name, argv);
                 }
+                // log — darajali logger (issue #139). `log.debug/info/warn/err`.
+                // `log` global emas; foydalanuvchi `log` o'zgaruvchi e'lon qilmagan
+                // bo'lsa shu yerda ushlanadi. Noma'lum daraja — aniq xato.
+                if modname == "log" && self.lookup(modname, env).is_err() {
+                    return match name.as_str() {
+                        "debug" | "info" | "warn" | "err" => self.log_dispatch(name, argv),
+                        _ => Err(Flow::err(format!(
+                            "log.{} yo'q (debug/info/warn/err)",
+                            name
+                        ))),
+                    };
+                }
                 if crate::builtins::is_module(modname) {
                     return crate::builtins::call_module(modname, name, argv);
                 }
@@ -1684,6 +1739,15 @@ impl Interp {
                 }
             }
             return crate::builtins::call_method(&recv, name, argv);
+        }
+        // Bare `log "..."` — darajasiz chaqiruv = info (issue #139). `log` global
+        // emas (pure dispatch battery); foydalanuvchi `log` o'zgaruvchi e'lon
+        // qilmagan bo'lsa shu yerda ushlanadi, aks holda o'zgaruvchi ustun.
+        if let Expr::Ident(id) = callee
+            && id == "log"
+            && self.lookup(id, env).is_err()
+        {
+            return self.log_dispatch("info", argv);
         }
         let f = self.eval(callee, env)?;
         self.apply(f, argv)

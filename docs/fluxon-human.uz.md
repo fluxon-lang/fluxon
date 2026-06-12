@@ -1136,9 +1136,26 @@ ws.room.members "ch:5"                            # xonadagilar (presence uchun)
 > a'zoligi va presence — `ws.room` ichida boshqariladi, qo'lda shared-state
 > map kerak emas.
 
-### 9.11 `log` — stderr'ga chiqarish
+### 9.11 `log` — stderr'ga chiqarish (darajali)
 ```fluxon
-log "xabar"          # diagnostika uchun stderr'ga
+log "xabar"          # = log.info, diagnostika uchun stderr'ga
+log.debug "tafsilot"
+log.info  "ma'lumot"
+log.warn  "ehtiyot bo'l"
+log.err   "yiqildi"
+```
+
+Darajalar tartiblangan: `debug < info < warn < err`. Bare `log` = `log.info`
+(eski kod o'zgarmaydi). Production'da shovqinni env bilan boshqarasiz:
+
+- `$LOG_LEVEL` (debug/info/warn/err) — minimal daraja; undan **past** xabarlar
+  jim chiqarilmaydi. O'rnatilmasa hammasi chiqadi.
+- `$LOG_FORMAT=json` — har qator JSON obyekt (`{time, level, msg}`) — log
+  agregatorlar (Loki/ELK) uchun. Aks holda inson o'qiydigan `[DARAJA] xabar`.
+
+```sh
+LOG_LEVEL=warn ./app          # faqat warn va err
+LOG_FORMAT=json ./app         # {"time":"...","level":"info","msg":"..."}
 ```
 
 ---
