@@ -145,7 +145,7 @@ fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf
         vec![target.to_path_buf()]
     } else if target.is_dir() {
         let mut v = Vec::new();
-        collect_fx_files(target, &mut v);
+        collect_fx_files(target, &mut v)?;
         v.sort();
         v
     } else {
@@ -160,24 +160,31 @@ fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf
     Ok(files)
 }
 
-fn collect_fx_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+// IO xatolari yutilmaydi (codex P2): o'qib bo'lmaydigan ichki katalog jim
+// o'tkazilsa, "hammasi o'tdi" hisoboti aslida topilmagan testlarni yashirardi.
+fn collect_fx_files(
+    dir: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("'{}' katalogini o'qib bo'lmadi: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("'{}' ichini o'qib bo'lmadi: {}", dir.display(), e))?;
         let p = entry.path();
         // file_type() symlink'ni KUZATMAYDI — halqali symlink (tests/x -> tests/)
         // cheksiz rekursiyaga olib bormasin. Symlink'langan .fx fayl baribir
         // kiradi (pastdagi is_file symlink'ni kuzatadi), symlink-katalog esa yo'q.
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("'{}' turini aniqlab bo'lmadi: {}", p.display(), e))?;
         if ft.is_dir() {
-            collect_fx_files(&p, out);
+            collect_fx_files(&p, out)?;
         } else if p.extension().is_some_and(|e| e == "fx") && p.is_file() {
             out.push(p);
         }
     }
+    Ok(())
 }
 
 // Fayllarni ketma-ket bajaradi, (PASS, FAIL) sonini qaytaradi. Assert
@@ -2817,6 +2824,24 @@ assert "bo'sh bo'lmagan str ham truthy"
             std::os::unix::fs::symlink(&dir, dir.join("halqa")).unwrap();
             let with_loop = collect_test_files(&dir).unwrap();
             assert_eq!(with_loop.len(), 3, "halqa fayl ro'yxatini o'zgartirmasin");
+        }
+
+        // o'qib bo'lmaydigan ichki katalog jim o'tkazilmasin — xato ko'tarilsin
+        // (codex P2). root ruxsat cheklovini chetlab o'tadi, shuning uchun faqat
+        // cheklov haqiqatan ishlagan muhitda tekshiramiz (CI runner non-root).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let yopiq = dir.join("yopiq");
+            std::fs::create_dir_all(&yopiq).unwrap();
+            std::fs::write(yopiq.join("d.fx"), "assert true").unwrap();
+            std::fs::set_permissions(&yopiq, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_dir(&yopiq).is_err() {
+                let err = collect_test_files(&dir).unwrap_err();
+                assert!(err.contains("o'qib bo'lmadi"), "xabar: {}", err);
+            }
+            // cleanup uchun ruxsatni qaytaramiz
+            std::fs::set_permissions(&yopiq, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
         std::fs::remove_dir_all(&dir).unwrap();
