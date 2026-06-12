@@ -101,8 +101,24 @@ name = user.name ?? "guest"   # ?? = alternative if nil
 fail 422 "insufficient funds" # with status → 422 {error:...} to client
 fail "internal error"         # no status → 500
 ```
-`!` propagate, `??` replace nil, `fail [status] "..."` raise. No try/catch —
+`!` propagate, `??` replace nil, `fail [status] "..."` raise.
 `fail 4xx` auto-converts an expected error into an HTTP response (code stays flat).
+
+`try`/`catch` — catch a raised error and keep going (fallback, retry, log):
+```fluxon
+user = try
+  api.get "https://..."!     # fails here?
+catch e
+  log "api down: ${e.message}"   # e = {message, status}
+  cached_user                    # → value of catch body
+```
+`catch e` binds `e = {message, status}` (`status` is the `fail` status, or `nil`
+for a status-less `fail` / runtime error). `catch` (no var) ignores it. Both `try`
+and `catch` need an indented body; like `if`, the whole thing is an expression
+(yields the body value on success, the catch-body value on error). `ret`/`skip`/
+`stop` are control flow, NOT errors — they pass through `try` uncaught. Re-raise
+from `catch` with `fail`. Prefer `fail 4xx` + auto-HTTP for expected request
+errors; reach for `try`/`catch` when you must recover and continue.
 
 ## Tests
 ```fluxon

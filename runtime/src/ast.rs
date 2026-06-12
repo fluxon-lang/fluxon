@@ -60,6 +60,16 @@ pub enum Expr {
     // error-propagate: expr!
     Try(Box<Expr>),
 
+    // try/catch — xatoni ushlab qoladi (issue #125). `body` ishga tushadi; agar
+    // `fail` yoki runtime xato ko'tarilsa, `catch_body` ishlaydi va `catch_var`
+    // (bo'lsa) xato map'iga ({message, status}) bog'lanadi. Qiymat sifatida
+    // muvaffaqiyatda body, xatoda catch_body oxirgi ifodasini qaytaradi.
+    TryCatch {
+        body: Vec<Stmt>,
+        catch_var: Option<String>,
+        catch_body: Vec<Stmt>,
+    },
+
     // fail [status] msg — ifoda sifatida ham (masalan `x ?? (fail "...")`).
     // Hech qachon qiymat qaytarmaydi; oqimni uzadi.
     Fail {

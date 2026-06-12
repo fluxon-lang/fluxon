@@ -1330,6 +1330,11 @@ impl Interp {
                 // baribir Err sifatida ko'tariladi, shuning uchun bu o'tkazgich.
                 self.eval(inner, env)
             }
+            Expr::TryCatch {
+                body,
+                catch_var,
+                catch_body,
+            } => self.eval_try(body, catch_var.as_deref(), catch_body, env),
             Expr::If(ifx) => self.eval_if(ifx, env),
             Expr::Match(mx) => self.eval_match(mx, env),
             Expr::Fail { status, message } => {
@@ -1399,6 +1404,52 @@ impl Interp {
                 }
             }
         }
+    }
+
+    // try/catch (issue #125). Tana o'z scope'ida ishlaydi; `fail` (Flow::Fail)
+    // yoki runtime xato (Flow::Error) ko'tarilsa — uni ushlaymiz va catch tanasini
+    // ishga tushiramiz. ret/skip/stop oqim-signallari ushlanmaydi: ular try'dan
+    // o'tib funksiya/loop'ni boshqaradi (xato emas, oqim). catch o'zgaruvchisi
+    // bo'lsa, unga {message, status} map'i bog'lanadi (status — int yoki nil).
+    fn eval_try(
+        &self,
+        body: &[Stmt],
+        catch_var: Option<&str>,
+        catch_body: &[Stmt],
+        env: &Env,
+    ) -> EvalResult {
+        let inner = Scope::child_of(env);
+        match self.exec_block(body, &inner) {
+            Ok(v) => Ok(v),
+            Err(Flow::Fail { status, message }) => {
+                self.run_catch(catch_var, status, message, catch_body, env)
+            }
+            Err(Flow::Error(message)) => self.run_catch(catch_var, None, message, catch_body, env),
+            // ret/skip/stop — oqim-signallari, ushlanmaydi.
+            Err(other) => Err(other),
+        }
+    }
+
+    // catch tanasini xato map'i bilan ishga tushiradi.
+    fn run_catch(
+        &self,
+        catch_var: Option<&str>,
+        status: Option<i64>,
+        message: String,
+        catch_body: &[Stmt],
+        env: &Env,
+    ) -> EvalResult {
+        let inner = Scope::child_of(env);
+        if let Some(name) = catch_var {
+            let mut m = BTreeMap::new();
+            m.insert("message".to_string(), Value::Str(message));
+            m.insert(
+                "status".to_string(),
+                status.map(Value::Int).unwrap_or(Value::Nil),
+            );
+            inner.write().define(name, Value::Map(m), false);
+        }
+        self.exec_block(catch_body, &inner)
     }
 
     fn eval_if(&self, ifx: &IfExpr, env: &Env) -> EvalResult {

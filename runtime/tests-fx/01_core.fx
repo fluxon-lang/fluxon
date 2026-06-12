@@ -167,6 +167,35 @@ nm = "Aziza"
 eq "salom ${nm}" "salom Aziza" "interp expr"
 eq "1+1=${1 + 1}" "1+1=2" "interp calc"
 
+# --- try/catch (issue #125) ---
+# statusli fail ushlanadi, catch o'zgaruvchisi {message, status} ga bog'lanadi
+tc1 = try
+  fail 422 "noto'g'ri"
+catch e
+  eq e.message "noto'g'ri" "catch message"
+  eq e.status 422 "catch status"
+  "fallback"
+eq tc1 "fallback" "try catch fallback qiymati"
+# muvaffaqiyatda body qiymati qaytadi, catch ishlamaydi
+tc2 = try
+  40 + 2
+catch
+  0
+eq tc2 42 "try muvaffaqiyat qiymati"
+# statussiz fail va runtime xato — status nil
+tc3 = try
+  fail "boom"
+catch e
+  e.status
+eq tc3 nil "statussiz fail status nil"
+# ret oqim-signali try'dan o'tadi (catch ushlamaydi)
+fn tc_ret
+  try
+    ret "early"
+  catch
+    ret "caught"
+eq (tc_ret()) "early" "ret try'dan o'tadi"
+
 # --- Yakun ---
 if fails == 0
   log "=== 01_core: HAMMASI O'TDI ==="

@@ -175,6 +175,7 @@ impl Parser {
             Tok::If => Ok(Stmt::Expr(self.parse_if()?)),
             Tok::Match => Ok(Stmt::Expr(self.parse_match()?)),
             Tok::Each => self.parse_each(),
+            Tok::Try => Ok(Stmt::Expr(self.parse_try()?)),
             Tok::Ret => {
                 self.advance();
                 if self.check(&Tok::Newline) || self.check(&Tok::Dedent) || self.check(&Tok::Eof) {
@@ -804,6 +805,7 @@ impl Parser {
             Tok::Backslash => self.parse_lambda(),
             Tok::If => self.parse_if(),
             Tok::Match => self.parse_match(),
+            Tok::Try => self.parse_try(),
             Tok::Fail => self.parse_fail_expr(),
             other => Err(format!(
                 "{}-qatorda ifoda kutilgan, {:?} topildi",
@@ -1055,6 +1057,33 @@ impl Parser {
         Ok(Expr::Match(Box::new(MatchExpr { subject, arms })))
     }
 
+    // try/catch — xatoni ushlab qoladi (issue #125). `if`/`match` kabi blok-ifoda:
+    //   try
+    //     <tana>
+    //   catch e
+    //     <xato ishlovchisi>
+    // `catch` o'zgaruvchisi ixtiyoriy (`catch` yoki `catch e`). E'tibor: `catch`
+    // `if`ning `else`i kabi `try` bilan bir xil chekinish darajasida turadi.
+    fn parse_try(&mut self) -> ParseResult<Expr> {
+        self.advance(); // try
+        self.expect(&Tok::Newline, "try tanasi")?;
+        let body = self.parse_block()?;
+        self.skip_newlines();
+        self.expect(&Tok::Catch, "'catch'")?;
+        let catch_var = if let Tok::Ident(_) = self.peek() {
+            Some(self.expect_ident("catch o'zgaruvchisi")?)
+        } else {
+            None
+        };
+        self.expect(&Tok::Newline, "catch tanasi")?;
+        let catch_body = self.parse_block()?;
+        Ok(Expr::TryCatch {
+            body,
+            catch_var,
+            catch_body,
+        })
+    }
+
     // --- yordamchi predikatlar ---
     fn expect_ident(&mut self, what: &str) -> ParseResult<String> {
         match self.peek().clone() {
@@ -1150,6 +1179,8 @@ fn keyword_as_name(tok: &Tok) -> Option<String> {
         Tok::As => "as",
         Tok::Tbl => "tbl",
         Tok::Fail => "fail",
+        Tok::Try => "try",
+        Tok::Catch => "catch",
         Tok::True => "true",
         Tok::False => "false",
         Tok::Nil => "nil",

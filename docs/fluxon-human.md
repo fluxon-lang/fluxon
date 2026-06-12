@@ -456,9 +456,31 @@ http.on :post "/transfer" \req ->
   that status.
 - `fail "message"` (no status) — an **unexpected** error → 500.
 
+### `try` / `catch` — catch an error
+Often propagating the error (`!`) or turning it into an HTTP response
+(`fail 4xx`) is enough. But sometimes you must **catch the error and keep
+going** — give a default when an external API is down, retry, or log the error
+and continue the request. That is what `try`/`catch` is for:
+```fluxon
+user = try
+  api.get "https://..."!        # an error here?
+catch e
+  log "api down: ${e.message}"     # e = {message, status}
+  cached_user                       # → value of the catch body
+```
+- `catch e` — `e` binds to a `{message, status}` map. `status` is the `fail`
+  status code, or `nil` for a status-less `fail` or a runtime error.
+- `catch` (no variable) — ignores the error.
+- Like `if`, `try`/`catch` is an **expression**: it yields the `try` body value
+  on success, the `catch` body value on error.
+- `ret`/`skip`/`stop` are control flow, **not errors**: they pass through `try`
+  uncaught.
+- Re-raise from inside `catch` with `fail`.
+
 > **Canonical:** `!` = propagate the error, `??` = replace nil, `fail` = raise an
-> error (with or without a status). Each marker has one meaning. There is **no**
-> `try/catch` — `fail`+status replaces it, and the code stays flat.
+> error (with or without a status), `try`/`catch` = catch and continue. For
+> expected request errors prefer `fail 4xx` (the code stays flat); reach for
+> `try`/`catch` only when you must recover and continue.
 
 ---
 

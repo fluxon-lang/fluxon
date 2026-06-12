@@ -34,6 +34,8 @@ pub enum Tok {
     As,
     Tbl,
     Fail,
+    Try,
+    Catch,
 
     // Operatorlar va punktuatsiya
     Eq,        // =

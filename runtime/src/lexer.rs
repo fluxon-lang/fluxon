@@ -421,6 +421,8 @@ impl<'a> Lexer<'a> {
             "as" => Tok::As,
             "tbl" => Tok::Tbl,
             "fail" => Tok::Fail,
+            "try" => Tok::Try,
+            "catch" => Tok::Catch,
             _ => Tok::Ident(s),
         };
         self.push_at(tok, line, col);

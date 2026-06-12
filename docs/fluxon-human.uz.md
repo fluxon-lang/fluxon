@@ -459,9 +459,31 @@ http.on :post "/transfer" \req ->
 - `fail 4xx "xabar"` — **kutilgan** (biznes) xato → o'sha statusli JSON javob.
 - `fail "xabar"` (status'siz) — **kutilmagan** xato → 500.
 
+### `try` / `catch` — xatoni ushlab qolish
+Ko'pincha xatoni yuqoriga uzatish (`!`) yoki HTTP javobga aylantirish
+(`fail 4xx`) yetarli. Lekin ba'zan xatoni **ushlab qolib, ishni davom
+ettirish** kerak — tashqi API yiqilsa default qiymat berish, qayta urinish,
+xatoni log qilib so'rovni davom ettirish. Shuning uchun `try`/`catch`:
+```fluxon
+user = try
+  api.get "https://..."!        # shu yerda xato chiqsa?
+catch e
+  log "api yiqildi: ${e.message}"  # e = {message, status}
+  cached_user                       # → catch tanasining qiymati
+```
+- `catch e` — `e` ga `{message, status}` map'i bog'lanadi. `status` — `fail`
+  status kodi, statussiz `fail` yoki runtime xatoda esa `nil`.
+- `catch` (o'zgaruvchisiz) — xatoni e'tiborsiz qoldiradi.
+- `if` kabi `try`/`catch` ham **ifoda**: muvaffaqiyatda `try` tanasi, xatoda
+  `catch` tanasi qiymatini qaytaradi.
+- `ret`/`skip`/`stop` — oqim-signallari, **xato emas**: `try`'dan o'tib ketadi,
+  ushlanmaydi.
+- `catch` ichidan `fail` bilan xatoni qayta ko'tarish mumkin (re-raise).
+
 > **Canonical:** `!` = xatoni uzat, `??` = nil'ni almashtir, `fail` = xato
-> chiqar (status bilan yoki status'siz). Har belgi bitta ma'no. `try/catch`
-> **yo'q** — `fail`+status uning o'rnini bosadi, kod tekis qoladi.
+> chiqar (status bilan yoki status'siz), `try`/`catch` = xatoni ushlab davom
+> et. Kutilgan so'rov xatolari uchun avval `fail 4xx`'ni tanlang (kod tekis
+> qoladi); `try`/`catch` — tiklanish va davom etish zarur bo'lgandagina.
 
 ---
 

@@ -290,6 +290,95 @@ a = (safe 5)!
 "#);
     }
 
+    // Issue #125: try/catch — `fail` ko'tarilgan xatoni ushlab, qiymat sifatida
+    // davom ettiradi. catch o'zgaruvchisi {message, status} map'iga bog'lanadi.
+    #[test]
+    fn try_catch_fail_statusli_ushlaydi() {
+        run(r#"
+r = try
+  fail 422 "noto'g'ri ma'lumot"
+catch e
+  (e.message == "noto'g'ri ma'lumot") | (fail "catch message buzildi")
+  (e.status == 422) | (fail "catch status buzildi")
+  "fallback"
+(r == "fallback") | (fail "catch tanasining qiymati qaytmadi")
+"#);
+    }
+
+    // Statussiz fail va runtime xato — ikkalasi ham ushlanadi; statussizda
+    // e.status nil bo'ladi.
+    #[test]
+    fn try_catch_runtime_xato_va_statussiz() {
+        run(r#"
+r = try
+  fail "boom"
+catch e
+  (e.status == nil) | (fail "statussiz fail'da status nil bo'lishi kerak")
+  e.message
+(r == "boom") | (fail "statussiz fail message ushlanmadi")
+
+# runtime xato (nolga bo'lish) ham ushlanadi
+r2 = try
+  1 / 0
+catch e
+  (e.status == nil) | (fail "runtime xato status nil bo'lishi kerak")
+  "ushlandi"
+(r2 == "ushlandi") | (fail "runtime xato ushlanmadi")
+"#);
+    }
+
+    // Muvaffaqiyatda body oxirgi ifodasi qaytadi; catch ishlamaydi.
+    #[test]
+    fn try_catch_muvaffaqiyatda_body_qiymati() {
+        run(r#"
+r = try
+  40 + 2
+catch
+  0
+(r == 42) | (fail "muvaffaqiyatda body qiymati qaytmadi")
+"#);
+    }
+
+    // ret/skip/stop oqim-signallari try'dan o'tib ketadi — catch ularni ushlamaydi.
+    #[test]
+    fn try_catch_oqim_signallarini_ushlamaydi() {
+        run(r#"
+fn f
+  try
+    ret "early"
+  catch
+    ret "caught"
+((f()) == "early") | (fail "ret try ichidan ushlandi (noto'g'ri)")
+
+total <- 0
+each i in 1..5
+  try
+    if i == 3
+      skip
+    if i == 5
+      stop
+    total <- total + i
+  catch
+    fail "skip/stop ushlanmasligi kerak"
+(total == 7) | (fail "skip/stop try ichida buzildi: ${total}")
+"#);
+    }
+
+    // Ichma-ich try va catch ichidan qayta fail (re-raise) tashqi try'ga boradi.
+    #[test]
+    fn try_catch_ichmaich_va_qayta_fail() {
+        run(r#"
+r = try
+  try
+    fail "inner"
+  catch e
+    fail "outer: ${e.message}"
+catch e
+  e.message
+(r == "outer: inner") | (fail "ichma-ich try yoki qayta fail buzildi")
+"#);
+    }
+
     // Issue #90: cheksiz rekursiya stack overflow ABORT o'rniga graceful
     // runtime xato qaytarishi kerak (HTTP handler'da butun server o'lmasin).
     #[test]
