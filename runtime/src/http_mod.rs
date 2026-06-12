@@ -428,13 +428,35 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+// Kandidatni canonicalize qilib mount ildizi OSTIDA oddiy fayl ekanini
+// tasdiqlaydi (codex P2): safe_join faqat leksik segmentlarni tekshiradi,
+// metadata esa symlink'ni kuzatadi — papka ichidagi symlink ildizdan tashqari
+// faylga (masalan /etc/passwd) ishora qilsa, leksik himoya chetlab o'tilardi.
+// `root` registratsiyada canonicalize qilingan, shuning uchun prefiks
+// taqqoslash to'g'ri ishlaydi. Ildiz ichidagi symlink (canonical manzili ham
+// ildiz ostida) avvalgidek xizmat qilinadi. Qaytgan yo'l canonical — keyingi
+// o'qish ham aynan tekshirilgan faylni oladi.
+async fn confined_file(p: &Path, root: &Path) -> Option<(PathBuf, u64)> {
+    let canon = tokio::fs::canonicalize(p).await.ok()?;
+    if !canon.starts_with(root) {
+        return None;
+    }
+    let md = tokio::fs::metadata(&canon).await.ok()?;
+    if md.is_file() {
+        let len = md.len();
+        Some((canon, len))
+    } else {
+        None
+    }
+}
+
 // So'rov segmentlarini (percent-dekod qilingan — chaqiruvchi tayyorlaydi)
 // mount'lar bo'yicha faylga aylantiradi. Uzun prefiks ustun ("/assets" mount'i
 // "/" mount'idan oldin tekshiriladi) — eng aniq mount yutadi. Ikki bosqich:
 // (1) aniq fayl (katalog so'ralsa ichidagi index.html); (2) topilmasa —
 // prefiksi mos SPA mount'larning `index.html` fallback'i. Hajm (bayt)
 // metadata'dan birga qaytadi — HEAD javobi faylni o'qimasdan Content-Length
-// bera olsin (codex P2).
+// bera olsin (codex P2). Har kandidat confined_file orqali ildizga qamaladi.
 async fn resolve_static(
     mounts: &[StaticMount],
     segs: &[String],
@@ -446,26 +468,20 @@ async fn resolve_static(
         let Some(rest) = strip_mount_prefix(&m.prefix, segs) else {
             continue;
         };
-        let Some(mut p) = safe_join(&m.dir, rest) else {
+        let Some(p) = safe_join(&m.dir, rest) else {
             continue;
         };
-        match tokio::fs::metadata(&p).await {
-            // Katalog so'raldi (yoki prefiksning o'zi) — index.html'ga urinish.
-            Ok(md) if md.is_dir() => {
-                p.push("index.html");
-                if let Ok(md2) = tokio::fs::metadata(&p).await
-                    && md2.is_file()
-                {
-                    let mime = mime_for(&p);
-                    return Some((p, mime, md2.len()));
-                }
-            }
-            Ok(md) if md.is_file() => {
-                let mime = mime_for(&p);
-                let len = md.len();
-                return Some((p, mime, len));
-            }
-            _ => {}
+        // Aniq fayl. Mime canonical yo'ldan — symlink nomi emas, haqiqiy fayl
+        // kengaytmasi javob turini belgilaydi.
+        if let Some((canon, len)) = confined_file(&p, &m.dir).await {
+            let mime = mime_for(&canon);
+            return Some((canon, mime, len));
+        }
+        // Katalog so'ralgan bo'lishi mumkin (yoki prefiksning o'zi) —
+        // ichidagi index.html'ga urinish. p fayl bo'lsa bu jim muvaffaqiyatsiz.
+        if let Some((canon, len)) = confined_file(&p.join("index.html"), &m.dir).await {
+            let mime = mime_for(&canon);
+            return Some((canon, mime, len));
         }
     }
 
@@ -473,11 +489,8 @@ async fn resolve_static(
         if !m.spa || strip_mount_prefix(&m.prefix, segs).is_none() {
             continue;
         }
-        let p = m.dir.join("index.html");
-        if let Ok(md) = tokio::fs::metadata(&p).await
-            && md.is_file()
-        {
-            return Some((p, "text/html; charset=utf-8", md.len()));
+        if let Some((canon, len)) = confined_file(&m.dir.join("index.html"), &m.dir).await {
+            return Some((canon, "text/html; charset=utf-8", len));
         }
     }
     None
@@ -3746,10 +3759,12 @@ mod tests {
         // "/" va "/assets" mount'lari birga: /assets/a.css uzunroq prefiksdagi
         // papkadan olinadi (eng aniq mount ustun).
         let root = std::env::temp_dir().join("fluxon_static_unit_1");
-        let dist = root.join("dist");
-        let public = root.join("public");
-        std::fs::create_dir_all(&dist).unwrap();
-        std::fs::create_dir_all(&public).unwrap();
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        // Mount katalogi registratsiyada canonicalize qilinadi (http_static) —
+        // testda ham shunday, aks holda macOS'da /tmp symlink'i taqqoslashni buzadi.
+        let dist = std::fs::canonicalize(root.join("dist")).unwrap();
+        let public = std::fs::canonicalize(root.join("public")).unwrap();
         std::fs::write(dist.join("a.css"), "dist css").unwrap();
         std::fs::write(public.join("a.css"), "public css").unwrap();
         std::fs::write(dist.join("index.html"), "<h1>spa</h1>").unwrap();
@@ -3803,8 +3818,8 @@ mod tests {
         // `..` (xom yoki percent-encoded) mount katalogidan tashqariga olib
         // chiqmaydi — None (404), sirli fayl o'qilmaydi.
         let root = std::env::temp_dir().join("fluxon_static_unit_2");
-        let public = root.join("public");
-        std::fs::create_dir_all(&public).unwrap();
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        let public = std::fs::canonicalize(root.join("public")).unwrap();
         std::fs::write(public.join("ok.txt"), "ok").unwrap();
         std::fs::write(root.join("secret.txt"), "sir").unwrap();
 
@@ -3833,6 +3848,44 @@ mod tests {
                 .await
                 .is_some()
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn static_symlink_ildizdan_chiqsa_404() {
+        // Leksik himoya (safe_join) symlink'ni ko'rmaydi: papka ichidagi
+        // symlink ildizdan TASHQARI faylga ishora qilsa xizmat qilinmasligi
+        // kerak (codex P2 — canonicalize + ildiz tekshiruvi). Ildiz ICHIDAGI
+        // nishonga ishora qiluvchi symlink esa avvalgidek beriladi.
+        let root = std::env::temp_dir().join("fluxon_static_unit_3");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        let public = std::fs::canonicalize(root.join("public")).unwrap();
+        std::fs::write(root.join("secret.txt"), "MAXFIY").unwrap();
+        std::fs::write(public.join("ichki.txt"), "ichki").unwrap();
+        // Tashqariga ishora: public/evil.txt -> ../secret.txt
+        std::os::unix::fs::symlink(root.join("secret.txt"), public.join("evil.txt")).unwrap();
+        // Ichkariga ishora: public/alias.txt -> public/ichki.txt
+        std::os::unix::fs::symlink(public.join("ichki.txt"), public.join("alias.txt")).unwrap();
+
+        let mounts = vec![StaticMount {
+            prefix: vec!["assets".to_string()],
+            dir: public.clone(),
+            spa: false,
+        }];
+        assert!(
+            resolve_static(&mounts, &decode_segs("/assets/evil.txt"))
+                .await
+                .is_none(),
+            "ildizdan tashqariga symlink xizmat qilinmasligi kerak"
+        );
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/alias.txt"))
+            .await
+            .expect("ildiz ichidagi symlink ishlashi kerak");
+        // Canonical yo'l — symlink nishoni (haqiqiy fayl).
+        assert_eq!(p, public.join("ichki.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

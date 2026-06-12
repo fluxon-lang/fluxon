@@ -161,7 +161,8 @@ http.serve 8080
 - Static files: `http.static "/assets" "./public"` (prefix → folder; folder is
   relative to the script file, must exist at startup). Content-Type from the
   extension; a directory request serves its `index.html`; `../` traversal
-  (percent-encoded too) is blocked. Exact routes win over static; GET/HEAD only.
+  (percent-encoded too) is blocked, and symlinks resolving outside the folder
+  are not served. Exact routes win over static; GET/HEAD only.
   SPA: `http.static "/" "./dist" {spa:true}` — an unmatched path under the prefix
   falls back to `dist/index.html`. Middleware (use/before/limit) applies to
   static paths too.
