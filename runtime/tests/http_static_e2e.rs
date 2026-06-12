@@ -299,10 +299,23 @@ async fn static_middleware_himoya_qiladi() {
         resp
     );
 
+    // Token'siz YO'Q fayl ham 401 — 404 emas (codex P2): aks holda status
+    // farqi (401=bor, 404=yo'q) himoyalangan fayl nomlarini oshkor qilardi.
+    let resp = http_get(port, "/himoya/yoq-fayl.css").await;
+    assert!(
+        resp.contains("401"),
+        "yo'q fayl ham auth'siz 401 bo'lishi kerak (nom sizmasin): {}",
+        resp
+    );
+
     // Token bilan — fayl keladi.
     let resp = http_get_with_header(port, "/himoya/app.css", Some("X-Token: sir")).await;
     assert!(resp.contains("200"), "token bilan 200 kutilgan: {}", resp);
     assert!(resp.contains("body{color:red}"), "css kutilgan: {}", resp);
+
+    // Token bilan yo'q fayl — endi haqiqiy 404.
+    let resp = http_get_with_header(port, "/himoya/yoq-fayl.css", Some("X-Token: sir")).await;
+    assert!(resp.contains("404"), "token bilan yo'q fayl 404: {}", resp);
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir_all(&root);

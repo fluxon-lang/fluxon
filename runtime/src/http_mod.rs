@@ -428,28 +428,22 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
-// So'rov yo'lini mount'lar bo'yicha faylga aylantiradi. Uzun prefiks ustun
-// ("/assets" mount'i "/" mount'idan oldin tekshiriladi) — eng aniq mount yutadi.
-// Ikki bosqich: (1) aniq fayl (katalog so'ralsa ichidagi index.html);
-// (2) topilmasa — prefiksi mos SPA mount'larning `index.html` fallback'i.
-// Hajm (bayt) metadata'dan birga qaytadi — HEAD javobi faylni o'qimasdan
-// Content-Length bera olsin (codex P2).
+// So'rov segmentlarini (percent-dekod qilingan — chaqiruvchi tayyorlaydi)
+// mount'lar bo'yicha faylga aylantiradi. Uzun prefiks ustun ("/assets" mount'i
+// "/" mount'idan oldin tekshiriladi) — eng aniq mount yutadi. Ikki bosqich:
+// (1) aniq fayl (katalog so'ralsa ichidagi index.html); (2) topilmasa —
+// prefiksi mos SPA mount'larning `index.html` fallback'i. Hajm (bayt)
+// metadata'dan birga qaytadi — HEAD javobi faylni o'qimasdan Content-Length
+// bera olsin (codex P2).
 async fn resolve_static(
     mounts: &[StaticMount],
-    path: &str,
+    segs: &[String],
 ) -> Option<(PathBuf, &'static str, u64)> {
-    // Segmentlar percent-dekod qilinadi (brauzer non-ASCII nomni encode qiladi);
-    // `keep_path_seps=true` — `%2F` xom qoladi, dekoddan yangi `/` tug'ilmaydi.
-    let segs: Vec<String> = path_segments(path)
-        .iter()
-        .map(|s| percent_decode(s, true))
-        .collect();
-
     let mut order: Vec<&StaticMount> = mounts.iter().collect();
     order.sort_by_key(|m| std::cmp::Reverse(m.prefix.len()));
 
     for m in &order {
-        let Some(rest) = strip_mount_prefix(&m.prefix, &segs) else {
+        let Some(rest) = strip_mount_prefix(&m.prefix, segs) else {
             continue;
         };
         let Some(mut p) = safe_join(&m.dir, rest) else {
@@ -476,7 +470,7 @@ async fn resolve_static(
     }
 
     for m in &order {
-        if !m.spa || strip_mount_prefix(&m.prefix, &segs).is_none() {
+        if !m.spa || strip_mount_prefix(&m.prefix, segs).is_none() {
             continue;
         }
         let p = m.dir.join("index.html");
@@ -1598,9 +1592,25 @@ async fn try_serve_static(
     if mounts.is_empty() {
         return None;
     }
-    let (file, mime, len) = resolve_static(&mounts, path).await?;
+    // Segmentlar percent-dekod qilinadi (brauzer non-ASCII nomni encode qiladi);
+    // `keep_path_seps=true` — `%2F` xom qoladi, dekoddan yangi `/` tug'ilmaydi.
+    let segs: Vec<String> = path_segments(path)
+        .iter()
+        .map(|s| percent_decode(s, true))
+        .collect();
+    // Hech bir mount prefiksi mos kelmasa — static hududi emas, oddiy 404
+    // (middleware'siz, route-404 bilan bir xil xulq).
+    if !mounts
+        .iter()
+        .any(|m| strip_mount_prefix(&m.prefix, &segs).is_some())
+    {
+        return None;
+    }
 
-    // Bu yo'lga mos middleware'lar (handle_request'dagi filter bilan bir xil).
+    // Middleware zanjiri fayl MAVJUDLIGIDAN OLDIN ishlaydi (codex P2): aks
+    // holda himoyalangan mount ostida bor fayl 401, yo'q fayl 404 qaytarib,
+    // auth'siz mijoz fayl nomlarini status farqidan topa olardi. Prefiks mos
+    // kelgan har so'rov — fayl bor-yo'qligidan qat'i nazar — zanjirdan o'tadi.
     let chain: Vec<Middleware> = interp
         .middlewares
         .lock()
@@ -1635,7 +1645,7 @@ async fn try_serve_static(
         })
         .await;
         match mw_result {
-            Ok(Ok(None)) => {} // zanjir o'tdi — faylni beramiz
+            Ok(Ok(None)) => {} // zanjir o'tdi — faylga o'tamiz
             Ok(Ok(Some(v))) => return Some(value_to_response(v)),
             Ok(Err(flow)) => return Some(flow_to_response(flow)),
             Err(join_err) => {
@@ -1646,6 +1656,7 @@ async fn try_serve_static(
             }
         }
     }
+    let (file, mime, len) = resolve_static(&mounts, &segs).await?;
     // HEAD — mazmun kerak emas: faylni O'QIMASDAN metadata hajmi bilan javob
     // (katta asset'da behuda disk I/O / xotira bo'lmasin — codex P2).
     if method == "head" {
@@ -3720,6 +3731,16 @@ mod tests {
         );
     }
 
+    // So'rov yo'lini try_serve_static bilan bir xil qoidada segmentlarga
+    // ajratadi (percent-dekod, %2F xom qoladi) — resolve_static endi tayyor
+    // segmentlarni oladi (dekod chaqiruvchida, prefiks tekshiruvi bilan bitta).
+    fn decode_segs(path: &str) -> Vec<String> {
+        path_segments(path)
+            .iter()
+            .map(|s| percent_decode(s, true))
+            .collect()
+    }
+
     #[tokio::test]
     async fn static_resolve_uzun_prefiks_yutadi() {
         // "/" va "/assets" mount'lari birga: /assets/a.css uzunroq prefiksdagi
@@ -3747,23 +3768,31 @@ mod tests {
         ];
         // /assets/a.css -> public (uzun prefiks), /a.css -> dist (root mount).
         // len — metadata'dagi bayt soni (HEAD Content-Length shu bilan beriladi).
-        let (p, mime, len) = resolve_static(&mounts, "/assets/a.css").await.unwrap();
+        let (p, mime, len) = resolve_static(&mounts, &decode_segs("/assets/a.css"))
+            .await
+            .unwrap();
         assert_eq!(p, public.join("a.css"));
         assert_eq!(mime, "text/css; charset=utf-8");
         assert_eq!(len, "public css".len() as u64);
-        let (p, _, len) = resolve_static(&mounts, "/a.css").await.unwrap();
+        let (p, _, len) = resolve_static(&mounts, &decode_segs("/a.css"))
+            .await
+            .unwrap();
         assert_eq!(p, dist.join("a.css"));
         assert_eq!(len, "dist css".len() as u64);
         // Katalog so'ralganda index.html.
-        let (p, mime, _) = resolve_static(&mounts, "/").await.unwrap();
+        let (p, mime, _) = resolve_static(&mounts, &decode_segs("/")).await.unwrap();
         assert_eq!(p, dist.join("index.html"));
         assert_eq!(mime, "text/html; charset=utf-8");
         // Topilmagan yo'l — SPA fallback (root mount spa:true).
-        let (p, _, _) = resolve_static(&mounts, "/yo/q/sahifa").await.unwrap();
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/yo/q/sahifa"))
+            .await
+            .unwrap();
         assert_eq!(p, dist.join("index.html"));
         // /assets ostida topilmagan fayl: assets mount spa emas, lekin root SPA
         // mount prefiksi baribir mos — fallback unga tushadi.
-        let (p, _, _) = resolve_static(&mounts, "/assets/yoq.css").await.unwrap();
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/yoq.css"))
+            .await
+            .unwrap();
         assert_eq!(p, dist.join("index.html"));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3785,21 +3814,25 @@ mod tests {
             spa: false,
         }];
         assert!(
-            resolve_static(&mounts, "/assets/../secret.txt")
+            resolve_static(&mounts, &decode_segs("/assets/../secret.txt"))
                 .await
                 .is_none()
         );
         assert!(
-            resolve_static(&mounts, "/assets/%2e%2e/secret.txt")
+            resolve_static(&mounts, &decode_segs("/assets/%2e%2e/secret.txt"))
                 .await
                 .is_none()
         );
         assert!(
-            resolve_static(&mounts, "/assets/..%2Fsecret.txt")
+            resolve_static(&mounts, &decode_segs("/assets/..%2Fsecret.txt"))
                 .await
                 .is_none()
         );
-        assert!(resolve_static(&mounts, "/assets/ok.txt").await.is_some());
+        assert!(
+            resolve_static(&mounts, &decode_segs("/assets/ok.txt"))
+                .await
+                .is_some()
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
