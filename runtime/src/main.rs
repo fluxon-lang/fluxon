@@ -142,6 +142,11 @@ fn run_tests(path: Option<&str>) -> ExitCode {
 // Bo'sh ro'yxat ham xato: "test o'tdi" deb jim chiqish chalg'ituvchi bo'lardi.
 fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
     let files = if target.is_file() {
+        // .fx bo'lmagan fayl (codex P2): Fluxon sifatida parse qilib FAIL/exit 1
+        // berish chalg'ituvchi — bu discovery xatosi (exit 2), test natijasi emas.
+        if target.extension().is_none_or(|e| e != "fx") {
+            return Err(format!("'{}' .fx fayl emas", target.display()));
+        }
         vec![target.to_path_buf()]
     } else if target.is_dir() {
         let mut v = Vec::new();
@@ -2808,6 +2813,10 @@ assert "bo'sh bo'lmagan str ham truthy"
         // bitta fayl — ro'yxat faqat o'sha fayldan iborat
         let one = collect_test_files(&dir.join("a.fx")).unwrap();
         assert_eq!(one.len(), 1);
+
+        // .fx bo'lmagan aniq fayl — discovery xatosi (Fluxon sifatida bajarilmaydi)
+        let err = collect_test_files(&dir.join("eslatma.txt")).unwrap_err();
+        assert!(err.contains(".fx fayl emas"), "xabar: {}", err);
 
         // mavjud bo'lmagan yo'l — xato
         assert!(collect_test_files(&dir.join("yoq")).is_err());
