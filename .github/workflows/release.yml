@@ -1,0 +1,177 @@
+name: Release
+
+# version/* branch'dan ochilgan PR merge bo'lganda GitHub Release yaratadi.
+# Qo'lda qayta ishga tushirish uchun workflow_dispatch ham qoldirilgan.
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release versiyasi (masalan: 0.2.0 yoki v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  WORKDIR: runtime
+  BIN_NAME: fluxon
+
+jobs:
+  prepare:
+    name: Release ma'lumotlarini tayyorlash
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.merged == true &&
+        startsWith(github.head_ref, 'version/') &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_version: ${{ steps.release.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release versiyasini aniqlash
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            raw_version="${{ inputs.version }}"
+          else
+            raw_version="${GITHUB_HEAD_REF#version/}"
+          fi
+
+          release_version="${raw_version#v}"
+          crate_version="$(awk -F '"' '/^version =/ { print $2; exit }' "$WORKDIR/Cargo.toml")"
+
+          if [ -z "$release_version" ]; then
+            echo "Release version topilmadi." >&2
+            exit 1
+          fi
+
+          if [ "$release_version" != "$crate_version" ]; then
+            echo "Branch/input versiyasi ($release_version) runtime/Cargo.toml versiyasi ($crate_version) bilan mos emas." >&2
+            exit 1
+          fi
+
+          {
+            echo "release_tag=v$release_version"
+            echo "release_version=$release_version"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build release asset (${{ matrix.os }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain o'rnatish (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: runtime
+
+      - name: Release build
+        run: cargo build --locked --release --verbose
+
+      - name: Binary'ni paketlash
+        shell: bash
+        run: |
+          mkdir -p dist package
+
+          case "$RUNNER_OS" in
+            Linux)
+              os_name="linux"
+              bin_file="$BIN_NAME"
+              ;;
+            macOS)
+              os_name="macos"
+              bin_file="$BIN_NAME"
+              ;;
+            Windows)
+              os_name="windows"
+              bin_file="$BIN_NAME.exe"
+              ;;
+            *)
+              echo "Noma'lum OS: $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
+
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64)
+              arch="x86_64"
+              ;;
+            arm64|aarch64)
+              arch="aarch64"
+              ;;
+          esac
+
+          asset_base="$BIN_NAME-${{ needs.prepare.outputs.release_tag }}-$os_name-$arch"
+          cp "target/release/$bin_file" "package/$bin_file"
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "dist/$asset_base.zip" "package/$bin_file"
+          else
+            tar -czf "dist/$asset_base.tar.gz" -C package "$bin_file"
+          fi
+
+      - name: Build artifact yuklash
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: runtime/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release yaratish
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release artifactlarini yuklab olish
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksum yaratish
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Release yaratish yoki assetlarni yangilash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "Fluxon $RELEASE_TAG" \
+              --generate-notes
+          fi

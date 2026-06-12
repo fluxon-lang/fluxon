@@ -6,6 +6,8 @@
 //   fluxon check <fayl.fx>   — faqat lex+parse (bajarmaydi); parse xato -> exit 2
 //   fluxon test [yo'l]       — test fayllarini ishga tushiradi (standart: tests/);
 //                              yo'l fayl yoki katalog bo'lishi mumkin
+//   fluxon --version         — build qilingan package versiyasini chiqaradi
+//   fluxon --help            — foydalanish yo'riqnomasini chiqaradi
 
 // mimalloc — parallel'da system malloc'dan ancha kam contention beradi.
 // Interpreter qisqa umrli scope allokatsiyalarini ko'p qiladi (tree-walking).
@@ -40,6 +42,8 @@ enum Command {
     Check(String),
     // test: yo'l ixtiyoriy — berilmasa standart `tests/` katalogi ishlatiladi.
     Test(Option<String>),
+    Version,
+    Help,
 }
 
 fn main() -> ExitCode {
@@ -47,9 +51,7 @@ fn main() -> ExitCode {
     let cmd = match parse_args(&args) {
         Some(c) => c,
         None => {
-            eprintln!(
-                "Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>  |  fluxon test [yo'l]"
-            );
+            eprintln!("{}", usage());
             return ExitCode::from(2);
         }
     };
@@ -87,7 +89,19 @@ fn main() -> ExitCode {
         }
         // test: bitta fayl o'qimaydi — o'zi fayllarni topib ishga tushiradi.
         Command::Test(path) => run_tests(path.as_deref()),
+        Command::Version => {
+            println!("fluxon {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        Command::Help => {
+            println!("{}", usage());
+            ExitCode::SUCCESS
+        }
     }
+}
+
+fn usage() -> &'static str {
+    "Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>  |  fluxon test [yo'l]  |  fluxon --version  |  fluxon --help"
 }
 
 // Faylni o'qiydi; xatoda xabarni chiqarib, chiqish kodini (1) qaytaradi.
@@ -103,6 +117,8 @@ fn parse_args(args: &[String]) -> Option<Command> {
         Some("run") => args.get(2).cloned().map(Command::Run),
         Some("check") => args.get(2).cloned().map(Command::Check),
         Some("test") => Some(Command::Test(args.get(2).cloned())),
+        Some("--version" | "-V") => Some(Command::Version),
+        Some("--help" | "-h") => Some(Command::Help),
         Some(p) if !p.starts_with('-') => Some(Command::Run(p.to_string())),
         _ => None,
     }
@@ -2894,6 +2910,35 @@ log "${fib 10}"
         match parse_args(&to_args(&["fluxon", "test", "smoke.fx"])) {
             Some(Command::Test(Some(p))) => assert_eq!(p, "smoke.fx"),
             _ => panic!("Command::Test(Some) kutilgan edi"),
+        }
+    }
+
+    // parse_args: version flag build qilingan package versiyasini chiqaradigan
+    // buyruqqa map bo'ladi.
+    #[test]
+    fn parse_args_version_flaglari() {
+        let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
+        match parse_args(&to_args(&["fluxon", "--version"])) {
+            Some(Command::Version) => {}
+            _ => panic!("Command::Version kutilgan edi"),
+        }
+        match parse_args(&to_args(&["fluxon", "-V"])) {
+            Some(Command::Version) => {}
+            _ => panic!("Command::Version kutilgan edi"),
+        }
+    }
+
+    // parse_args: help flaglari foydalanish matnini chiqaradigan buyruqqa map bo'ladi.
+    #[test]
+    fn parse_args_help_flaglari() {
+        let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
+        match parse_args(&to_args(&["fluxon", "--help"])) {
+            Some(Command::Help) => {}
+            _ => panic!("Command::Help kutilgan edi"),
+        }
+        match parse_args(&to_args(&["fluxon", "-h"])) {
+            Some(Command::Help) => {}
+            _ => panic!("Command::Help kutilgan edi"),
         }
     }
 

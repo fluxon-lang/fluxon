@@ -22,6 +22,9 @@ cargo run -- run examples/demo.fx
   **bajarmaydi** → side-effect yo'q). To'g'ri → `exit 0`; parse/lex xato →
   `exit 2`. Bu `run`ning `exit 1`idan farqli, shuning uchun chaqiruvchi qaysi
   bosqichda yiqilganini bila oladi (AI self-repair gate uchun qulay).
+- `fluxon --version` yoki `fluxon -V` — build qilingan package versiyasini
+  chiqaradi (`Cargo.toml` dagi `package.version`).
+- `fluxon --help` yoki `fluxon -h` — foydalanish yo'riqnomasini chiqaradi.
 
 ## Hozir nima ishlaydi
 
