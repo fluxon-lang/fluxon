@@ -112,7 +112,8 @@ assert user.active                       # message optional
 Wrap operator conditions in parens (paren-less call rule). `fluxon test` runs every
 `.fx` under `tests/` (recursive, sorted); `fluxon test pay_test.fx` runs one file.
 Per file: `PASS path (N assert)` or `FAIL path — message` (first failed assert stops
-that file, the rest still run). Exit 0 only if all files pass.
+that file, the rest still run). Exit 0 only if all files pass. Test files must not
+call `http.serve`/`ws.serve` — a server blocks and the runner never finishes.
 
 ## Modules
 ```fluxon

@@ -166,9 +166,15 @@ fn collect_fx_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_dir() {
+        // file_type() symlink'ni KUZATMAYDI — halqali symlink (tests/x -> tests/)
+        // cheksiz rekursiyaga olib bormasin. Symlink'langan .fx fayl baribir
+        // kiradi (pastdagi is_file symlink'ni kuzatadi), symlink-katalog esa yo'q.
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_dir() {
             collect_fx_files(&p, out);
-        } else if p.extension().is_some_and(|e| e == "fx") {
+        } else if p.extension().is_some_and(|e| e == "fx") && p.is_file() {
             out.push(p);
         }
     }
@@ -2803,6 +2809,15 @@ assert "bo'sh bo'lmagan str ham truthy"
         let empty = dir.join("bosh");
         std::fs::create_dir_all(&empty).unwrap();
         assert!(collect_test_files(&empty).is_err());
+
+        // halqali symlink (katalog o'ziga ishora) cheksiz rekursiya bermasin —
+        // file_type() symlink'ni kuzatmaydi, halqa shunchaki o'tkazib yuboriladi.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir, dir.join("halqa")).unwrap();
+            let with_loop = collect_test_files(&dir).unwrap();
+            assert_eq!(with_loop.len(), 3, "halqa fayl ro'yxatini o'zgartirmasin");
+        }
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
