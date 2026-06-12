@@ -278,6 +278,19 @@ log.info "interpolatsiya ${1 + 1}"
 "#);
     }
 
+    // Issue #139: `log` qiymat sifatida (callback/saqlash) ishlashda davom etadi —
+    // eski global `log` Native bilan moslik (info-darajali shim). PR #163 review.
+    #[test]
+    fn log_qiymat_sifatida_callback() {
+        run(r#"
+fn call f -> f "qiymat orqali"
+call log
+[1, 2, 3].map log
+g = log
+g "saqlangan funksiya"
+"#);
+    }
+
     // Issue #139: foydalanuvchi `log` nomli o'zgaruvchi e'lon qilsa, u ustun
     // (battery'ni soyalaydi) — eski shadowing invarianti buzilmaydi.
     #[test]

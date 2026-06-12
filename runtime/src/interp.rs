@@ -1195,7 +1195,21 @@ impl Interp {
                 }
                 Ok(Value::Str(out))
             }
-            Expr::Ident(name) => self.lookup(name, env),
+            Expr::Ident(name) => match self.lookup(name, env) {
+                Ok(v) => Ok(v),
+                // `log` qiymat sifatida (callback `xs.each log`, `f log`) — eski
+                // global `log` bilan moslik uchun info-darajali shim (issue #139).
+                // To'g'ridan-to'g'ri `log "..."` chaqiruvi apply_callee'da oldinroq
+                // ushlanadi (bu yo'lga tushmaydi). `log` o'zgaruvchi e'lon qilingan
+                // bo'lsa lookup Ok beradi — u ustun.
+                Err(e) => {
+                    if name == "log" {
+                        Ok(crate::builtins::log_value_shim())
+                    } else {
+                        Err(e)
+                    }
+                }
+            },
             Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {

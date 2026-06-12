@@ -178,6 +178,26 @@ pub fn emit_log(level: &str, args: &[Value], min_level: Option<&str>, json: bool
     }
 }
 
+// `log` qiymat sifatida (callback `xs.each log`, saqlash `f log`) ishlatilganda
+// qaytariladigan info-darajali Native shim — eski global `log` bilan moslik
+// (issue #139). To'g'ridan-to'g'ri `log "..."` chaqiruvi apply_callee'da env-aware
+// log_dispatch'dan o'tadi; bu shim faqat qiymat pozitsiyasi uchun va Interp'siz,
+// shuning uchun $LOG_LEVEL/$LOG_FORMAT'ni OS env'dan o'qiydi (.env bu yo'lda
+// ko'rilmaydi — qiymat sifatida log ishlatish kamdan-kam holat).
+pub fn log_value_shim() -> Value {
+    Value::Native(Arc::new(NativeFn {
+        name: "log".into(),
+        func: Box::new(|args: Vec<Value>| {
+            let min = std::env::var("LOG_LEVEL").ok();
+            let json = std::env::var("LOG_FORMAT")
+                .map(|s| s.eq_ignore_ascii_case("json"))
+                .unwrap_or(false);
+            emit_log("info", &args, min.as_deref(), json);
+            Ok(Value::Nil)
+        }),
+    }))
+}
+
 // --- modul nomimi? ---
 pub fn is_module(name: &str) -> bool {
     matches!(
