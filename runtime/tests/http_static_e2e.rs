@@ -339,3 +339,49 @@ async fn static_yoq_katalog_xato_beradi() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn static_head_faylni_oqimasdan_javob_beradi() {
+    // HEAD — tana yo'q, lekin Content-Length haqiqiy fayl hajmi (metadata'dan,
+    // fayl o'qilmasdan — codex P2). GET bilan bir xil Content-Type.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let port = 8447;
+    let root = make_static_dir("head");
+    let script = BASIC_SCRIPT
+        .replace("PORT", &port.to_string())
+        .replace("DIR", &root.to_string_lossy());
+    let (child, path) = spawn_server(port, &script);
+    let _killer = Killer(child);
+    wait_port(port).await;
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("ulanish");
+    let req = "HEAD /assets/app.css HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    stream.write_all(req.as_bytes()).await.expect("yozish");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.expect("o'qish");
+    let resp = String::from_utf8_lossy(&buf).to_string();
+    let low = resp.to_lowercase();
+
+    assert!(resp.contains("200"), "HEAD 200 kutilgan: {}", resp);
+    // "body{color:red}" — 15 bayt: hajm header'da, mazmun esa yo'q.
+    assert!(
+        low.contains("content-length: 15"),
+        "haqiqiy Content-Length kutilgan: {}",
+        resp
+    );
+    assert!(
+        low.contains("content-type: text/css"),
+        "text/css kutilgan: {}",
+        resp
+    );
+    assert!(
+        !resp.contains("body{color:red}"),
+        "HEAD javobida tana bo'lmasligi kerak: {}",
+        resp
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&root);
+}

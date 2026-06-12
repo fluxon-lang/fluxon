@@ -432,7 +432,12 @@ fn mime_for(path: &Path) -> &'static str {
 // ("/assets" mount'i "/" mount'idan oldin tekshiriladi) — eng aniq mount yutadi.
 // Ikki bosqich: (1) aniq fayl (katalog so'ralsa ichidagi index.html);
 // (2) topilmasa — prefiksi mos SPA mount'larning `index.html` fallback'i.
-async fn resolve_static(mounts: &[StaticMount], path: &str) -> Option<(PathBuf, &'static str)> {
+// Hajm (bayt) metadata'dan birga qaytadi — HEAD javobi faylni o'qimasdan
+// Content-Length bera olsin (codex P2).
+async fn resolve_static(
+    mounts: &[StaticMount],
+    path: &str,
+) -> Option<(PathBuf, &'static str, u64)> {
     // Segmentlar percent-dekod qilinadi (brauzer non-ASCII nomni encode qiladi);
     // `keep_path_seps=true` — `%2F` xom qoladi, dekoddan yangi `/` tug'ilmaydi.
     let segs: Vec<String> = path_segments(path)
@@ -454,14 +459,17 @@ async fn resolve_static(mounts: &[StaticMount], path: &str) -> Option<(PathBuf, 
             // Katalog so'raldi (yoki prefiksning o'zi) — index.html'ga urinish.
             Ok(md) if md.is_dir() => {
                 p.push("index.html");
-                if matches!(tokio::fs::metadata(&p).await, Ok(md2) if md2.is_file()) {
+                if let Ok(md2) = tokio::fs::metadata(&p).await
+                    && md2.is_file()
+                {
                     let mime = mime_for(&p);
-                    return Some((p, mime));
+                    return Some((p, mime, md2.len()));
                 }
             }
             Ok(md) if md.is_file() => {
                 let mime = mime_for(&p);
-                return Some((p, mime));
+                let len = md.len();
+                return Some((p, mime, len));
             }
             _ => {}
         }
@@ -472,8 +480,10 @@ async fn resolve_static(mounts: &[StaticMount], path: &str) -> Option<(PathBuf, 
             continue;
         }
         let p = m.dir.join("index.html");
-        if matches!(tokio::fs::metadata(&p).await, Ok(md) if md.is_file()) {
-            return Some((p, "text/html; charset=utf-8"));
+        if let Ok(md) = tokio::fs::metadata(&p).await
+            && md.is_file()
+        {
+            return Some((p, "text/html; charset=utf-8", md.len()));
         }
     }
     None
@@ -485,6 +495,18 @@ fn static_response(data: Vec<u8>, mime: &str) -> Response<Full<Bytes>> {
         .status(StatusCode::OK)
         .header("content-type", mime)
         .body(Full::new(Bytes::from(data)))
+        .unwrap()
+}
+
+// HEAD uchun static javob: fayl O'QILMAYDI (katta asset'da behuda disk I/O va
+// xotira — codex P2), faqat metadata'dagi hajm Content-Length sifatida qo'lda
+// qo'yiladi (bo'sh body avtomatik 0 berardi). hyper HEAD'ga tana yozmaydi.
+fn static_head_response(len: u64, mime: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", mime)
+        .header("content-length", len.to_string())
+        .body(Full::new(Bytes::new()))
         .unwrap()
 }
 
@@ -1576,7 +1598,7 @@ async fn try_serve_static(
     if mounts.is_empty() {
         return None;
     }
-    let (file, mime) = resolve_static(&mounts, path).await?;
+    let (file, mime, len) = resolve_static(&mounts, path).await?;
 
     // Bu yo'lga mos middleware'lar (handle_request'dagi filter bilan bir xil).
     let chain: Vec<Middleware> = interp
@@ -1623,6 +1645,11 @@ async fn try_serve_static(
                 ))));
             }
         }
+    }
+    // HEAD — mazmun kerak emas: faylni O'QIMASDAN metadata hajmi bilan javob
+    // (katta asset'da behuda disk I/O / xotira bo'lmasin — codex P2).
+    if method == "head" {
+        return Some(static_head_response(len, mime));
     }
     match tokio::fs::read(&file).await {
         Ok(data) => Some(static_response(data, mime)),
@@ -3719,21 +3746,24 @@ mod tests {
             },
         ];
         // /assets/a.css -> public (uzun prefiks), /a.css -> dist (root mount).
-        let (p, mime) = resolve_static(&mounts, "/assets/a.css").await.unwrap();
+        // len — metadata'dagi bayt soni (HEAD Content-Length shu bilan beriladi).
+        let (p, mime, len) = resolve_static(&mounts, "/assets/a.css").await.unwrap();
         assert_eq!(p, public.join("a.css"));
         assert_eq!(mime, "text/css; charset=utf-8");
-        let (p, _) = resolve_static(&mounts, "/a.css").await.unwrap();
+        assert_eq!(len, "public css".len() as u64);
+        let (p, _, len) = resolve_static(&mounts, "/a.css").await.unwrap();
         assert_eq!(p, dist.join("a.css"));
+        assert_eq!(len, "dist css".len() as u64);
         // Katalog so'ralganda index.html.
-        let (p, mime) = resolve_static(&mounts, "/").await.unwrap();
+        let (p, mime, _) = resolve_static(&mounts, "/").await.unwrap();
         assert_eq!(p, dist.join("index.html"));
         assert_eq!(mime, "text/html; charset=utf-8");
         // Topilmagan yo'l — SPA fallback (root mount spa:true).
-        let (p, _) = resolve_static(&mounts, "/yo/q/sahifa").await.unwrap();
+        let (p, _, _) = resolve_static(&mounts, "/yo/q/sahifa").await.unwrap();
         assert_eq!(p, dist.join("index.html"));
         // /assets ostida topilmagan fayl: assets mount spa emas, lekin root SPA
         // mount prefiksi baribir mos — fallback unga tushadi.
-        let (p, _) = resolve_static(&mounts, "/assets/yoq.css").await.unwrap();
+        let (p, _, _) = resolve_static(&mounts, "/assets/yoq.css").await.unwrap();
         assert_eq!(p, dist.join("index.html"));
 
         let _ = std::fs::remove_dir_all(&root);
