@@ -662,6 +662,57 @@ impl Interp {
         Ok(())
     }
 
+    // REPL bitta kiritilgan blokni bajaradi va oxirgi ifoda QIYMATINI qaytaradi
+    // (chop etish uchun) — `run` esa `()` qaytaradi. Bir xil interp obyektida
+    // ketma-ket chaqiriladi, shuning uchun e'lonlar (`x = 1`, `fn f ...`) chunk'lar
+    // orasida saqlanadi: hammasi `self.global` da yashaydi. `run`dan farqli ravishda
+    // bu yerda `run_pending`/`queue_wait_drain` CHAQIRILMAYDI — REPL satrida `http.serve`
+    // bo'lsa ham har chunk'da event-loop ishga tushib promptni bloklamasin (skript
+    // emas, interaktiv sessiya). fn/tbl hoisting `run` bilan bir xil — bir chunk
+    // ichida tartibdan qat'i nazar bir-birini chaqira oladi.
+    pub fn run_repl_chunk(&self, prog: &Program) -> Result<Value, String> {
+        for stmt in prog {
+            match stmt {
+                Stmt::FnDecl {
+                    name, params, body, ..
+                } => {
+                    let f = Value::Fn(Arc::new(FnValue {
+                        params: params.clone(),
+                        body: body.clone(),
+                        parent: Parent::Root,
+                        name: name.clone(),
+                    }));
+                    self.global.write().define(name, f, false);
+                }
+                Stmt::Tbl {
+                    name,
+                    columns,
+                    indexes,
+                } => self.register_tbl(name, columns, indexes),
+                _ => {}
+            }
+        }
+        let mut last = Value::Nil;
+        for stmt in prog {
+            if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
+                continue;
+            }
+            match self.exec_stmt(stmt, &self.global.clone()) {
+                Ok(v) => last = v,
+                Err(Flow::Error(e)) => return Err(e),
+                Err(Flow::Fail { status, message }) => {
+                    let pfx = status.map(|s| format!("[{}] ", s)).unwrap_or_default();
+                    return Err(format!("fail: {}{}", pfx, message));
+                }
+                Err(Flow::Return(_)) => {} // top-level ret — e'tiborsiz
+                Err(Flow::Skip) | Err(Flow::Stop) => {
+                    return Err("skip/stop loop tashqarisida ishlatildi".into());
+                }
+            }
+        }
+        Ok(last)
+    }
+
     // tbl e'lonini schema registry'ga yozadi (ustunlar + tartib + indekslar).
     fn register_tbl(&self, name: &str, columns: &[TblColumn], indexes: &[TblIndex]) {
         let mut cols = BTreeMap::new();
