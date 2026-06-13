@@ -1,19 +1,19 @@
-# WS battery namoyishi — minimal realtime chat (echo + xona broadcast).
-# Ishga tushirish:  fluxon run examples/ws_chat.fx
-# Sinash (boshqa terminalda, websocat kerak):
+# WS battery demonstration — minimal realtime chat (echo + room broadcast).
+# Running:  fluxon run examples/ws_chat.fx
+# Testing (in another terminal, websocat needed):
 #   websocat ws://localhost:9000
 #   > {"t":"join","room":"general","name":"firdavs"}
-#   > {"t":"say","room":"general","body":"salom"}     # xonadagi hammaga ketadi
-# Ikkita websocat oynasini ochib, bir oynadan say qiling — ikkinchisida ko'rinadi.
+#   > {"t":"say","room":"general","body":"hello"}     # goes to everyone in the room
+# Open two websocat windows, say from one — it appears in the other.
 
 use ws
 
-# Yangi ulanish — kutib olamiz va ismni hali noma'lum deb belgilaymiz.
+# New connection — we greet it and mark the name as still unknown.
 ws.on :connect \conn ->
   ws.data.set conn :name "anon"
   ws.send conn (json.enc {t:"hello" id:conn.id})
 
-# Kelgan xabar — JSON, `t` maydoni amalni tanlaydi.
+# Incoming message — JSON, the `t` field selects the action.
 ws.on :message \conn raw ->
   m = json.dec raw
   if m.t == "join"
@@ -27,11 +27,11 @@ ws.on :message \conn raw ->
   elif m.t == "leave"
     ws.room.leave conn m.room
   else
-    ws.send conn (json.enc {t:"error" reason:"noma'lum amal: ${m.t}"})
+    ws.send conn (json.enc {t:"error" reason:"unknown action: ${m.t}"})
 
-# Ulanish uzildi — Fluxon xona a'zoligini avtomat tozalaydi, biz faqat loglaymiz.
+# Connection dropped — Fluxon cleans up room membership automatically, we just log.
 ws.on :disconnect \conn ->
-  log "uzildi: ${conn.id}"
+  log "disconnected: ${conn.id}"
 
-log "ws chat 9000-portda..."
+log "ws chat on port 9000..."
 ws.serve 9000

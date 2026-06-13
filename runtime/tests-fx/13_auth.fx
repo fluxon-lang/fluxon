@@ -1,12 +1,12 @@
-# 13 — auth battery (JWT + parol hash, issue #69).
-# Ishga: AUTH_SECRET=sirli-kalit ./target/release/fluxon run tests-fx/13_auth.fx
+# 13 - auth battery (JWT + password hash, issue #69).
+# Run: AUTH_SECRET=secret-key ./target/release/fluxon run tests-fx/13_auth.fx
 #
-# auth.jwt {payload} [{exp:N}] -> imzolangan JWT (HS256).
-# auth.verify token            -> payload map (imzo + exp avto tekshirilgan), yoki err.
-# auth.hash "parol"            -> argon2id PHC matn (salt ichida).
-# auth.check "parol" hash      -> bool (doimiy-vaqt taqqoslash).
+# auth.jwt {payload} [{exp:N}] -> signed JWT (HS256).
+# auth.verify token            -> payload map (signature + exp auto-checked), or err.
+# auth.hash "password"         -> argon2id PHC string (salt embedded).
+# auth.check "password" hash   -> bool (constant-time comparison).
 #
-# Imzo kaliti $AUTH_SECRET env'dan AVTO topiladi (db/ai naqshiga mos).
+# The signing key is auto-found from $AUTH_SECRET env (matches the db/ai pattern).
 
 use auth
 
@@ -26,35 +26,35 @@ fn truthy v label
     log "FAIL ${label}: got=${v}"
     fails <- fails + 1
 
-# --- Parol hash + check ---
-hash = auth.hash "user-parol-123"
+# --- Password hash + check ---
+hash = auth.hash "user-password-123"
 truthy (str.has hash "argon2id") "auth.hash argon2id PHC string"
-truthy (auth.check "user-parol-123" hash) "auth.check to'g'ri parol -> true"
-eq (auth.check "boshqa" hash) false "auth.check noto'g'ri parol -> false"
-eq (auth.check "x" "buzuq-hash") false "auth.check buzuq hash -> false (xato emas)"
+truthy (auth.check "user-password-123" hash) "auth.check correct password -> true"
+eq (auth.check "other" hash) false "auth.check wrong password -> false"
+eq (auth.check "x" "broken-hash") false "auth.check broken hash -> false (not an error)"
 
-# Bir xil parol har gal boshqa hash (salt tasodifiy).
-h2 = auth.hash "user-parol-123"
-truthy (hash != h2) "auth.hash tasodifiy salt (har gal boshqa)"
+# Same password yields a different hash each time (random salt).
+h2 = auth.hash "user-password-123"
+truthy (hash != h2) "auth.hash random salt (different each time)"
 
-# --- JWT imzolash + tekshirish (roundtrip) ---
+# --- JWT sign + verify (roundtrip) ---
 token = auth.jwt {sub: "u1" tenant: "t1" role: "admin"}
 parts = str.split token "."
-eq parts.len 3 "JWT 3 segment (header.payload.imzo)"
+eq parts.len 3 "JWT 3 segments (header.payload.signature)"
 
 claims = auth.verify token
-eq claims.sub "u1" "verify -> sub saqlanadi"
-eq claims.tenant "t1" "verify -> tenant saqlanadi"
-eq claims.role "admin" "verify -> role saqlanadi"
-truthy (claims.exp > claims.iat) "iat/exp avto qo'shildi (exp > iat)"
+eq claims.sub "u1" "verify -> sub preserved"
+eq claims.tenant "t1" "verify -> tenant preserved"
+eq claims.role "admin" "verify -> role preserved"
+truthy (claims.exp > claims.iat) "iat/exp auto-added (exp > iat)"
 
 # --- {exp:N} opt ---
-qisqa = auth.jwt {sub: "u2"} {exp: 3600}
-qc = auth.verify qisqa
-truthy (qc.exp == (qc.iat + 3600)) "{exp:3600} -> exp = iat + 3600"
+short = auth.jwt {sub: "u2"} {exp: 3600}
+sc = auth.verify short
+truthy (sc.exp == (sc.iat + 3600)) "{exp:3600} -> exp = iat + 3600"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 13_auth: HAMMASI O'TDI ==="
+  log "=== 13_auth: ALL PASSED ==="
 else
-  log "=== 13_auth: ${fails} TEST YIQILDI ==="
+  log "=== 13_auth: ${fails} TESTS FAILED ==="

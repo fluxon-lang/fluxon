@@ -1,4 +1,4 @@
-# 03 — db battery (SQLite). Ishga tushirish:
+# 03 - db battery (SQLite). Run with:
 #   DATABASE_URL=sqlite::memory: ./target/release/fluxon run tests-fx/03_db.fx
 
 use db
@@ -11,39 +11,39 @@ fn eq got want label
     log "FAIL ${label}: got=${got} want=${want}"
     fails <- fails + 1
 
-# --- Schema: tbl avtomat CREATE TABLE IF NOT EXISTS ---
+# --- Schema: tbl auto CREATE TABLE IF NOT EXISTS ---
 tbl users
   id     serial pk
   name   str
-  role   sym          # DB: matn, Fluxon: symbol
-  prefs  json         # DB: matn, Fluxon: map
+  role   sym          # DB: text, Fluxon: symbol
+  prefs  json         # DB: text, Fluxon: map
   hits   int
 
-# --- ins: RETURNING * → to'liq qator ---
+# --- ins: RETURNING * -> full row ---
 u = db.ins "users" {name:"Ali" role::admin prefs:{theme:"dark" lang:"uz"} hits:0}
 eq u.name "Ali" "ins returns name"
 eq u.id 1 "ins assigns serial id"
 
-# sym ustun → symbol qaytaradi (match bilan ishlaydi)
+# sym column -> returns symbol (works with match)
 roletxt = match u.role
-  :admin -> "boshqaruvchi"
-  :user  -> "oddiy"
+  :admin -> "manager"
+  :user  -> "regular"
   _      -> "?"
-eq roletxt "boshqaruvchi" "sym column → symbol → match"
+eq roletxt "manager" "sym column -> symbol -> match"
 
-# json ustun → map qaytaradi
-eq u.prefs.theme "dark" "json column → map read"
+# json column -> returns map
+eq u.prefs.theme "dark" "json column -> map read"
 
-# --- up: yangilash {set} {where} ---
+# --- up: update {set} {where} ---
 db.up "users" {hits:5} {id:u.id}
 got = db.one "select * from users where id=$1" [u.id]
 eq got.hits 5 "up sets value"
 
-# --- one: nil bo'lganda ---
+# --- one: when nil ---
 none = db.one "select * from users where id=$1" [999]
-eq none nil "one missing → nil"
+eq none nil "one missing -> nil"
 
-# --- q: ko'p qator; sym param avtomat matnga ---
+# --- q: multiple rows; sym param auto to text ---
 db.ins "users" {name:"Vali" role::user prefs:{} hits:0}
 db.ins "users" {name:"Gani" role::user prefs:{} hits:0}
 admins = db.q "select * from users where role=$1" [:admin]
@@ -51,11 +51,11 @@ eq admins.len 1 "q filter by sym param"
 users_n = db.q "select * from users where role=$1" [:user]
 eq users_n.len 2 "q filter sym (2 user)"
 
-# param'siz q
+# q without param
 all = db.q "select * from users"
 eq all.len 3 "q no-param all rows"
 
-# aggregat
+# aggregate
 cntrow = db.one "select count(*) c from users"
 eq cntrow.c 3 "count(*) aggregate"
 
@@ -68,12 +68,12 @@ tbl counters
   name str pk
   hits int
 db.put "counters" {hits:1} {name:"home"}
-db.put "counters" {hits:9} {name:"home"}    # bor → yangilanadi
+db.put "counters" {hits:9} {name:"home"}    # exists -> updated
 c = db.one "select * from counters where name=$1" ["home"]
 eq c.hits 9 "put upsert updates existing"
 eq (db.q "select * from counters").len 1 "put no duplicate row"
 
-# --- tx: atomik, qiymat qaytaradi ---
+# --- tx: atomic, returns value ---
 res = db.tx \->
   x = db.ins "users" {name:"Tx" role::user prefs:{} hits:1}
   db.up "users" {hits:2} {id:x.id}
@@ -82,22 +82,22 @@ eq res.name "Tx" "tx returns value"
 txrow = db.one "select * from users where id=$1" [res.id]
 eq txrow.hits 2 "tx committed update"
 
-# --- tx rollback: fail ichida → o'zgarishlar bekor ---
+# --- tx rollback: fail inside -> changes reverted ---
 before = (db.q "select * from users").len
 fn try_tx
   db.tx \->
     db.ins "users" {name:"Ghost" role::user prefs:{} hits:0}
-    fail "ataylab xato"     # → rollback
-# `!`siz chaqirsak xato yuqoriga ko'tariladi; biz uni "kutilgan" deb hisoblaymiz.
-# Rollback bo'lganini qator soni o'zgarmagani bilan tekshiramiz.
+    fail "intentional error"     # -> rollback
+# Calling without `!` propagates the error upward; we treat it as "expected".
+# We verify rollback happened by the row count staying unchanged.
 caught <- false
-# fail tx ichida → butun blok bekor; lekin xato propagatsiya bo'ladi.
-# Buni "guard" bilan ushlash uchun alohida fayl emas — bu yerda
-# faqat commit yo'lini sinaymiz, rollback'ni Rust testlari qamragan.
+# fail inside tx -> the whole block is reverted; but the error propagates.
+# Catching it with a "guard" needs a separate file - here we
+# only test the commit path, the rollback is covered by Rust tests.
 eq before 3 "row count before rollback attempt"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 03_db: HAMMASI O'TDI ==="
+  log "=== 03_db: ALL PASSED ==="
 else
-  log "=== 03_db: ${fails} TEST YIQILDI ==="
+  log "=== 03_db: ${fails} TESTS FAILED ==="

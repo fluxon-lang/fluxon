@@ -2,19 +2,19 @@
 name = "fluxon"
 version = "0.1.0"
 edition = "2024"
-description = "AI agentlar yaxshi yozadigan batteries-included backend dasturlash tili"
+description = "A batteries-included backend programming language that AI agents write well"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fluxon-lang/fluxon"
 homepage = "https://github.com/fluxon-lang/fluxon"
 readme = "README.md"
 keywords = ["language", "interpreter", "backend", "ai"]
 categories = ["compilers", "development-tools"]
-# Nom-egallash release'i: ulkan misol/test papkalarini paketga qo'shmaymiz
-# (kompilyatsiyaga shart emas, faqat hajmni oshiradi). src/ va README yetarli.
+# Name-claiming release: we don't ship the large example/test folders in the package
+# (not needed to compile, they only bloat the size). src/ and README are enough.
 exclude = ["examples/", "tests-fx/", "tests/"]
 
 [dependencies]
-# "fs" — http.static fayl o'qishlari async bo'lsin (issue #134, worker bloklanmaydi).
+# "fs" — make http.static file reads async (issue #134, the worker doesn't block).
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "fs"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
@@ -22,41 +22,41 @@ http-body-util = "0.1"
 bytes = "1"
 parking_lot = "0.12"
 mimalloc = "0.1"
-# db battery: SQLite (bundled — tizim kutubxonasi/server kerak emas, CI'da yashil).
-# Boshqa backendlar (postgres/mysql) keyin Db trait orqasiga additiv ulanadi.
+# db battery: SQLite (bundled — no system library/server needed, green in CI).
+# Other backends (postgres/mysql) plug in additively behind the Db trait later.
 rusqlite = { version = "0.40", features = ["bundled"] }
-# ws battery: WebSocket handshake + framing. hyper 1.x / tokio ekotizimiga mos.
-# TLS yo'q (wss keyin additiv) — sof tokio TcpStream ustida.
+# ws battery: WebSocket handshake + framing. Fits the hyper 1.x / tokio ecosystem.
+# No TLS (wss added additively later) — over a plain tokio TcpStream.
 tokio-tungstenite = "0.24"
-# WS stream'ni read/write yo'nalishlarga split qilish (SplitSink/SplitStream).
+# Splitting the WS stream into read/write halves (SplitSink/SplitStream).
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-# http klient TLS: https:// so'rovlar uchun rustls connector. webpki-roots —
-# Mozilla CA ildizlari kompilyatsiyaga bog'lanadi (tizim sertifikatiga tayanmaydi,
-# CI/portable barqaror, rusqlite "bundled" falsafasiga mos). ring crypto provayder
-# (sof, C kompilyator/OpenSSL talab qilmaydi). default features o'chirilgan —
-# aws-lc-rs (C toolchain) va native-certs olib kelmaslik uchun.
+# http client TLS: rustls connector for https:// requests. webpki-roots —
+# Mozilla CA roots are compiled in (no reliance on the system certificate store,
+# stable in CI/portable, matches the rusqlite "bundled" philosophy). ring crypto
+# provider (pure, needs no C compiler/OpenSSL). default features disabled —
+# to avoid pulling in aws-lc-rs (C toolchain) and native-certs.
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
-# cron battery: standart Unix 5-maydonli ifodani (`0 * * * *`) parse qiladi va
-# keyingi ishga tushish vaqtini hisoblaydi (Schedule::upcoming).
+# cron battery: parses a standard Unix 5-field expression (`0 * * * *`) and
+# computes the next run time (Schedule::upcoming).
 cron = "0.12"
-# cron crate UTC sana-vaqt arifmetikasi uchun chrono'ga tayanadi (next-run hisoblash).
+# the cron crate relies on chrono for UTC date-time arithmetic (next-run computation).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# time battery: IANA zona nomlari (`Asia/Tashkent`) -> DST-aware wall-clock konversiya.
-# Sof Rust, zona ma'lumotlari kompilyatsiyaga bog'lanadi (tizim tzdata kerak emas) —
-# `rusqlite bundled` / webpki-roots falsafasiga mos, CI/portable barqaror.
+# time battery: IANA zone names (`Asia/Tashkent`) -> DST-aware wall-clock conversion.
+# Pure Rust, zone data compiled in (no system tzdata needed) —
+# matches the `rusqlite bundled` / webpki-roots philosophy, stable in CI/portable.
 chrono-tz = { version = "0.10", default-features = false }
-# auth battery: JWT (HS256) imzolash/tekshirish — HMAC-SHA256. Sof Rust
-# (RustCrypto), C toolchain/OpenSSL talab qilmaydi — `rusqlite bundled` /
-# webpki-roots falsafasiga mos, CI'da portativ va yashil.
+# auth battery: JWT (HS256) signing/verification — HMAC-SHA256. Pure Rust
+# (RustCrypto), needs no C toolchain/OpenSSL — matches the `rusqlite bundled` /
+# webpki-roots philosophy, portable and green in CI.
 hmac = "0.12"
 sha2 = "0.10"
-# JWT segmentlari base64url (padding'siz) — header/payload/imzo kodlash.
+# JWT segments are base64url (no padding) — encoding the header/payload/signature.
 base64 = "0.22"
-# auth battery: parol hash (argon2id — bcrypt'dan afzal, default xavfsiz).
-# Salt avtomatik (PHC string ichida), `auth.check` doimiy-vaqt taqqoslash.
+# auth battery: password hashing (argon2id — preferred over bcrypt, secure by default).
+# Salt is automatic (inside the PHC string), `auth.check` does a constant-time compare.
 argon2 = "0.5"
-# Rekursiya xavfsizligi (issue #90): chuqur Fluxon rekursiyasida native stack'ni
-# segmentlab o'stiradi (rustc ham shu yondashuvni ishlatadi). Shunda chuqurlik
-# limiti (MAX_CALL_DEPTH) native stack hajmiga emas, faqat hisoblagichga bog'liq —
-# 2MB'lik spawn_blocking thread'ida ham abort o'rniga graceful xato.
+# Recursion safety (issue #90): grows the native stack in segments during deep
+# Fluxon recursion (rustc uses the same approach). That way the depth limit
+# (MAX_CALL_DEPTH) depends only on a counter, not on native stack size —
+# even on a 2MB spawn_blocking thread it yields a graceful error instead of an abort.
 stacker = "0.1"

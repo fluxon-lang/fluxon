@@ -1,15 +1,15 @@
-# Jonli ovoz berish (Strawpoll) — REST + realtime BIR jarayonda.
+# Live voting (Strawpoll) — REST + realtime in ONE process.
 #
-# HTTP'da ovoz qabul qilamiz, natijani WS orqali barcha ulangan klientlarga
-# JONLI broadcast qilamiz. http.serve va ws.serve birga e'lon qilinadi — ikkalasi
-# bitta umumiy event-loopda ishlaydi, shuning uchun HTTP handler ichidan
-# ws.room.send chaqirish mumkin (cross-protocol).
+# We accept votes over HTTP and broadcast the result LIVE over WS to all
+# connected clients. http.serve and ws.serve are declared together — both
+# run in one shared event loop, so you can call ws.room.send from inside an
+# HTTP handler (cross-protocol).
 #
-# Ishga: fluxon run examples/poll.fx
-#   ovoz:   curl -X POST localhost:8080/vote -d '{"opt":"ha"}'
-#   natija: ws://localhost:9000 ga ulanib jonli yangilanishni ko'ring.
+# Run: fluxon run examples/poll.fx
+#   vote:   curl -X POST localhost:8080/vote -d '{"opt":"yes"}'
+#   result: connect to ws://localhost:9000 to see live updates.
 #
-# Ovozlar DB'da saqlanadi (global muzlatilgani uchun mutable holat db'da yashaydi).
+# Votes are stored in the DB (since globals are frozen, mutable state lives in the db).
 
 use http db
 
@@ -18,20 +18,20 @@ tbl votes
   opt str
   ts  now
 
-# WS klient ulanganda "live" xonasiga qo'shamiz — barcha broadcast shu yerga.
+# When a WS client connects we add it to the "live" room — all broadcasts go here.
 ws.on :connect \conn ->
   ws.room.join conn "live"
 
-# HTTP: ovoz qabul qilamiz, db'ga yozamiz, jonli natijani WS'ga broadcast qilamiz.
+# HTTP: accept a vote, write to db, broadcast the live result over WS.
 http.on :post "/vote" \req ->
-  opt = req.body.opt ?? "noma'lum"
+  opt = req.body.opt ?? "unknown"
   db.ins "votes" {opt: opt}
-  # Joriy sanoqni o'qib, barcha WS klientlarga jonli yuboramiz.
+  # Read the current tally and send it live to all WS clients.
   rows = db.q "select opt, count(*) c from votes group by opt"
   ws.room.send "live" (json.enc {t: "tally" rows: rows})
   rep 201 {ok: true}
 
-# HTTP: joriy natija (REST orqali ham o'qish mumkin).
+# HTTP: current result (also readable over REST).
 http.on :get "/tally" \req ->
   rep 200 (db.q "select opt, count(*) c from votes group by opt")
 

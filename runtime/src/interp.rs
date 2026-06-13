@@ -1,8 +1,8 @@
-// Fluxon interpreter — AST'ni to'g'ridan-to'g'ri bajaruvchi (tree-walking).
+// Fluxon interpreter — directly executes the AST (tree-walking).
 //
-// Boshqaruv oqimi (ret/skip/stop/fail) Rust `Result`'ining `Err` tarmog'i
-// orqali tarqatiladi: oddiy qiymatlar `Ok`, oqim-uzilishlari esa `Flow`.
-// Bu `?` operatori bilan tabiiy yuqoriga ko'tariladi.
+// Control flow (ret/skip/stop/fail) is propagated through the `Err` branch of
+// Rust's `Result`: plain values are `Ok`, flow-interruptions are `Flow`. This
+// bubbles up naturally with the `?` operator.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -15,49 +15,50 @@ use parking_lot::RwLock;
 use crate::ast::*;
 use crate::value::{FnValue, Value};
 
-// Lexical scope: ota-muhitga havola bilan zanjir. Arc<RwLock<>> — closure'lar,
-// mutatsiya VA thread'lar orasida ulashish uchun (haqiqiy parallel HTTP).
-// RwLock (Mutex emas): qidirish/o'qish ko'p o'quvchiga parallel ruxsat beradi,
-// shunda parallel request'lar global scope'dagi funksiyalarni (masalan rekursiv
-// `fib`) bir-birini bloklamasdan o'qiydi. Yozish (`<-`, bind) eksklyuziv.
+// Lexical scope: a chain linked to the parent environment. Arc<RwLock<>> — for
+// closures, mutation AND sharing across threads (true parallel HTTP). RwLock
+// (not Mutex): lookup/read allows many readers in parallel, so parallel
+// requests read functions in the global scope (e.g. recursive `fib`) without
+// blocking each other. Writes (`<-`, bind) are exclusive.
 pub type Env = Arc<RwLock<Scope>>;
 
-// Scope zanjirining ota-havolasi. Muhim: ROOT (global) scope barcha thread'lar
-// orasida ULASHILADI — uni har lookup'da klonlash/lock qilish atomik
-// contention'ning asosiy manbai (cache-line bouncing 8 core'da). Shuning uchun
-// root'ga yetadigan zanjir `Parent::Root(env)` ishlatadi: root Arc saqlanadi
-// (oraliq scope'lar uni HECH QACHON klonlamaydi), va global muzlatilgandan keyin
-// lookup root Arc'ga TEGMASDAN lock-free frozen snapshot'dan o'qiydi.
+// Parent link of the scope chain. Important: the ROOT (global) scope is SHARED
+// across all threads — cloning/locking it on every lookup is the main source of
+// atomic contention (cache-line bouncing on 8 cores). So the chain reaching the
+// root uses `Parent::Root(env)`: the root Arc is preserved (intermediate scopes
+// NEVER clone it), and once the global is frozen, lookup reads from a lock-free
+// frozen snapshot WITHOUT TOUCHING the root Arc.
 #[derive(Clone)]
 pub enum Parent {
-    // Root scope'ning o'zi — yuqorida ota yo'q.
+    // The root scope itself — no parent above.
     None,
-    // Ota — root (global) scope. MARKER (Arc emas!) — root Arc saqlanmaydi,
-    // shuning uchun fn chaqiruvi/scope ochilishida root refcount ATOMIK
-    // urilmaydi (cache-line bouncing yo'q). Muzlatilgach lookup frozen
-    // snapshot'dan, muzlatilmagan (top-level) holatda `Interp.global` Arc'idan
-    // o'qiydi — ikkalasi ham `&self` orqali, klon shart emas.
+    // Parent is the root (global) scope. A MARKER (not an Arc!) — the root Arc
+    // is not held, so a fn call / scope opening does not ATOMICALLY bump the
+    // root refcount (no cache-line bouncing). Once frozen, lookup reads from the
+    // frozen snapshot; when not frozen (top-level) it reads from the
+    // `Interp.global` Arc — both via `&self`, no clone needed.
     Root,
-    // Ota — oddiy (root bo'lmagan) scope.
+    // Parent is a plain (non-root) scope.
     Scope(Env),
 }
 
 pub struct Scope {
-    // Nomlar — kichik VEKTOR (HashMap emas). Fn chaqiruvi/blok scope'lari odatda
-    // 0-4 nom ushlaydi; bunday kichik to'plamda linear scan hash hisoblash +
-    // HashMap allocation'idan tezroq, va per-call allocation arzon (bitta Vec
-    // buffer, ikkita bo'sh HashMap o'rniga). Element: (nom, qiymat, mutable-mi).
-    // mutable = `<-` bilan qayta tayinlanishi mumkinmi (`=`/`exp`/param immutable;
-    // `<-` va loop var mutable).
+    // Names — a small VECTOR (not a HashMap). Fn-call / block scopes usually
+    // hold 0-4 names; for such a small set a linear scan beats computing a hash
+    // + a HashMap allocation, and the per-call allocation is cheap (one Vec
+    // buffer instead of two empty HashMaps). Element: (name, value, is-mutable).
+    // mutable = whether it can be re-bound with `<-` (`=`/`exp`/param are
+    // immutable; `<-` and loop vars are mutable).
     vars: Vec<(Box<str>, Value, bool)>,
     parent: Parent,
-    // Bu scope root (global)mi? lookup root'ga yetganda, agar Interp global'ni
-    // muzlatgan bo'lsa, lock-free snapshot'dan o'qiydi (parallel contention yo'q).
+    // Is this scope the root (global)? When lookup reaches the root, if the
+    // Interp has frozen the global it reads from a lock-free snapshot (no
+    // parallel contention).
     is_root: bool,
-    // Bu scope fn/lambda chaqiruvi chegarasimi? `=` bind tashqi o'zgaruvchini
-    // qidirganda shu yerda to'xtaydi (funksiya izolyatsiyasi/shadowing). if/each/
-    // match bloklari `false` — ular leksik jihatdan SHAFFOF: ichida `=` bilan
-    // tashqi (bir xil fn ichidagi) o'zgaruvchini yangilash mumkin.
+    // Is this scope an fn/lambda call boundary? An `=` bind looking up an outer
+    // variable stops here (function isolation/shadowing). if/each/match blocks
+    // are `false` — they are lexically TRANSPARENT: inside them an `=` can
+    // update an outer variable (within the same fn).
     is_fn_boundary: bool,
 }
 
@@ -70,32 +71,32 @@ impl Scope {
             is_fn_boundary: false,
         }))
     }
-    // Berilgan `Parent` havola ostida yangi (bo'sh) child scope. `apply`/`if`/
-    // `each`/`match` shu orqali scope ochadi. MUHIM: parent'ni LOCK QILMAYDI —
-    // havola turi (Root/Scope) chaqiruvchidan keladi, shuning uchun rekursiv
-    // fn chaqiruvida root Arc'ga umuman tegilmaydi (contention yo'q).
+    // A new (empty) child scope under the given `Parent` link. `apply`/`if`/
+    // `each`/`match` open scopes through this. IMPORTANT: it does NOT LOCK the
+    // parent — the link type (Root/Scope) comes from the caller, so a recursive
+    // fn call never touches the root Arc at all (no contention).
     fn child(parent: Parent) -> Env {
         Arc::new(RwLock::new(Scope {
             vars: Vec::new(),
             parent,
             is_root: false,
-            is_fn_boundary: false, // if/each/match — shaffof blok
+            is_fn_boundary: false, // if/each/match — transparent block
         }))
     }
-    // Params soni bilan oldindan o'lchamlangan child (fn chaqiruvi — bind paytida
-    // qayta-allocate bo'lmaydi).
+    // A child pre-sized by the number of params (fn call — no re-allocation
+    // during bind).
     fn child_with_capacity(parent: Parent, cap: usize) -> Env {
         Arc::new(RwLock::new(Scope {
             vars: Vec::with_capacity(cap),
             parent,
             is_root: false,
-            is_fn_boundary: true, // fn/lambda chaqiruvi — izolyatsiya chegarasi
+            is_fn_boundary: true, // fn/lambda call — isolation boundary
         }))
     }
-    // `env` Arc'ni child uchun ota-havolaga aylantiradi (faqat `is_root` ni
-    // bilish uchun bitta lock). Top-level kod (if/each/match global env'da) shu
-    // orqali boradi — single-threaded, contentionsiz. Fn chaqiruvi esa
-    // `FnValue.parent` (Parent) ni to'g'ridan ishlatadi, bu yo'lga kirmaydi.
+    // Turns the `env` Arc into a parent link for a child (a single lock, only to
+    // learn `is_root`). Top-level code (if/each/match in the global env) goes
+    // through this — single-threaded, contention-free. A fn call instead uses
+    // `FnValue.parent` (Parent) directly and does not enter this path.
     fn parent_link(env: &Env) -> Parent {
         if env.read().is_root {
             Parent::Root
@@ -103,12 +104,12 @@ impl Scope {
             Parent::Scope(env.clone())
         }
     }
-    // Berilgan env ostida child (yuqoridagi ikkisini birlashtiradi).
+    // A child under the given env (combines the two above).
     fn child_of(env: &Env) -> Env {
         Scope::child(Scope::parent_link(env))
     }
-    // Nomni e'lon qiladi. Allaqachon mavjud bo'lsa qiymat+mutable'ni yangilaydi
-    // (shadow/qayta-bind — eski HashMap insert semantikasi: oxirgisi g'olib).
+    // Declares a name. If it already exists, updates value + mutable
+    // (shadow/re-bind — the old HashMap insert semantics: last one wins).
     fn define(&mut self, name: &str, v: Value, mutable: bool) {
         for slot in self.vars.iter_mut() {
             if &*slot.0 == name {
@@ -119,7 +120,7 @@ impl Scope {
         }
         self.vars.push((name.into(), v, mutable));
     }
-    // Nom qiymatini o'qiydi (oxirgi e'londan — orqadan oldinga scan).
+    // Reads a name's value (from the last declaration — scanning back to front).
     fn get(&self, name: &str) -> Option<&Value> {
         self.vars
             .iter()
@@ -127,7 +128,7 @@ impl Scope {
             .find(|(n, _, _)| &**n == name)
             .map(|(_, v, _)| v)
     }
-    // `<-` uchun: o'zgaruvchan slot'ni topadi. (slot, mutable-mi) qaytaradi.
+    // For `<-`: finds the mutable slot. Returns (slot, is-mutable).
     fn get_mut_entry(&mut self, name: &str) -> Option<(&mut Value, bool)> {
         self.vars
             .iter_mut()
@@ -135,23 +136,23 @@ impl Scope {
             .find(|(n, _, _)| &**n == name)
             .map(|(_, v, m)| (v, *m))
     }
-    // Builtins o'rnatish uchun: global nomga immutable qiymat qo'yadi.
+    // For installing builtins: sets an immutable value on a global name.
     pub fn set_global(&mut self, name: &str, v: Value) {
         self.define(name, v, false);
     }
 }
 
-// Oqim-uzilish signallari va xatolar. Hammasi `Err` tomonida sayohat qiladi.
+// Flow-interruption signals and errors. All travel on the `Err` side.
 pub enum Flow {
     Return(Value),
     Skip,
     Stop,
-    // fail [status] message — biznes yoki ichki xato.
+    // fail [status] message — a business or internal error.
     Fail {
         status: Option<i64>,
         message: String,
     },
-    // Oddiy runtime xato (tip mosligi, noma'lum o'zgaruvchi, ...).
+    // A plain runtime error (type mismatch, unknown variable, ...).
     Error(String),
 }
 
@@ -160,53 +161,55 @@ impl Flow {
         Flow::Error(msg.into())
     }
 
-    // i64 arifmetikasi chegaradan oshganda yagona xato (issue #89). checked_*
-    // bilan birga ishlatiladi: debug'dagi panic va release'dagi jim wrap o'rniga
-    // ikkala rejimda ham bir xil, oshkora runtime xato beradi.
+    // The single error for i64 arithmetic going out of range (issue #89). Used
+    // together with checked_*: instead of a debug panic and a silent wrap in
+    // release, it gives the same explicit runtime error in both modes.
     pub fn overflow(who: &str) -> Flow {
-        Flow::Error(format!("{}: son chegaradan oshdi (i64)", who))
+        Flow::Error(format!("{}: number out of range (i64)", who))
     }
 }
 
 pub type EvalResult = Result<Value, Flow>;
-type ExecResult = Result<Value, Flow>; // blok oxirgi ifoda qiymatini qaytaradi
+type ExecResult = Result<Value, Flow>; // a block returns its last expression's value
 
-// Fluxon-darajadagi fn chaqiriqlar uchun maksimal chuqurlik. Native stack
-// `stacker::maybe_grow` bilan segmentlab o'sadi, shuning uchun haqiqiy chegara
-// shu hisoblagich: limitga yetganda abort emas, graceful Flow::err. 1000 —
-// Python'ning default rekursiya limiti bilan bir xil tartibda; real backend
-// kodi bundan chuqur rekursiya qilmaydi, cheksiz rekursiya esa tez ushlanadi.
+// Maximum depth for Fluxon-level fn calls. The native stack grows in segments
+// via `stacker::maybe_grow`, so the real limit is this counter: on reaching the
+// limit it's a graceful Flow::err, not an abort. 1000 is in the same ballpark
+// as Python's default recursion limit; real backend code does not recurse
+// deeper than this, while infinite recursion is caught quickly.
 const MAX_CALL_DEPTH: usize = 1000;
 
-// stacker parametrlari: red zone — bir Fluxon chaqirig'i ichida (keyingi
-// tekshiruvgacha) ishlatilishi mumkin bo'lgan native stack'dan kattaroq bo'lishi
-// shart (debug build'da ~15KB/daraja o'lchangan). Segment hajmi — har ajratish
-// ~130 darajani sig'diradi, 1000 daraja uchun bir nechta segment yetadi.
+// stacker parameters: the red zone must be larger than the native stack that
+// can be used within one Fluxon call (until the next check) — measured at
+// ~15KB/level in a debug build. The segment size — each allocation fits ~130
+// levels, so a few segments suffice for 1000 levels.
 const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROW_SIZE: usize = 2 * 1024 * 1024;
 
 thread_local! {
-    // Joriy thread'dagi Fluxon chaqiriq chuqurligi. Thread-local: har HTTP request
-    // o'z spawn_blocking thread'ida — bir request'ning rekursiyasi boshqasini
-    // sanamaydi. Interp'ga maydon qo'shib bo'lmaydi (&self, Sync — Cell mumkin emas).
+    // Fluxon call depth on the current thread. Thread-local: each HTTP request
+    // runs in its own spawn_blocking thread — one request's recursion does not
+    // count toward another's. A field cannot be added to Interp (&self, Sync — a
+    // Cell is not possible).
     static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
-    // `use ./fayl` joriy fayl katalogi va sikl-detektsiya steki — THREAD-LOCAL
-    // (Interp maydoni emas). `par` har lambdani alohida thread'da chaqiradi,
-    // shuning uchun parallel modul yuklash bir-birining base/in-flight steki'ni
-    // buzmasin. Base default — joriy ish katalogi (`set_base` top-level faylga
-    // aniqlashtiradi); `par` ota-thread base'ini yangi thread'ga snapshot qiladi.
-    // Loading steki har thread'da bo'sh boshlanadi (har par lambda mustaqil import
-    // zanjiri). module_cache esa Interp'da shared — yuklangan modul ulashiladi.
+    // For `use ./file`: the current file's directory and the cycle-detection
+    // stack — THREAD-LOCAL (not an Interp field). `par` calls each lambda in a
+    // separate thread, so parallel module loading must not corrupt each other's
+    // base / in-flight stack. The base defaults to the current working directory
+    // (`set_base` pins it to the top-level file); `par` snapshots the parent
+    // thread's base into the new thread. The loading stack starts empty on each
+    // thread (each par lambda is an independent import chain). module_cache, by
+    // contrast, is shared in Interp — a loaded module is shared.
     static CURRENT_BASE: std::cell::RefCell<PathBuf> =
         std::cell::RefCell::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     static MODULE_LOADING: std::cell::RefCell<Vec<PathBuf>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-// RAII guard: enter'da hisoblagichni oshiradi, Drop'da kamaytiradi. Drop'siz
-// xato (`?`) yoki panic yo'lida hisoblagich oshib qolar va spawn_blocking
-// thread'i qayta ishlatilganda keyingi request'larni zaharlar edi.
+// RAII guard: bumps the counter on enter, decrements on Drop. Without Drop, on
+// an error (`?`) or panic path the counter would stay elevated and poison
+// subsequent requests once the spawn_blocking thread is reused.
 struct CallDepthGuard;
 
 impl CallDepthGuard {
@@ -215,7 +218,7 @@ impl CallDepthGuard {
             let depth = d.get();
             if depth >= MAX_CALL_DEPTH {
                 return Err(Flow::err(format!(
-                    "rekursiya juda chuqur: '{}' chaqirig'ida {} darajalik limitga yetildi",
+                    "recursion too deep: '{}' call reached the {} level limit",
                     fname, MAX_CALL_DEPTH
                 )));
             }
@@ -233,89 +236,93 @@ impl Drop for CallDepthGuard {
 
 pub struct Interp {
     pub global: Env,
-    // HTTP battery: ro'yxatga olingan marshrutlar. `http.on` to'ldiradi,
-    // `http.serve` o'qiydi. Arc<Mutex> — server thread'lari bilan ulashiladi.
+    // HTTP battery: registered routes. `http.on` fills it, `http.serve` reads
+    // it. Arc<Mutex> — shared with server threads.
     pub routes: Arc<Mutex<Vec<crate::http_mod::Route>>>,
-    // HTTP middleware (issue #67). `http.use` (barcha route'ga) va `http.before`
-    // (yo'l prefiks bo'yicha) ikkalasi SHU BITTA ro'yxatga ketma-ket qo'shiladi —
-    // shunda zanjir DEKLARATSIYA TARTIBIDA ishlaydi (use/before aralashganda ham,
-    // masalan before req.ctx yozsa, undan keyin e'lon qilingan use logger ctx'ni
-    // ko'radi). Route handler'dan OLDIN ishlaydi; biri `fail`/`rep` qaytarsa zanjir
-    // to'xtaydi. `routes` kabi top-level to'ldiradi, server thread'lari o'qiydi.
+    // HTTP middleware (issue #67). `http.use` (for all routes) and `http.before`
+    // (by path prefix) both append to THIS ONE list in order — so the chain runs
+    // in DECLARATION ORDER (even when use/before are mixed; e.g. if before writes
+    // req.ctx, a use logger declared after it sees the ctx). It runs BEFORE the
+    // route handler; if one returns `fail`/`rep` the chain stops. Like `routes`,
+    // top-level fills it, server threads read it.
     pub middlewares: Arc<Mutex<Vec<crate::http_mod::Middleware>>>,
-    // CORS sozlamasi (issue #135). `http.cors` o'rnatadi, server thread'lari
-    // o'qiydi: yoqilgan bo'lsa OPTIONS preflight avtomatik javob oladi va har
-    // javobga `Access-Control-Allow-*` header'lar qo'shiladi. None — CORS o'chiq
-    // (default, hech qanday header qo'shilmaydi). `routes` kabi top-level
-    // to'ldiradi, server thread'lari o'qiydi.
+    // CORS config (issue #135). `http.cors` sets it, server threads read it: when
+    // enabled, an OPTIONS preflight is answered automatically and
+    // `Access-Control-Allow-*` headers are added to every response. None — CORS
+    // off (default, no headers added). Like `routes`, top-level fills it, server
+    // threads read it.
     pub cors: Arc<Mutex<Option<crate::http_mod::CorsConfig>>>,
-    // Static fayl mount'lari (issue #134). `http.static` to'ldiradi, server
-    // thread'lari o'qiydi: aniq route topilmaganda prefiksga mos papkadan fayl
-    // beriladi (route prioriteti: aniq route > static). `routes` kabi top-level
-    // to'ldiradi, server thread'lari o'qiydi.
+    // Static file mounts (issue #134). `http.static` fills it, server threads
+    // read it: when no exact route is found, a file is served from the folder
+    // matching the prefix (route priority: exact route > static). Like `routes`,
+    // top-level fills it, server threads read it.
     pub statics: Arc<Mutex<Vec<crate::http_mod::StaticMount>>>,
-    // O'ziga zaif havola: `http.serve` handler'larni server thread'larida
-    // chaqirishi uchun `Arc<Interp>` kerak. `eval_call` (&self) shu yerdan
-    // qayta tiklaydi. `new_arc` o'rnatadi.
+    // A weak self-reference: `http.serve` needs `Arc<Interp>` to call handlers on
+    // server threads. `eval_call` (&self) recovers it from here. `new_arc` sets
+    // it.
     this: OnceLock<Weak<Interp>>,
-    // Muzlatilgan global snapshot. `http.serve` chaqirilganda o'rnatiladi —
-    // shundan keyin top-level kod tugagan, global o'zgarmaydi. `lookup` root'ga
-    // yetganda LOCK-FREE shundan o'qiydi (Arc orqali ulashilgan, read lock yo'q),
-    // shuning uchun parallel request'lar global qidiruvda bir-birini bloklamaydi.
+    // Frozen global snapshot. Set when `http.serve` is called — after that the
+    // top-level code is done and the global does not change. When `lookup`
+    // reaches the root it reads from this LOCK-FREE (shared via Arc, no read
+    // lock), so parallel requests do not block each other on global lookup.
     globals_frozen: OnceLock<Arc<HashMap<String, Value>>>,
-    // DB battery: lazy ochilgan backend (jarayonga bitta, `$DATABASE_URL` bilan
-    // tanlanadi). Birinchi `db.*` chaqiruvida ochiladi + auto-migration.
+    // DB battery: lazily-opened backend (one per process, selected via
+    // `$DATABASE_URL`). Opened on the first `db.*` call + auto-migration.
     db: OnceLock<Arc<dyn crate::db_mod::Db>>,
-    // tbl schema registry: jadval -> meta (ustunlar + tartib + indekslar).
-    // `Stmt::Tbl` to'ldiradi, db natijalarini post-process qilish (sym/json/bool)
-    // va auto-migration (diff: ADD/DROP COLUMN, CREATE/DROP INDEX) uchun.
-    // Arc<RwLock>: top-level'da yoziladi, parallel request thread'larida o'qiladi.
+    // tbl schema registry: table -> meta (columns + order + indexes). `Stmt::Tbl`
+    // fills it, used for post-processing db results (sym/json/bool) and
+    // auto-migration (diff: ADD/DROP COLUMN, CREATE/DROP INDEX). Arc<RwLock>:
+    // written at top-level, read on parallel request threads.
     pub schema: Arc<RwLock<HashMap<String, TableMeta>>>,
-    // DB sxemasidan introspeksiya qilingan ustun tiplari cache'i (jadval -> ustun
-    // -> fluxon-tip). `tbl` e'lon QILINMAGAN process (masalan ikki-process setup'da
-    // o'qigich) `schema` bo'sh bo'lganda json ustunni shu cache orqali tiklaydi —
-    // shunda json process chegarasidan qat'i nazar bir xil map qaytaradi (issue #63).
+    // Cache of column types introspected from the DB schema (table -> column ->
+    // fluxon-type). A process that did NOT declare `tbl` (e.g. a reader in a
+    // two-process setup) reconstructs a json column via this cache when `schema`
+    // is empty — so json returns the same map regardless of the process boundary
+    // (issue #63).
     pub(crate) db_schema: RwLock<HashMap<String, BTreeMap<String, String>>>,
-    // .env fayl cache: LAZY — faqat birinchi `env.X` ishlatilganda joriy
-    // katalogdagi `.env` o'qiladi va parse qilinadi. `env.X` umuman bo'lmasa,
-    // fayl O'QILMAYDI (DB lazy-open bilan bir xil falsafa). Ustunlik: OS env >
-    // .env fayl (deployda real muhit o'zgaruvchisi muhim).
+    // .env file cache: LAZY — only on the first use of `env.X` is the `.env` in
+    // the current directory read and parsed. If `env.X` is never used, the file
+    // is NOT read (same philosophy as DB lazy-open). Priority: OS env > .env file
+    // (the real environment variable matters on deploy).
     env_file: OnceLock<HashMap<String, String>>,
-    // WS battery: hodisa handler'lari + jonli ulanishlar/xonalar/sessiya holati.
-    // http `routes` kabi top-level kod (`ws.on`) to'ldiradi, `ws.serve` thread'lari
-    // o'qiydi/yozadi. Arc — server thread'lari bilan ulashiladi.
+    // WS battery: event handlers + live connection/room/session state. Like http
+    // `routes`, top-level code (`ws.on`) fills it, `ws.serve` threads read/write
+    // it. Arc — shared with server threads.
     pub ws: Arc<crate::ws_mod::WsState>,
-    // reg battery: nom -> funksiya registri (dinamik dispatch). `reg.add` to'ldiradi,
-    // `reg.call` o'qiydi (istalgan thread'dan — http/ws handler ichidan ham).
+    // reg battery: name -> function registry (dynamic dispatch). `reg.add` fills
+    // it, `reg.call` reads it (from any thread — even inside an http/ws handler).
     pub reg: Arc<crate::reg_mod::RegState>,
-    // cron battery: rejalashtirilgan vazifalar + scheduler fon thread'i. `cron.on`
-    // ro'yxatga oladi (bloklamaydi), fon thread o'qib o'z vaqtida handler chaqiradi.
+    // cron battery: scheduled tasks + a scheduler background thread. `cron.on`
+    // registers (non-blocking), the background thread reads and calls the handler
+    // on time.
     pub cron: Arc<crate::cron_mod::CronState>,
-    // queue battery: fon navbati + bitta FIFO worker thread'i. `queue.push` ish
-    // qo'shadi (bloklamaydi), `queue.on` handler ro'yxatga oladi; worker navbatdan
-    // olib ketma-ket bajaradi.
+    // queue battery: a background queue + a single FIFO worker thread.
+    // `queue.push` adds work (non-blocking), `queue.on` registers a handler; the
+    // worker pulls from the queue and runs them in order.
     pub queue: Arc<crate::queue_mod::QueueState>,
-    // Kutilayotgan (deferred) serverlar: `http.serve`/`ws.serve` darhol bloklamaydi,
-    // balki bu yerga server tavsifini qo'shadi. Top-level kod tugagach (`run` oxiri)
-    // hammasi BITTA umumiy tokio runtime'da spawn qilinadi — shunda HTTP + WS bir
-    // jarayonda birga ishlaydi va `ws.room.send` HTTP handler ichidan chaqirila oladi.
+    // Pending (deferred) servers: `http.serve`/`ws.serve` do not block
+    // immediately, they add a server description here. Once top-level code is
+    // done (end of `run`), they are all spawned on ONE shared tokio runtime — so
+    // HTTP + WS run together in one process and `ws.room.send` can be called from
+    // inside an HTTP handler.
     pub pending_servers: Arc<Mutex<Vec<crate::serve_mod::PendingServer>>>,
-    // `use ./fayl` foydalanuvchi modullari uchun cache: canonical yo'l -> modul
-    // namespace (`Value::Map`). Bir modul ikki marta import qilinsa qayta
-    // bajarilmaydi — bir marta run qilinib natija shu yerda saqlanadi (idempotent).
+    // Cache for `use ./file` user modules: canonical path -> module namespace
+    // (`Value::Map`). A module imported twice is not re-executed — it's run once
+    // and the result is stored here (idempotent).
     module_cache: Mutex<HashMap<PathBuf, Value>>,
-    // module_loading (sikl detektsiya steki) va current_base (joriy fayl katalogi)
-    // PROCESS-WIDE Mutex emas, THREAD-LOCAL (CURRENT_BASE/MODULE_LOADING, quyida).
-    // Sabab: `par` har lambdani alohida thread'da chaqiradi — ikki lambda bir xil
-    // cache'lanmagan modulni `use ./m` qilsa, process-wide stack birining in-flight
-    // yo'lini ikkinchisiga sikl deb ko'rsatardi (soxta "sikllik import"), va
-    // parallel base save/restore bir-birini buzardi (issue #137 PR review).
-    // Sikl bir IMPORT ZANJIRIDA (bir thread) bo'ladi, base ham joriy bajarilish
-    // konteksti — ikkalasi tabiatan thread-local (CURRENT_TX kabi). module_cache
-    // esa SHARED qoladi: modul bir marta yuklanib hamma thread ulashadi.
+    // module_loading (cycle-detection stack) and current_base (current file's
+    // directory) are NOT a process-wide Mutex but THREAD-LOCAL
+    // (CURRENT_BASE/MODULE_LOADING, below). Reason: `par` calls each lambda in a
+    // separate thread — if two lambdas `use ./m` the same uncached module, a
+    // process-wide stack would show one's in-flight path as a cycle to the other
+    // (a false "circular import"), and parallel base save/restore would corrupt
+    // each other (issue #137 PR review). A cycle happens within one IMPORT CHAIN
+    // (one thread), and the base is also the current execution context — both are
+    // thread-local by nature (like CURRENT_TX). module_cache, by contrast, stays
+    // SHARED: a module is loaded once and all threads share it.
 }
 
-// tbl ustun metasi — tip nomi (sym/json/bool konversiya) + modifikatorlar
+// tbl column meta — type name (sym/json/bool conversion) + modifiers
 // (CREATE TABLE: pk/uniq/null).
 #[derive(Clone)]
 pub struct ColMeta {
@@ -323,8 +330,8 @@ pub struct ColMeta {
     pub modifiers: Vec<String>,
 }
 
-// tbl jadval metasi — ustunlar (nom -> meta), e'lon tartibi (barqaror ADD COLUMN
-// uchun) va indekslar (CREATE/DROP INDEX diff uchun).
+// tbl table meta — columns (name -> meta), declaration order (for stable ADD
+// COLUMN) and indexes (for CREATE/DROP INDEX diff).
 #[derive(Clone, Default)]
 pub struct TableMeta {
     pub columns: BTreeMap<String, ColMeta>,
@@ -354,43 +361,43 @@ impl Interp {
             queue: Arc::new(crate::queue_mod::QueueState::new()),
             pending_servers: Arc::new(Mutex::new(Vec::new())),
             module_cache: Mutex::new(HashMap::new()),
-            // module_loading/current_base — thread-local (yuqoridagi izoh).
+            // module_loading/current_base — thread-local (see comment above).
         }
     }
 
-    // Top-level faylning katalogini o'rnatadi — `use ./fayl` yo'llari shunga
-    // nisbatan hal qilinadi. main.rs `run`dan oldin bir marta chaqiradi.
+    // Sets the top-level file's directory — `use ./file` paths are resolved
+    // relative to it. main.rs calls this once before `run`.
     pub fn set_base(&self, dir: &std::path::Path) {
         CURRENT_BASE.with(|b| *b.borrow_mut() = dir.to_path_buf());
     }
 
-    // Joriy bajarilayotgan faylning katalogi. pub(crate): `http.static` nisbiy
-    // katalogni (`"./public"`) `use ./fayl` bilan bir xil qoidada — skript fayli
-    // katalogiga nisbatan — hal qiladi.
+    // The directory of the currently executing file. pub(crate): `http.static`
+    // resolves a relative directory (`"./public"`) by the same rule as
+    // `use ./file` — relative to the script file's directory.
     pub(crate) fn base_dir(&self) -> PathBuf {
         CURRENT_BASE.with(|b| b.borrow().clone())
     }
 
-    // `env.NOM` qiymatini topadi. Ustunlik: OS env (std::env) > .env fayl.
-    // .env fayl LAZY — birinchi chaqiruvda bir marta o'qiladi va cache'lanadi;
-    // `env.X` umuman ishlatilmasa, bu metod chaqirilmaydi -> fayl o'qilmaydi.
-    // pub(crate): `ai` battery `$AI_KEY`/`$AI_MODEL`ni shu yo'l bilan (OS env >
-    // .env) o'qiydi — `env.X` bilan bir xil ustunlik qoidasi.
+    // Looks up the value of `env.NAME`. Priority: OS env (std::env) > .env file.
+    // The .env file is LAZY — read once on the first call and cached; if `env.X`
+    // is never used, this method is not called -> the file is not read.
+    // pub(crate): the `ai` battery reads `$AI_KEY`/`$AI_MODEL` this way (OS env >
+    // .env) — the same priority rule as `env.X`.
     pub(crate) fn env_lookup(&self, name: &str) -> Value {
         if let Ok(v) = std::env::var(name) {
-            return Value::Str(v); // OS env ustun
+            return Value::Str(v); // OS env wins
         }
         let file = self.env_file.get_or_init(load_dotenv);
         match file.get(name) {
             Some(v) => Value::Str(v.clone()),
-            None => Value::Nil, // topilmadi -> `?? "default"`
+            None => Value::Nil, // not found -> `?? "default"`
         }
     }
 
-    // log.<level> / bare `log` -> darajali log (issue #139). $LOG_LEVEL minimal
-    // darajani filtrlaydi, $LOG_FORMAT=json strukturali (JSON) qator beradi.
-    // env_lookup OS env + .env faylni ko'radi (db/ai bilan bir xil konvensiya),
-    // shuning uchun call_module emas — Interp'ga muhtoj.
+    // log.<level> / bare `log` -> leveled log (issue #139). $LOG_LEVEL filters by
+    // a minimum level, $LOG_FORMAT=json gives a structured (JSON) line.
+    // env_lookup sees OS env + .env file (same convention as db/ai), so it's not
+    // call_module — it needs the Interp.
     fn log_dispatch(&self, level: &str, argv: Vec<Value>) -> EvalResult {
         let min = match self.env_lookup("LOG_LEVEL") {
             Value::Str(s) => Some(s),
@@ -404,48 +411,49 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // DB backend'ni lazy ochadi (birinchi `db.*` da). Ochilganda tbl schema
-    // registry'ni replay qilib auto-migration (`CREATE TABLE IF NOT EXISTS`)
-    // bajaradi — `tbl` e'lon qilingan jadvallar zero-setup paydo bo'ladi.
+    // Lazily opens the DB backend (on the first `db.*`). On opening it replays
+    // the tbl schema registry and runs auto-migration (`CREATE TABLE IF NOT
+    // EXISTS`) — tables declared with `tbl` appear with zero setup.
     pub fn db(&self) -> Result<Arc<dyn crate::db_mod::Db>, Flow> {
         if let Some(d) = self.db.get() {
             return Ok(d.clone());
         }
         let d = crate::db_mod::open_from_env().map_err(Flow::err)?;
         self.migrate(d.as_ref())?;
-        // Race: agar boshqa thread ham ochgan bo'lsa, biznikini tashlaymiz.
+        // Race: if another thread also opened it, drop ours.
         let _ = self.db.set(d);
         Ok(self.db.get().unwrap().clone())
     }
 
-    // Deklarativ auto-migration: `tbl` = DB schemasi uchun YAGONA MANBA. Joriy
-    // DB holatini introspeksiya qilib `tbl` registry bilan farqini (diff)
-    // hisoblaydi va kerakli DDL'ni bajaradi:
-    //   - yangi jadval -> CREATE TABLE
-    //   - yangi ustun  -> ADD COLUMN          (idempotent: bor bo'lsa jim pass)
-    //   - olib tashlangan ustun -> BACKUP + DROP COLUMN  (yo'q bo'lsa jim pass)
-    //   - index e'loni -> CREATE/DROP INDEX IF [NOT] EXISTS
-    //   - olib tashlangan jadval -> BACKUP + DROP TABLE   (faqat Fluxon yaratganlar)
+    // Declarative auto-migration: `tbl` = the SINGLE SOURCE OF TRUTH for the DB
+    // schema. It introspects the current DB state, computes the diff against the
+    // `tbl` registry, and runs the necessary DDL:
+    //   - new table   -> CREATE TABLE
+    //   - new column  -> ADD COLUMN          (idempotent: silent pass if present)
+    //   - removed column -> BACKUP + DROP COLUMN  (silent pass if absent)
+    //   - index declaration -> CREATE/DROP INDEX IF [NOT] EXISTS
+    //   - removed table -> BACKUP + DROP TABLE   (only Fluxon-created ones)
     //
-    // KRITIK: idempotent va user manual SQL bilan birga ishlaganda yiqilmaydi —
-    // "kerakli holatga keltir, allaqachon shunday bo'lsa tinch o't". DROP'lardan
-    // oldin jadval DB ichida `_fluxon_bak_*` ga nusxalanadi (agent xatosiga himoya).
+    // CRITICAL: idempotent and does not break when coexisting with user manual
+    // SQL — "bring it to the desired state, pass quietly if already so". Before
+    // DROPs the table is copied to `_fluxon_bak_*` inside the DB (protection
+    // against agent mistakes).
     fn migrate(&self, db: &dyn crate::db_mod::Db) -> Result<(), Flow> {
         use crate::db_mod::{
             ColDef, SqlVal, build_add_column, build_backup, build_create_index, build_drop_column,
             build_drop_index, coldef_foreign_key, index_name,
         };
 
-        // 0. Fluxon boshqaradigan jadvallar reyestri (xavfsiz DROP uchun).
+        // 0. Registry of Fluxon-managed tables (for safe DROP).
         db.exec(
             "CREATE TABLE IF NOT EXISTS _fluxon_schema (table_name TEXT PRIMARY KEY)",
             &[],
         )
         .map_err(Flow::err)?;
 
-        // Backup nomi uchun migratsiya vaqti (unix secs). Faqat backup nomini
-        // noyob qilish uchun — index nomlaridan FARQLI, bu yerda determinizm
-        // shart emas.
+        // Migration time for the backup name (unix secs). Only to make the
+        // backup name unique — UNLIKE index names, determinism is not required
+        // here.
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -453,9 +461,9 @@ impl Interp {
 
         let schema = self.schema.read();
 
-        // 1. Har registry jadval uchun: CREATE + ustun/index diff.
+        // 1. For each registry table: CREATE + column/index diff.
         for (table, meta) in schema.iter() {
-            // ColDef'lar e'lon tartibida (barqaror ADD COLUMN).
+            // ColDefs in declaration order (stable ADD COLUMN).
             let coldef = |col: &str| -> ColDef {
                 let m = &meta.columns[col];
                 ColDef {
@@ -473,7 +481,7 @@ impl Interp {
             )
             .map_err(Flow::err)?;
 
-            // DB'dagi joriy ustunlar.
+            // Current columns in the DB.
             let db_cols: HashSet<String> = db
                 .column_types(table)
                 .map_err(Flow::err)?
@@ -481,19 +489,19 @@ impl Interp {
                 .map(|(n, _)| n)
                 .collect();
 
-            // 2. ADD COLUMN: registry'da bor, DB'da yo'q.
+            // 2. ADD COLUMN: in the registry, not in the DB.
             for col in &meta.col_order {
                 if !db_cols.contains(col) {
                     swallow_benign(db.exec(&build_add_column(table, &coldef(col)), &[]))?;
                 }
             }
 
-            // 3. ESKIRGAN INDEX DROP — ustun DROP'idan OLDIN. Sabab: index'lanган
-            //    ustun olib tashlansa, eski `idx_<tbl>_<col>` hali DB'da turadi va
-            //    ba'zi SQLite holatlarida `DROP COLUMN` "error in index ... after
-            //    drop column: no such column" bilan rad etiladi -> deploy migrate
-            //    qila olmaydi. Shu sabab avval kerak BO'LMAGAN Fluxon index'larini
-            //    tashlaymiz, keyin ustunni xavfsiz drop qilamiz.
+            // 3. DROP STALE INDEXES — BEFORE the column DROP. Reason: if an
+            //    indexed column is removed, the old `idx_<tbl>_<col>` still exists
+            //    in the DB and in some SQLite cases `DROP COLUMN` is rejected with
+            //    "error in index ... after drop column: no such column" -> deploy
+            //    cannot migrate. So we first drop Fluxon indexes that are NO
+            //    LONGER needed, then safely drop the column.
             let want_names: HashSet<String> = meta.indexes.iter().map(index_name).collect();
             for info in db.fluxon_indexes(table).map_err(Flow::err)? {
                 if !want_names.contains(&info.name) {
@@ -502,8 +510,8 @@ impl Interp {
                 }
             }
 
-            // 4. DROP COLUMN: DB'da bor, registry'da yo'q. BACKUP (jadval bo'yicha
-            //    bir marta) -> DROP COLUMN (yo'q bo'lsa jim pass).
+            // 4. DROP COLUMN: in the DB, not in the registry. BACKUP (once per
+            //    table) -> DROP COLUMN (silent pass if absent).
             let mut backed_up = false;
             for dbcol in &db_cols {
                 if !meta.columns.contains_key(dbcol) {
@@ -515,20 +523,21 @@ impl Interp {
                 }
             }
 
-            // 5. YANGI INDEX CREATE — ustun DROP'idan KEYIN (yangi ustunlar
-            //    allaqachon mavjud). IF NOT EXISTS idempotent.
+            // 5. CREATE NEW INDEXES — AFTER the column DROP (new columns already
+            //    exist). IF NOT EXISTS is idempotent.
             for idx in &meta.indexes {
                 db.exec(&build_create_index(idx), &[]).map_err(Flow::err)?;
             }
         }
 
-        // 5.5 FK RECONCILE — ALOHIDA pass (barcha jadval/ustun yaratilgandan keyin,
-        //     parent jadval mavjudligi kafolatlanadi). DB'dagi HAQIQIY FK to'plamini
-        //     (introspeksiya) `ref:tbl.col` deklaratsiyasi bilan solishtiramiz:
-        //     faqat kodga emas, eski holatga ham qaraymiz. Farq bo'lsa (mavjud
-        //     ustunga FK qo'shilgan/olib tashlangan) ALTER yetmaydi — jadvalni
-        //     rebuild qilamiz (ma'lumot saqlanadi). Yangi ustun FK'si ADD COLUMN'da
-        //     allaqachon qo'llangan; bu pass faqat mavjud ustunlar farqini yopadi.
+        // 5.5 FK RECONCILE — a SEPARATE pass (after all tables/columns are
+        //     created, so the parent table is guaranteed to exist). We compare the
+        //     ACTUAL FK set in the DB (introspection) against the `ref:tbl.col`
+        //     declaration: we look not only at the code but at the existing state.
+        //     If they differ (an FK added/removed on an existing column) ALTER is
+        //     not enough — we rebuild the table (data preserved). A new column's FK
+        //     was already applied in ADD COLUMN; this pass only closes the
+        //     difference for existing columns.
         for (table, meta) in schema.iter() {
             let coldefs: Vec<ColDef> = meta
                 .col_order
@@ -556,13 +565,13 @@ impl Interp {
             }
         }
 
-        // 6. DROP TABLE: `_fluxon_schema` da bor, registry'da yo'q (source'dan
-        //    tbl olib tashlangan). BACKUP -> DROP -> reyestrdan o'chir.
+        // 6. DROP TABLE: in `_fluxon_schema`, not in the registry (tbl removed
+        //    from source). BACKUP -> DROP -> remove from the registry.
         //
-        // MUHIM: registry BUTUNLAY bo'sh bo'lsa (hech qanday `tbl` e'lon
-        //    qilinmagan), DROP'ni o'tkazib yuboramiz — bunday process schema
-        //    dirijyori EMAS (faqat o'qiydi/yozadi, masalan ikki-process setup).
-        //    Aks holda u boshqa process yaratgan barcha jadvalni o'chirib yuborardi.
+        // IMPORTANT: if the registry is COMPLETELY empty (no `tbl` declared at
+        //    all), we skip the DROP — such a process is NOT the schema conductor
+        //    (it only reads/writes, e.g. a two-process setup). Otherwise it would
+        //    drop every table created by another process.
         if schema.is_empty() {
             return Ok(());
         }
@@ -584,12 +593,13 @@ impl Interp {
         Ok(())
     }
 
-    // Global scope'ni lock-free snapshot'ga muzlatadi. `http.serve` server'ni
-    // ishga tushirishdan oldin chaqiradi. Bir marta — keyin global o'qish
-    // lock'siz bo'ladi. (Top-level kod tugagan, mutatsiya kutilmaydi.)
+    // Freezes the global scope into a lock-free snapshot. `http.serve` calls it
+    // before starting the server. Once — after that reading the global is
+    // lock-free. (Top-level code is done, no mutation expected.)
     pub fn freeze_globals(&self) {
-        // Frozen snapshot HASHMAP — global katta (builtin'lar + fn'lar), va u har
-        // request'da O(1) qidiriladi. Global Vec'dan (oxirgi e'lon g'olib) quramiz.
+        // The frozen snapshot is a HASHMAP — the global is large (builtins +
+        // fn's) and it's looked up O(1) on every request. We build it from the
+        // global Vec (last declaration wins).
         let mut snap: HashMap<String, Value> = HashMap::new();
         for (name, v, _) in self.global.read().vars.iter() {
             snap.insert(name.to_string(), v.clone());
@@ -597,25 +607,25 @@ impl Interp {
         let _ = self.globals_frozen.set(Arc::new(snap));
     }
 
-    // Interp'ni Arc'ga o'rab, o'ziga zaif havolani o'rnatadi.
+    // Wraps the Interp in an Arc and sets the weak self-reference.
     pub fn new_arc() -> Arc<Self> {
         let arc = Arc::new(Self::new());
         let _ = arc.this.set(Arc::downgrade(&arc));
         arc
     }
 
-    // `&self` dan `Arc<Interp>` ni qayta tiklaydi (http.serve uchun).
+    // Recovers `Arc<Interp>` from `&self` (for http.serve).
     pub fn arc_self(&self) -> Arc<Interp> {
         self.this
             .get()
             .and_then(|w| w.upgrade())
-            .expect("Interp Arc orqali yaratilishi kerak (new_arc)")
+            .expect("Interp must be created via Arc (new_arc)")
     }
 
     pub fn run(&self, prog: &Program) -> Result<(), String> {
-        // Birinchi o'tish: top-level fn/tbl e'lonlarini oldindan ro'yxatga olamiz
-        // (hoisting), shunda tartibdan qat'i nazar bir-birini chaqira oladi va
-        // har qanday `db.*` chaqiruvidan oldin schema tayyor bo'ladi.
+        // First pass: pre-register top-level fn/tbl declarations (hoisting), so
+        // they can call each other regardless of order and the schema is ready
+        // before any `db.*` call.
         for stmt in prog {
             match stmt {
                 Stmt::FnDecl {
@@ -624,7 +634,7 @@ impl Interp {
                     let f = Value::Fn(Arc::new(FnValue {
                         params: params.clone(),
                         body: body.clone(),
-                        // Top-level fn — ota root (marker, Arc emas).
+                        // Top-level fn — parent is root (a marker, not an Arc).
                         parent: Parent::Root,
                         name: name.clone(),
                     }));
@@ -639,7 +649,7 @@ impl Interp {
             }
         }
         for stmt in prog {
-            // fn/tbl allaqachon ro'yxatda — qayta bajarmaymiz.
+            // fn/tbl already registered — we do not re-execute them.
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
@@ -650,35 +660,35 @@ impl Interp {
                     let pfx = status.map(|s| format!("[{}] ", s)).unwrap_or_default();
                     return Err(format!("fail: {}{}", pfx, message));
                 }
-                Err(Flow::Return(_)) => {} // top-level ret — e'tiborsiz
+                Err(Flow::Return(_)) => {} // top-level ret — ignored
                 Err(Flow::Skip) | Err(Flow::Stop) => {
-                    return Err("skip/stop loop tashqarisida ishlatildi".into());
+                    return Err("skip/stop used outside a loop".into());
                 }
             }
         }
-        // Top-level tugadi — kutilayotgan serverlar (http.serve/ws.serve) bo'lsa,
-        // hammasini bitta umumiy event-loopda ishga tushirib bloklaymiz. Server
-        // bo'lmasa darhol qaytadi (oddiy skript normal tugaydi).
-        // run_pending faqat Flow::Error qaytaradi (tokio runtime qura olmasa).
+        // Top-level is done — if there are pending servers (http.serve/ws.serve),
+        // start them all on one shared event-loop and block. With no server it
+        // returns immediately (a plain script ends normally). run_pending only
+        // returns Flow::Error (when it cannot build the tokio runtime).
         if let Err(Flow::Error(e)) = crate::serve_mod::run_pending(&self.arc_self()) {
             return Err(e);
         }
-        // Server yo'q bo'lsa run_pending darhol qaytadi — chiqishdan oldin fon
-        // navbatidagi ishlar tugashini kutamiz (issue #105: faqat-queue skript
-        // ishlarni bajarmasdan chiqib ketmasin). Server bo'lsa run_pending
-        // bloklaydi va bu yerga umuman yetib kelmaymiz.
+        // With no server run_pending returns immediately — before exiting we wait
+        // for background-queue work to finish (issue #105: a queue-only script
+        // must not exit without doing the work). With a server, run_pending
+        // blocks and we never reach here at all.
         self.queue_wait_drain();
         Ok(())
     }
 
-    // REPL bitta kiritilgan blokni bajaradi va oxirgi ifoda QIYMATINI qaytaradi
-    // (chop etish uchun) — `run` esa `()` qaytaradi. Bir xil interp obyektida
-    // ketma-ket chaqiriladi, shuning uchun e'lonlar (`x = 1`, `fn f ...`) chunk'lar
-    // orasida saqlanadi: hammasi `self.global` da yashaydi. `run`dan farqli ravishda
-    // bu yerda `run_pending`/`queue_wait_drain` CHAQIRILMAYDI — REPL satrida `http.serve`
-    // bo'lsa ham har chunk'da event-loop ishga tushib promptni bloklamasin (skript
-    // emas, interaktiv sessiya). fn/tbl hoisting `run` bilan bir xil — bir chunk
-    // ichida tartibdan qat'i nazar bir-birini chaqira oladi.
+    // The REPL executes one entered block and returns the last expression's
+    // VALUE (for printing) — whereas `run` returns `()`. It is called repeatedly
+    // on the same interp object, so declarations (`x = 1`, `fn f ...`) persist
+    // across chunks: everything lives in `self.global`. Unlike `run`, here
+    // `run_pending`/`queue_wait_drain` are NOT called — even if a REPL line has
+    // `http.serve`, the event-loop must not start on each chunk and block the
+    // prompt (interactive session, not a script). fn/tbl hoisting is the same as
+    // `run` — within a chunk they can call each other regardless of order.
     pub fn run_repl_chunk(&self, prog: &Program) -> Result<Value, String> {
         for stmt in prog {
             match stmt {
@@ -715,7 +725,7 @@ impl Interp {
                 }
                 Err(Flow::Return(_)) => {} // top-level ret — e'tiborsiz
                 Err(Flow::Skip) | Err(Flow::Stop) => {
-                    return Err("skip/stop loop tashqarisida ishlatildi".into());
+                    return Err("skip/stop used outside a loop".into());
                 }
             }
         }
@@ -771,7 +781,7 @@ impl Interp {
             .canonicalize()
             // Xato xabarida foydalanuvchi yozган yo'lni ko'rsatamiz (`./greet`),
             // normallashtirilmagan to'liq yo'lni emas — o'qishga qulayroq.
-            .map_err(|e| Flow::err(format!("modul topilmadi '{}': {}", rel_path, e)))?;
+            .map_err(|e| Flow::err(format!("module not found '{}': {}", rel_path, e)))?;
 
         // 2. Cache hit — qayta bajarmaymiz (idempotent import).
         if let Some(v) = self.module_cache.lock().unwrap().get(&canon) {
@@ -794,7 +804,7 @@ impl Interp {
             })
         });
         if let Some(chain) = cycle {
-            return Err(Flow::err(format!("sikllik import: {}", chain)));
+            return Err(Flow::err(format!("circular import: {}", chain)));
         }
         MODULE_LOADING.with(|l| l.borrow_mut().push(canon.clone()));
 
@@ -816,7 +826,7 @@ impl Interp {
     fn run_module_file(&self, canon: &std::path::Path) -> EvalResult {
         let src = std::fs::read_to_string(canon).map_err(|e| {
             Flow::err(format!(
-                "modulni o'qib bo'lmadi '{}': {}",
+                "could not read module '{}': {}",
                 canon.display(),
                 e
             ))
@@ -901,7 +911,7 @@ impl Interp {
                 }
                 Err(Flow::Return(_)) => {} // modul top-level ret — e'tiborsiz
                 Err(Flow::Skip) | Err(Flow::Stop) => {
-                    return Err(Flow::err("skip/stop loop tashqarisida ishlatildi"));
+                    return Err(Flow::err("skip/stop used outside a loop"));
                 }
             }
         }
@@ -935,9 +945,7 @@ impl Interp {
                         self.assign_field(&obj_val, name, v)?;
                     }
                     _ => {
-                        return Err(Flow::err(
-                            "'<-' chap tomoni o'zgaruvchi yoki '.maydon' bo'lishi kerak",
-                        ));
+                        return Err(Flow::err("'<-' left side must be a variable or '.field'"));
                     }
                 }
                 Ok(Value::Nil)
@@ -975,7 +983,7 @@ impl Interp {
                         Value::Int(n) => Some(n),
                         other => {
                             return Err(Flow::err(format!(
-                                "fail status int bo'lishi kerak, {} berildi",
+                                "fail status must be an int, got {}",
                                 other.type_name()
                             )));
                         }
@@ -1038,7 +1046,7 @@ impl Interp {
                 if let Some((slot, mutable)) = s.get_mut_entry(name) {
                     if !mutable {
                         return Err(Flow::err(format!(
-                            "'{}' o'zgarmas (=) e'lon qilingan, '<-' bilan o'zgartirib bo'lmaydi",
+                            "'{}' is immutable (declared with =), cannot be changed with '<-'",
                             name
                         )));
                     }
@@ -1060,9 +1068,9 @@ impl Interp {
                     if let Some(frozen) = self.globals_frozen.get() {
                         if frozen.contains_key(name) {
                             return Err(Flow::err(format!(
-                                "'{}' global muzlatilgan (server ishga tushgan) — \
-                                 handler ichidan '<-' bilan o'zgartirib bo'lmaydi; \
-                                 ulashilgan o'zgaruvchan holat uchun db'dan foydalaning",
+                                "'{}' global is frozen (server is running) — \
+                                 cannot be changed with '<-' from inside a handler; \
+                                 use db for shared mutable state",
                                 name
                             )));
                         }
@@ -1096,7 +1104,7 @@ impl Interp {
                 Value::Ctx(c) => c.lock().unwrap().clone(),
                 other => {
                     return Err(Flow::err(format!(
-                        "req.{} <- map kutadi, {} berildi",
+                        "req.{} <- expects a map, got {}",
                         field,
                         other.type_name()
                     )));
@@ -1106,7 +1114,7 @@ impl Interp {
             return Ok(());
         }
         Err(Flow::err(format!(
-            "'.{}' ga '<-' bilan tayinlab bo'lmaydi (faqat req.ctx kabi kontekst maydoni o'zgartiriladi)",
+            "'.{}' cannot be assigned with '<-' (only a context field like req.ctx can be changed)",
             field
         )))
     }
@@ -1126,8 +1134,8 @@ impl Interp {
                 if let Some((slot, mutable)) = s.get_mut_entry(name) {
                     if !mutable {
                         return Err(Flow::err(format!(
-                            "'{}' o'zgarmas (=) e'lon qilingan; blok ichidan ham \
-                             qayta tayinlab bo'lmaydi (uni `<-` bilan e'lon qiling)",
+                            "'{}' is immutable (declared with =); cannot be \
+                             reassigned even from inside a block (declare it with `<-`)",
                             name
                         )));
                     }
@@ -1179,7 +1187,7 @@ impl Interp {
                 .collect(),
             other => {
                 return Err(Flow::err(format!(
-                    "each faqat list/map/range/str ustidan yuradi, {} berildi",
+                    "each only iterates over list/map/range/str, got {}",
                     other.type_name()
                 )));
             }
@@ -1216,7 +1224,7 @@ impl Interp {
     fn exec_each_inf(&self, vars: &[String], body: &[Stmt], env: &Env) -> ExecResult {
         if vars.len() != 1 {
             return Err(Flow::err(
-                "each ... in inf bitta o'zgaruvchi kutadi (each i in inf)",
+                "each ... in inf expects a single variable (each i in inf)",
             ));
         }
         let mut i: i64 = 0;
@@ -1308,7 +1316,7 @@ impl Interp {
                                 }
                             } else {
                                 return Err(Flow::err(format!(
-                                    "map spread (...) faqat map bilan ishlaydi, {} berildi",
+                                    "map spread (...) only works with a map, got {}",
                                     v.type_name()
                                 )));
                             }
@@ -1328,7 +1336,7 @@ impl Interp {
                         )),
                         Value::Flt(x) => Ok(Value::Flt(-x)),
                         other => Err(Flow::err(format!(
-                            "'-' faqat songa, {} berildi",
+                            "'-' only applies to a number, got {}",
                             other.type_name()
                         ))),
                     },
@@ -1354,7 +1362,7 @@ impl Interp {
                         Ok(Value::List(out))
                     }
                     (a, b) => Err(Flow::err(format!(
-                        "range (..) butun son talab qiladi, {}..{} berildi",
+                        "range (..) requires integers, got {}..{}",
                         a.type_name(),
                         b.type_name()
                     ))),
@@ -1362,7 +1370,7 @@ impl Interp {
             }
             // inf faqat `each i in inf` da ma'noli — qiymat sifatida ishlatib bo'lmaydi.
             Expr::Inf => Err(Flow::err(
-                "inf faqat `each i in inf` da ishlatiladi (qiymat emas)",
+                "inf is only used in `each i in inf` (not a value)",
             )),
             Expr::Field { target, name } => {
                 // `env.PORT` — muhit o'zgaruvchisi. `env` built-in ident bo'lib,
@@ -1388,7 +1396,7 @@ impl Interp {
                         return match name.as_str() {
                             "debug" | "info" | "warn" | "err" => self.log_dispatch(name, vec![]),
                             _ => Err(Flow::err(format!(
-                                "log.{} yo'q (debug/info/warn/err)",
+                                "log.{} does not exist (debug/info/warn/err)",
                                 name
                             ))),
                         };
@@ -1453,7 +1461,7 @@ impl Interp {
                         Value::Int(n) => Some(n),
                         other => {
                             return Err(Flow::err(format!(
-                                "fail status int bo'lishi kerak, {} berildi",
+                                "fail status must be an int, got {}",
                                 other.type_name()
                             )));
                         }
@@ -1488,7 +1496,7 @@ impl Interp {
                     return frozen
                         .get(name)
                         .cloned()
-                        .ok_or_else(|| Flow::err(format!("noma'lum nom: {}", name)));
+                        .ok_or_else(|| Flow::err(format!("unknown name: {}", name)));
                 }
                 if let Some(v) = s.get(name) {
                     return Ok(v.clone());
@@ -1496,7 +1504,7 @@ impl Interp {
                 s.parent.clone()
             };
             match parent {
-                Parent::None => return Err(Flow::err(format!("noma'lum nom: {}", name))),
+                Parent::None => return Err(Flow::err(format!("unknown name: {}", name))),
                 Parent::Scope(p) => cur = p,
                 Parent::Root => {
                     // Ota — root (marker). Muzlatilgan bo'lsa root Arc'ga TEGMASDAN
@@ -1508,7 +1516,7 @@ impl Interp {
                         return frozen
                             .get(name)
                             .cloned()
-                            .ok_or_else(|| Flow::err(format!("noma'lum nom: {}", name)));
+                            .ok_or_else(|| Flow::err(format!("unknown name: {}", name)));
                     }
                     cur = self.global.clone();
                 }
@@ -1675,7 +1683,7 @@ impl Interp {
             (op, a, b) if is_num(&a) && is_num(&b) => flt_arith(op, to_f64(&a), to_f64(&b)),
 
             (op, a, b) => Err(Flow::err(format!(
-                "{:?} operatori {} va {} ga qo'llab bo'lmaydi",
+                "{:?} operator cannot be applied to {} and {}",
                 op,
                 a.type_name(),
                 b.type_name()
@@ -1709,7 +1717,7 @@ impl Interp {
                 return match sub.as_str() {
                     "room" => self.arc_self().ws_room_dispatch(name, argv),
                     "data" => self.arc_self().ws_data_dispatch(name, argv),
-                    _ => Err(Flow::err(format!("ws.{} guruhi yo'q", sub))),
+                    _ => Err(Flow::err(format!("ws.{} group does not exist", sub))),
                 };
             }
             // module.func (str.up, math.floor, ...) — `str` o'zgaruvchi emas,
@@ -1777,7 +1785,7 @@ impl Interp {
                     return match name.as_str() {
                         "debug" | "info" | "warn" | "err" => self.log_dispatch(name, argv),
                         _ => Err(Flow::err(format!(
-                            "log.{} yo'q (debug/info/warn/err)",
+                            "log.{} does not exist (debug/info/warn/err)",
                             name
                         ))),
                     };
@@ -1839,7 +1847,7 @@ impl Interp {
                 let f = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| Flow::err("list.filter: funksiya argumenti kerak"))?;
+                    .ok_or_else(|| Flow::err("list.filter: function argument required"))?;
                 let mut out = Vec::new();
                 for x in xs {
                     if self.apply(f.clone(), vec![x.clone()])?.truthy() {
@@ -1852,7 +1860,7 @@ impl Interp {
                 let f = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| Flow::err("list.map: funksiya argumenti kerak"))?;
+                    .ok_or_else(|| Flow::err("list.map: function argument required"))?;
                 let mut out = Vec::with_capacity(xs.len());
                 for x in xs {
                     out.push(self.apply(f.clone(), vec![x.clone()])?);
@@ -1863,10 +1871,10 @@ impl Interp {
                 let mut it = args.into_iter();
                 let mut acc = it
                     .next()
-                    .ok_or_else(|| Flow::err("list.reduce: boshlang'ich qiymat kerak"))?;
+                    .ok_or_else(|| Flow::err("list.reduce: initial value required"))?;
                 let f = it
                     .next()
-                    .ok_or_else(|| Flow::err("list.reduce: funksiya argumenti kerak"))?;
+                    .ok_or_else(|| Flow::err("list.reduce: function argument required"))?;
                 for x in xs {
                     acc = self.apply(f.clone(), vec![acc, x.clone()])?;
                 }
@@ -1878,7 +1886,7 @@ impl Interp {
                 let f = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| Flow::err("list.find: funksiya argumenti kerak"))?;
+                    .ok_or_else(|| Flow::err("list.find: function argument required"))?;
                 for x in xs {
                     if self.apply(f.clone(), vec![x.clone()])?.truthy() {
                         return Ok(x.clone());
@@ -1892,7 +1900,7 @@ impl Interp {
                 let f = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| Flow::err("list.any: funksiya argumenti kerak"))?;
+                    .ok_or_else(|| Flow::err("list.any: function argument required"))?;
                 for x in xs {
                     if self.apply(f.clone(), vec![x.clone()])?.truthy() {
                         return Ok(Value::Bool(true));
@@ -1905,7 +1913,7 @@ impl Interp {
                 let f = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| Flow::err("list.all: funksiya argumenti kerak"))?;
+                    .ok_or_else(|| Flow::err("list.all: function argument required"))?;
                 for x in xs {
                     if !self.apply(f.clone(), vec![x.clone()])?.truthy() {
                         return Ok(Value::Bool(false));
@@ -1927,7 +1935,7 @@ impl Interp {
                     Value::Int(n) => Ok(n.cmp(&0)),
                     Value::Flt(x) => Ok(x.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)),
                     other => Err(Flow::err(format!(
-                        "list.sort: komparator son qaytarishi kerak (manfiy/0/musbat), {} qaytardi",
+                        "list.sort: comparator must return a number (negative/0/positive), got {}",
                         other.type_name()
                     ))),
                 })?;
@@ -1951,7 +1959,7 @@ impl Interp {
             Value::Fn(fv) => {
                 if args.len() != fv.params.len() {
                     return Err(Flow::err(format!(
-                        "{}: {} ta argument kutilgan, {} berildi",
+                        "{}: expected {} arguments, got {}",
                         fv.name,
                         fv.params.len(),
                         args.len()
@@ -1991,7 +1999,7 @@ impl Interp {
                 })
             }
             other => Err(Flow::err(format!(
-                "{} chaqirib bo'lmaydi (funksiya emas)",
+                "{} is not callable (not a function)",
                 other.type_name()
             ))),
         }
@@ -2019,7 +2027,7 @@ impl Interp {
             Value::List(_) | Value::Str(_) => crate::builtins::call_method(t, name, vec![]),
             Value::Nil => Ok(Value::Nil), // nil.x -> nil (xavfsiz navigatsiya)
             other => Err(Flow::err(format!(
-                "{} tipida '.{}' maydoni yo'q",
+                "{} type has no field '.{}'",
                 other.type_name(),
                 name
             ))),
@@ -2045,7 +2053,7 @@ impl Interp {
             }
             (Value::Nil, _) => Ok(Value::Nil),
             (t, k) => Err(Flow::err(format!(
-                "{}[{}] indekslash qo'llab-quvvatlanmaydi",
+                "{}[{}] indexing is not supported",
                 t.type_name(),
                 k.type_name()
             ))),
@@ -2177,13 +2185,13 @@ fn int_arith(op: BinOp, a: i64, b: i64) -> EvalResult {
         BinOp::Mul => Int(a.checked_mul(b).ok_or_else(|| Flow::overflow("*"))?),
         BinOp::Div => {
             if b == 0 {
-                return Err(Flow::err("nolga bo'lish"));
+                return Err(Flow::err("division by zero"));
             }
             Int(a.checked_div(b).ok_or_else(|| Flow::overflow("/"))?)
         }
         BinOp::Mod => {
             if b == 0 {
-                return Err(Flow::err("nolga bo'lish (mod)"));
+                return Err(Flow::err("division by zero (mod)"));
             }
             Int(a.checked_rem(b).ok_or_else(|| Flow::overflow("%"))?)
         }
@@ -2191,7 +2199,7 @@ fn int_arith(op: BinOp, a: i64, b: i64) -> EvalResult {
         BinOp::Le => Bool(a <= b),
         BinOp::Gt => Bool(a > b),
         BinOp::Ge => Bool(a >= b),
-        _ => return Err(Flow::err("ichki: kutilmagan int operatori")),
+        _ => return Err(Flow::err("internal: unexpected int operator")),
     })
 }
 
@@ -2207,7 +2215,7 @@ fn flt_arith(op: BinOp, a: f64, b: f64) -> EvalResult {
         BinOp::Le => Bool(a <= b),
         BinOp::Gt => Bool(a > b),
         BinOp::Ge => Bool(a >= b),
-        _ => return Err(Flow::err("ichki: kutilmagan flt operatori")),
+        _ => return Err(Flow::err("internal: unexpected flt operator")),
     })
 }
 

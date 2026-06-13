@@ -1,220 +1,223 @@
-# Fluxon runtime — arxitektura
+# Fluxon runtime — architecture
 
-Bu hujjat `runtime/` ichidagi interpretator qanday qurilganini tushuntiradi.
-Contributor (odam yoki AI) yangi imkoniyat qo'shishdan oldin shu yerni o'qisin.
+This document explains how the interpreter inside `runtime/` is built. A
+contributor (human or AI) should read this before adding a new feature.
 
-> Tilning **o'zi** qanday ishlashi (sintaksis/semantika): `docs/fluxon-agent.md`
-> (ixcham) yoki `docs/fluxon-human.uz.md` (batafsil). Bu hujjat — **implementatsiya**
-> haqida.
+> How the language **itself** works (syntax/semantics): `docs/fluxon-agent.md`
+> (compact) or `docs/fluxon-human.uz.md` (detailed). This document is about the
+> **implementation**.
 
 ---
 
-## 1. Umumiy ko'rinish
+## 1. Overview
 
-Fluxon **tree-walking interpreter** — AST'ni to'g'ridan-to'g'ri yuradi (bytecode/VM
-yo'q). Rust edition 2024 da yozilgan. Pipeline:
+Fluxon is a **tree-walking interpreter** — it walks the AST directly (no
+bytecode/VM). Written in Rust edition 2024. Pipeline:
 
 ```
-manba (.fx)
-  → token.rs        token turlari + Token.spaced flag
-  → lexer.rs        belgilarni token'ga; INDENT/DEDENT, string interpolatsiya
-  → ast.rs          AST tugunlari: Stmt, Expr
-  → parser.rs       precedence climbing + qavssiz chaqirish (juxtaposition)
-  → value.rs        runtime qiymatlari: Value, NativeFn
-  → interp.rs       AST'ni yurish: scope, control flow (Flow enum), dispatch
-  → builtins.rs     yadro modullari (str/math/rand/json/time) + list/map metodlari
+source (.fx)
+  → token.rs        token types + Token.spaced flag
+  → lexer.rs        characters into tokens; INDENT/DEDENT, string interpolation
+  → ast.rs          AST nodes: Stmt, Expr
+  → parser.rs       precedence climbing + paren-free calls (juxtaposition)
+  → value.rs        runtime values: Value, NativeFn
+  → interp.rs       walking the AST: scope, control flow (Flow enum), dispatch
+  → builtins.rs     core modules (str/math/rand/json/time) + list/map methods
 ```
 
-Batareyalar (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) alohida
-modullarda (`*_mod.rs`) va `interp.rs` dagi dispatch nuqtasidan ulanadi.
+The batteries (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) live in
+separate modules (`*_mod.rs`) and hook in from the dispatch point in `interp.rs`.
 
-CLI kirish: `runtime/src/main.rs` → `fluxon run fayl.fx`.
+CLI entry: `runtime/src/main.rs` → `fluxon run file.fx`.
 
 ---
 
 ## 2. Frontend (lexer / parser)
 
-Fluxon grammatikasi ixcham bo'lgani uchun ikki nozik joy bor — yangi sintaksis
-qo'shsangiz bularni esda tuting:
+Because Fluxon's grammar is compact, there are two subtle spots — keep them in
+mind when adding new syntax:
 
 ### 2.1 INDENT/DEDENT (lexer.rs)
 
-Bloklar `{}` emas, **chekinish** (2 bo'shliq) bilan. Lexer Python kabi
-INDENT/DEDENT token chiqaradi. **Muhim tuzatish:** ko'p qatorli blok-lambda
-(`\req ->\n  ...`) dan keyin DEDENT'lardan so'ng `Newline` push qilinadi —
-aks holda keyingi qator oldingi qavssiz-chaqiruvning argumenti deb yutiladi
-(`emit_indentation` ichida).
+Blocks are not `{}` but **indentation** (2 spaces). The lexer emits Python-like
+INDENT/DEDENT tokens. **Important fix:** after a multi-line block-lambda
+(`\req ->\n  ...`), a `Newline` is pushed after the DEDENTs — otherwise the next
+line is swallowed as an argument to the preceding paren-free call
+(inside `emit_indentation`).
 
-### 2.2 `:` noaniqligi
+### 2.2 `:` ambiguity
 
-`key:val` (Colon ajratuvchi) vs `:sym` (symbol). **Qoida:** `:` oldingi atomga
-(ident/son/`)`/`]`/`"`) yopishgan bo'lsa → Colon, aks holda → Sym.
+`key:val` (Colon separator) vs `:sym` (symbol). **Rule:** if `:` is attached to
+the preceding atom (ident/number/`)`/`]`/`"`) → Colon, otherwise → Sym.
 `status::open` → Colon + Sym.
 
-### 2.3 Qavssiz chaqirish (juxtaposition) — `no_app` flag
+### 2.3 Paren-free call (juxtaposition) — the `no_app` flag
 
-`f a b` qavssiz chaqiruv. Lekin list/map literal ichida bu o'chiriladi (`no_app`
-bayrog'i): `[a b]` ikki element, `f` chaqiruvi emas. Chaqiruv kerak bo'lsa qavs:
-`{a:(f x)}`.
+`f a b` is a paren-free call. But inside a list/map literal this is disabled (the
+`no_app` flag): `[a b]` is two elements, not a call of `f`. If a call is needed,
+use parens: `{a:(f x)}`.
 
 ### 2.4 `Token.spaced` flag
 
-`arr[i]` (tutash `[` → indekslash) vs `f "x" [a]` (bo'shliqli `[` → alohida
-list argument). `parse_postfix` da: `Tok::LBracket if !self.spaced()` → indeks.
-Bu `db.one "sql" [params]` spec sintaksisini ishlatadi.
+`arr[i]` (a `[` touching the atom → indexing) vs `f "x" [a]` (a spaced `[` → a
+separate list argument). In `parse_postfix`: `Tok::LBracket if !self.spaced()` →
+index. This powers the `db.one "sql" [params]` spec syntax.
 
-> Yangi sintaksis qo'shganda: avval `token.rs`/`lexer.rs`, keyin `ast.rs`,
-> keyin `parser.rs`. Test'ni `main.rs::mod tests` ga integratsiya sifatida yozing.
+> When adding new syntax: first `token.rs`/`lexer.rs`, then `ast.rs`, then
+> `parser.rs`. Write the test as an integration test in `main.rs::mod tests`.
 
 ---
 
 ## 3. Interpreter (interp.rs)
 
-### 3.1 Scope va `Parent` enum (perf-kritik)
+### 3.1 Scope and the `Parent` enum (perf-critical)
 
-Scope `Env = Arc<RwLock<Scope>>` (parking_lot RwLock — parallel read).
-`Scope.vars` — `Vec<(Box<str>, Value, bool)>` (bool = mutable), HashMap emas:
-fn/blok scope'lari 0-4 nom ushlaydi, linear scan ikki HashMap'dan tez.
+A scope is `Env = Arc<RwLock<Scope>>` (parking_lot RwLock — parallel reads).
+`Scope.vars` is a `Vec<(Box<str>, Value, bool)>` (bool = mutable), not a HashMap:
+fn/block scopes hold 0–4 names, and a linear scan beats two HashMaps.
 
-**`Parent` enum — Arc contention optimizatsiyasi (buzmang):**
+**The `Parent` enum — an Arc contention optimization (don't break it):**
 
 ```rust
 enum Parent { None, Root, Scope(Env) }
 ```
 
-Top-level fn'lar root Arc'ni **saqlamaydi**, faqat `Parent::Root` **marker**
-ushlaydi. `lookup` `Parent::Root` da: muzlatilgan (`freeze_globals`) bo'lsa
-lock-free snapshot'dan o'qiydi, aks holda `self.global.clone()`. Natija: 8 thread
-bitta root cache line'da urishmaydi → manfiy scaling musbatga aylandi.
+Top-level fns do **not** hold the root Arc, only a `Parent::Root` **marker**. On
+`Parent::Root`, `lookup` reads from the frozen (`freeze_globals`) lock-free
+snapshot if frozen, otherwise `self.global.clone()`. The result: 8 threads no
+longer collide on a single root cache line → negative scaling turned positive.
 
-> Bu tarix: avval har fn chaqiruv root Arc refcount'ini atomik klonlardi → 8
-> thread'da `Arc::drop_slow` + `lock_shared_slow` contention. Tushunmasdan
-> `Parent`'ni `Option<Env>`'ga qaytarmang — regressiya.
+> The history: previously every fn call atomically cloned the root Arc refcount →
+> `Arc::drop_slow` + `lock_shared_slow` contention on 8 threads. Don't revert
+> `Parent` to `Option<Env>` without understanding this — it's a regression.
 
-### 3.2 Control flow — `Flow` enum
+### 3.2 Control flow — the `Flow` enum
 
-Erta chiqish (`ret`, `skip`, `stop`, `fail`, `!`) Rust `Result`/`Flow` enum
-orqali yuqoriga uzatiladi (`EvalResult`). `fail` → `Flow::Fail` → HTTP javobda
-JSON xatoga aylanadi.
+Early exits (`ret`, `skip`, `stop`, `fail`, `!`) are propagated upward via Rust's
+`Result`/`Flow` enum (`EvalResult`). `fail` → `Flow::Fail` → turns into a JSON
+error in the HTTP response.
 
-### 3.3 Dispatch — battery'lar qayerga ulanadi
+### 3.3 Dispatch — where batteries hook in
 
-`eval_call` (`interp.rs`) — modul nomini ko'rib yo'naltiradi:
+`eval_call` (`interp.rs`) routes by looking at the module name:
 
 ```rust
-// interp.rs::eval_call ichida (taxminiy):
+// inside interp.rs::eval_call (roughly):
 if modname == "http" { return self.arc_self().http_dispatch(name, argv); }
 if modname == "db"   { return self.arc_self().db_dispatch(name, argv); }
 if is_module(modname) { return call_module(modname, name, argv); }  // str/math/...
 ```
 
-`arc_self()` — `&self` dan `Arc<Interp>` tiklaydi (`this: OnceLock<Weak<Interp>>`
-orqali). Bu spawn_blocking'da `Interp`'ni thread'larga uzatish uchun kerak.
+`arc_self()` rebuilds an `Arc<Interp>` from `&self` (via
+`this: OnceLock<Weak<Interp>>`). This is needed to pass `Interp` to threads in
+spawn_blocking.
 
-**Argument'siz modul funksiyasi** (`time.now`) parser'da `Call` emas, `Field`
-bo'lib keladi. `Expr::Field` handler'da `is_module(id) && lookup(id).is_err()`
-bo'lsa argument'siz `call_module(id, name, vec![])` chaqiriladi.
+**A no-argument module function** (`time.now`) arrives in the parser not as a
+`Call` but as a `Field`. In the `Expr::Field` handler, if
+`is_module(id) && lookup(id).is_err()`, it calls `call_module(id, name, vec![])`
+with no arguments.
 
 ### 3.4 `tbl` schema registry
 
-`Stmt::Tbl` → `register_tbl` (schema'ni `Interp.schema` ga yozadi). `run()` da
-`FnDecl` va `Tbl` **hoisting** qilinadi (oldindan ro'yxatdan o'tadi). Schema
-`db` battery uchun: `sym`/`json` ustun konversiyasi, auto-migration.
+`Stmt::Tbl` → `register_tbl` (writes the schema into `Interp.schema`). In `run()`,
+`FnDecl` and `Tbl` are **hoisted** (registered up front). The schema is for the
+`db` battery: `sym`/`json` column conversion, auto-migration.
 
 ---
 
-## 4. Batareyalar
+## 4. Batteries
 
 ### 4.1 `http` (http_mod.rs)
 
-- Server: tokio + hyper 1.x. Har request **`spawn_blocking`** ichida bajariladi
-  → Fluxon'ning sinxron interpretatori tokio worker'larini bloklamaydi, real
-  parallel ishlaydi (`Value: Send+Sync` shuni ta'minlaydi).
+- Server: tokio + hyper 1.x. Every request runs inside **`spawn_blocking`** → so
+  Fluxon's synchronous interpreter doesn't block the tokio workers, and it runs
+  truly in parallel (`Value: Send+Sync` guarantees this).
 - `http.on :method "/path/:id" \req -> ...` — Route/Seg, `match_route`.
-- `rep status body` — `{__resp:true status body}` map (builtins).
-- Klient: `http.get/post/put/del` — pooled hyper Client.
-- `http.serve port` / `ws.serve port` / `cron.run` **darhol bloklamaydi** —
-  `Interp.pending_servers` ro'yxatiga deferred tavsif qo'shadi. Top-level kod
-  tugagach `serve_mod::run_pending` boshqaradi: tarmoq serveri (http/ws) bo'lsa
-  global'ni bir marta `freeze_globals` bilan muzlatadi, BITTA umumiy tokio runtime
-  har serverni `spawn` qiladi va bloklaydi (cron scheduler o'z fon thread'ida).
-  Faqat `cron.run` bo'lsa (server yo'q): runtime/freeze KERAK EMAS — asosiy
-  thread uxlatib turiladi. Shuning uchun HTTP + WS + cron.run **ixtiyoriy tartibda**
-  birga ishlaydi; HTTP handler ichidan `ws.room.send` WS ulanishlariga yetadi
-  (shared `Interp`). Bu yagona joy bo'lgani uchun har bloklovchi "run"
-  (#18 va #42 da hal qilingan) bir-birini o'ldirmaydi.
+- `rep status body` — a `{__resp:true status body}` map (builtins).
+- Client: `http.get/post/put/del` — a pooled hyper Client.
+- `http.serve port` / `ws.serve port` / `cron.run` **do not block immediately** —
+  they add a deferred descriptor to the `Interp.pending_servers` list. Once
+  top-level code finishes, `serve_mod::run_pending` takes over: if there's a
+  network server (http/ws), it freezes the globals once with `freeze_globals`
+  (a lock-free snapshot), and ONE shared tokio runtime `spawn`s each server and
+  blocks (the cron scheduler on its own background thread). If only `cron.run`
+  (no server): no runtime/freeze is NEEDED — the main thread is just put to
+  sleep. So HTTP + WS + cron.run run together in **any order**; an HTTP handler
+  can call `ws.room.send` and reach WS connections (shared `Interp`). Because
+  this is the single place, every blocking "run" (fixed in #18 and #42) doesn't
+  kill the others.
 
 ### 4.2 `db` (db_mod.rs)
 
-- **`Db` trait orqasiga yashiringan.** Fluxon kodi (`db.*`) hech qachon
-  o'zgarmaydi; backend `$DATABASE_URL` sxemasidan tanlanadi (`sqlite:`/`postgres:`
-  /`mysql:`). Default **SQLite** (`rusqlite` bundled — server kerak emas).
-- `postgres`/`mysql` hozir `Err` stub — keyin `open_from_env` da **additiv**
-  ulanadi. Agent boshqa db uchun alohida paketda chalkashmaydi.
-- Connection **pool** (`Mutex<Vec<Connection>>`). Tx alohida connection oladi →
-  tx davomida boshqa so'rovlar bloklanmaydi.
+- **Hidden behind the `Db` trait.** Fluxon code (`db.*`) never changes; the
+  backend is chosen from the `$DATABASE_URL` scheme (`sqlite:`/`postgres:`
+  /`mysql:`). Default is **SQLite** (`rusqlite` bundled — no server needed).
+- `postgres`/`mysql` are an `Err` stub for now — later they plug in
+  **additively** in `open_from_env`. An agent doesn't get tangled up in a
+  separate package for another db.
+- A connection **pool** (`Mutex<Vec<Connection>>`). A tx takes a separate
+  connection → other queries aren't blocked during a tx.
 - `db.tx \-> ...` — `BEGIN IMMEDIATE` (race-safe). Nested tx → SAVEPOINT.
   `fail`/`!` → rollback.
 - `tbl` → `CREATE TABLE IF NOT EXISTS` **auto-migration** (zero-setup).
 
 ---
 
-## 5. Yangi battery qo'shish (retsept)
+## 5. Adding a new battery (recipe)
 
-Eng ko'p takrorlanadigan contributor ishi. `http_mod.rs`/`db_mod.rs` naqshini
-takrorlang:
+The most common contributor task. Follow the `http_mod.rs`/`db_mod.rs` pattern:
 
-1. **Spec'ni o'qing.** `docs/fluxon-agent.md` da battery sintaksisi belgilangan —
-   bu **manba haqiqat**. O'zingizdan sintaksis o'ylab topmang.
-2. **Yangi modul fayli** yarating: `runtime/src/<nom>_mod.rs`. Ichida:
-   `impl Interp { fn <nom>_dispatch(&self, func: &str, args: Vec<Value>) -> ... }`
-   va har funksiya uchun yordamchi.
-3. **`main.rs`** ga `mod <nom>_mod;` qo'shing.
-4. **Dispatch ulang** (`interp.rs::eval_call`): `http`/`db` qatorida
-   `if modname == "<nom>" { return self.arc_self().<nom>_dispatch(name, argv); }`.
-   Argument'siz funksiya bo'lsa (`time.now` kabi) `Expr::Field` handler'iga ham.
-   Toza yadro moduli bo'lsa (IO'siz, `str`/`math` kabi) — `builtins.rs`
-   `is_module`/`call_module` ga qo'shish yetadi.
-5. **Dependency** kerak bo'lsa `Cargo.toml` ga qo'shing. Izoh bilan **nega**
-   kerakligini yozing (mavjud deps shunday izohlangan).
-6. **Test:** native test modul ichida + integratsiya testi `main.rs::mod tests`.
-   IO/server bo'lsa, real ishga tushirib tekshiring.
-7. **`Value: Send + Sync` ni buzmang.** Yangi qiymat turi kiritsangiz Send+Sync.
+1. **Read the spec.** Battery syntax is specified in `docs/fluxon-agent.md` —
+   this is the **source of truth**. Don't invent syntax yourself.
+2. **Create a new module file**: `runtime/src/<name>_mod.rs`. Inside:
+   `impl Interp { fn <name>_dispatch(&self, func: &str, args: Vec<Value>) -> ... }`
+   plus a helper per function.
+3. **Add `mod <name>_mod;`** to `main.rs`.
+4. **Hook up dispatch** (`interp.rs::eval_call`): alongside the `http`/`db` line,
+   `if modname == "<name>" { return self.arc_self().<name>_dispatch(name, argv); }`.
+   If it has a no-argument function (like `time.now`), also in the `Expr::Field`
+   handler. If it's a pure core module (no IO, like `str`/`math`) — adding it to
+   `builtins.rs` `is_module`/`call_module` is enough.
+5. **If you need a dependency**, add it to `Cargo.toml`. Write a comment
+   explaining **why** it's needed (existing deps are commented this way).
+6. **Test:** a native test inside the module + an integration test in
+   `main.rs::mod tests`. If it's IO/server, verify it by actually running it.
+7. **Don't break `Value: Send + Sync`.** If you introduce a new value type, make
+   it Send+Sync.
 
-> Eslatma: dependency "yo'q" qoidasi faqat **Fluxon tili foydalanuvchisiga**
-> taalluqli (ular `npm install` qilmaydi). Runtime ICHIDA Rust crate'lar OK.
-
----
-
-## 6. Test strategiyasi
-
-Ikki qatlam:
-
-- **Rust unit/integratsiya testlari** (`cargo test`) — modul ichidagi
-  `#[cfg(test)]` + `main.rs::mod tests` (`.fx` kodini run qilib natija tekshirish,
-  `run(src)` yordamchisi). DB testlari `DB_TEST_LOCK` bilan serializatsiya.
-- **`.fx` e2e testlari** (`runtime/tests-fx/`) — Fluxon'ning **o'zida** yozilgan,
-  foydalanuvchi nuqtai-nazaridan tasdiqlovchi testlar. `run_all.sh` bilan ishga
-  tushadi. Yangi battery qo'shsangiz shu uslubda `NN_*.fx` fayl qo'shing.
+> Note: the "no dependencies" rule applies only to the **Fluxon language user**
+> (they don't `npm install`). INSIDE the runtime, Rust crates are OK.
 
 ---
 
-## 7. Batareyalar holati
+## 6. Test strategy
 
-`docs/fluxon-agent.md` da spetsifikatsiyalangan **barcha batareyalar**
-implementatsiya qilingan:
+Two layers:
 
-| Battery | Modul | Izoh |
+- **Rust unit/integration tests** (`cargo test`) — `#[cfg(test)]` inside a module
+  + `main.rs::mod tests` (running `.fx` code and checking the result, the
+  `run(src)` helper). DB tests are serialized with `DB_TEST_LOCK`.
+- **`.fx` e2e tests** (`runtime/tests-fx/`) — written in Fluxon **itself**,
+  asserting from the user's point of view. Run via `run_all.sh`. When you add a
+  new battery, add an `NN_*.fx` file in this style.
+
+---
+
+## 7. Battery status
+
+**All batteries** specified in `docs/fluxon-agent.md` are implemented:
+
+| Battery | Module | Note |
 |---------|-------|------|
-| `http` | `http_mod.rs` | server + klient + middleware |
+| `http` | `http_mod.rs` | server + client + middleware |
 | `db` | `db_mod.rs` | SQLite, pool, tx, auto-migration (postgres/mysql stub) |
 | `ai` | `ai_mod.rs` | Anthropic Messages API |
-| `auth` | `auth_mod.rs` | JWT HS256 + parol hash (argon2id) |
-| `crypto` | `crypto_mod.rs` | sha256/hmac/b64/hex/uuid (toza modul — call_module orqali) |
+| `auth` | `auth_mod.rs` | JWT HS256 + password hash (argon2id) |
+| `crypto` | `crypto_mod.rs` | sha256/hmac/b64/hex/uuid (pure module — via call_module) |
 | `ws` | `ws_mod.rs` | websocket server, room/data |
-| `cron` | `cron_mod.rs` | rejalashtirilgan vazifalar |
-| `queue` | `queue_mod.rs` | fon ishlari navbati |
+| `cron` | `cron_mod.rs` | scheduled tasks |
+| `queue` | `queue_mod.rs` | background job queue |
 | `reg` | `reg_mod.rs` | tool registry |
 
-Keyingi ishlar — mavjud batareyalarni chuqurlashtirish (masalan `db` uchun
-postgres/mysql backend) va yangi til imkoniyatlari. Yangi battery naqshi §5 da.
+Next steps — deepening the existing batteries (e.g. a postgres/mysql backend for
+`db`) and new language features. The new-battery pattern is in §5.

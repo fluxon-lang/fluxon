@@ -1,13 +1,13 @@
-// WS battery end-to-end testi — haqiqiy WebSocket klient bilan.
+// WS battery end-to-end test -- with a real WebSocket client.
 //
-// `fluxon` binary'ni subprocess sifatida ishga tushiramiz (ws_chat.fx serverini),
-// keyin tokio-tungstenite klient bilan ulanib connect/message/room broadcast
-// hayot tsiklini tekshiramiz. Bu unit test emas, to'liq oqim integratsiyasi:
-// handshake -> :connect hello -> join -> say broadcast -> ikkinchi klientga yetib
-// borishi.
+// We run the `fluxon` binary as a subprocess (the ws_chat.fx server), then
+// connect with a tokio-tungstenite client and check the connect/message/room
+// broadcast life cycle. This is not a unit test, it's a full-flow integration:
+// handshake -> :connect hello -> join -> say broadcast -> reaching the second
+// client.
 //
-// Port to'qnashuvidan qochish uchun har test alohida ws skriptini vaqtinchalik
-// faylga yozadi va boshqa-boshqa portda ishlaydi.
+// To avoid port collisions, each test writes its own ws script to a temporary
+// file and runs on a different port.
 
 use std::io::Write;
 use std::process::{Child, Command};
@@ -17,14 +17,14 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-// Berilgan port uchun ws skriptini vaqtinchalik faylga yozib, fluxon serverini
-// ishga tushiradi. Serverni o'chirish uchun `Child` qaytaradi.
+// Writes the ws script for the given port to a temporary file and starts the
+// fluxon server. Returns the `Child` so the server can be shut down.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     spawn_server_env(port, script, &[])
 }
 
-// `spawn_server` ning env o'zgaruvchilarini beradigan varianti. Env faqat shu
-// subprocess'ga ta'sir qiladi (boshqa testlar bilan poyga yo'q).
+// Variant of `spawn_server` that supplies env variables. The env affects only
+// this subprocess (no race with other tests).
 fn spawn_server_env(port: u16, script: &str, env: &[(&str, &str)]) -> (Child, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("fluxon_ws_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
@@ -41,7 +41,7 @@ fn spawn_server_env(port: u16, script: &str, env: &[(&str, &str)]) -> (Child, st
     (child, path)
 }
 
-// Port LISTEN bo'lguncha kutadi (server boot). Maks ~3s.
+// Waits until the port is LISTENing (server boot). Max ~3s.
 async fn wait_port(port: u16) {
     for _ in 0..60 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -55,7 +55,7 @@ async fn wait_port(port: u16) {
     panic!("port {} ochilmadi", port);
 }
 
-// Keyingi matn xabarini kutadi (ping/pong/binary'ni o'tkazib yuboradi). Timeout.
+// Waits for the next text message (skips ping/pong/binary). With timeout.
 async fn next_text<S>(ws: &mut S) -> String
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -63,7 +63,7 @@ where
     next_text_within(ws, Duration::from_secs(3)).await
 }
 
-// `next_text` ning kutish muddatini beradigan varianti (sekin handler testi).
+// Variant of `next_text` that supplies the wait duration (slow handler test).
 async fn next_text_within<S>(ws: &mut S, dur: Duration) -> String
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -73,8 +73,8 @@ where
             match ws.next().await {
                 Some(Ok(Message::Text(t))) => return t.to_string(),
                 Some(Ok(_)) => continue,
-                Some(Err(e)) => panic!("ws o'qish xatosi: {}", e),
-                None => panic!("ulanish kutilmaganda yopildi"),
+                Some(Err(e)) => panic!("ws read error: {}", e),
+                None => panic!("connection closed unexpectedly"),
             }
         }
     };
@@ -104,7 +104,7 @@ ws.on :message \conn raw ->
 ws.serve PORT
 "#;
 
-// Child drop bo'lganda jarayonni o'ldirish uchun guard.
+// Guard to kill the process when Child is dropped.
 struct Killer(Child);
 impl Drop for Killer {
     fn drop(&mut self) {
@@ -124,10 +124,10 @@ async fn connect_hello_and_session() {
     let url = format!("ws://127.0.0.1:{}", port);
     let (mut ws, _) = connect_async(&url).await.expect("ulanish");
 
-    // :connect handler hello yuboradi (conn.id bilan).
+    // The :connect handler sends hello (with conn.id).
     let hello = next_text(&mut ws).await;
-    assert!(hello.contains("\"hello\""), "hello kutilgan: {}", hello);
-    assert!(hello.contains("\"id\""), "conn.id kutilgan: {}", hello);
+    assert!(hello.contains("\"hello\""), "expected hello: {}", hello);
+    assert!(hello.contains("\"id\""), "expected conn.id: {}", hello);
 
     let _ = std::fs::remove_file(&path);
 }
@@ -144,17 +144,17 @@ async fn room_broadcast_reaches_other_client() {
     let (mut a, _) = connect_async(&url).await.expect("klient A ulanish");
     let (mut b, _) = connect_async(&url).await.expect("klient B ulanish");
 
-    // Ikkalasi ham hello oladi.
+    // Both receive hello.
     let _ = next_text(&mut a).await;
     let _ = next_text(&mut b).await;
 
-    // Ikkalasi ham "general" xonasiga qo'shiladi.
+    // Both join the "general" room.
     a.send(Message::text(
         r#"{"t":"join","room":"general","name":"alfa"}"#,
     ))
     .await
     .unwrap();
-    // A o'zining join-broadcast'ini oladi.
+    // A receives its own join broadcast.
     let _ = next_text(&mut a).await;
 
     b.send(Message::text(
@@ -162,37 +162,38 @@ async fn room_broadcast_reaches_other_client() {
     ))
     .await
     .unwrap();
-    // B qo'shilgach, joined broadcast IKKALA klientga ketadi (online:2).
+    // After B joins, the joined broadcast goes to BOTH clients (online:2).
     let a_join2 = next_text(&mut a).await;
     let b_join2 = next_text(&mut b).await;
     assert!(
         a_join2.contains("\"online\":2"),
-        "A online=2 kutdi: {}",
+        "A expected online=2: {}",
         a_join2
     );
-    assert!(
-        b_join2.contains("beta"),
-        "B o'z joinini ko'rdi: {}",
-        b_join2
-    );
+    assert!(b_join2.contains("beta"), "B saw its own join: {}", b_join2);
 
-    // A "say" yuboradi -> B ham, A ham oladi (xonadagi hammaga).
+    // A sends "say" -> both B and A receive it (to everyone in the room).
     a.send(Message::text(
-        r#"{"t":"say","room":"general","body":"salom"}"#,
+        r#"{"t":"say","room":"general","body":"hello"}"#,
     ))
     .await
     .unwrap();
     let b_msg = next_text(&mut b).await;
-    assert!(b_msg.contains("\"msg\""), "B msg kutdi: {}", b_msg);
-    assert!(b_msg.contains("salom"), "B body 'salom' kutdi: {}", b_msg);
-    assert!(b_msg.contains("alfa"), "B from='alfa' kutdi: {}", b_msg);
+    assert!(b_msg.contains("\"msg\""), "B expected msg: {}", b_msg);
+    assert!(
+        b_msg.contains("hello"),
+        "B expected body 'hello': {}",
+        b_msg
+    );
+    assert!(b_msg.contains("alfa"), "B expected from='alfa': {}", b_msg);
 
     let _ = std::fs::remove_file(&path);
 }
 
-// HTTP + WS bir jarayonda: http.serve va ws.serve birga e'lon qilingan server.
-// HTTP POST /vote -> handler ichidan ws.room.send "live" broadcast. WS klient
-// shu broadcast'ni oladi. Bu issue #18 markazidagi cross-protocol oqim.
+// HTTP + WS in one process: a server with http.serve and ws.serve declared
+// together. HTTP POST /vote -> from inside the handler, a ws.room.send "live"
+// broadcast. The WS client receives this broadcast. This is the cross-protocol
+// flow at the center of issue #18.
 const POLL_SCRIPT: &str = r#"
 ws.on :connect \conn ->
   ws.room.join conn "live"
@@ -206,8 +207,8 @@ http.serve HTTP_PORT
 ws.serve WS_PORT
 "#;
 
-// Raw HTTP/1.1 POST (reqwest'siz) — tokio TcpStream ustida. JSON body yuborib,
-// status qatorini qaytaradi (tasdiq uchun "200" qidiriladi).
+// Raw HTTP/1.1 POST (without reqwest) -- over a tokio TcpStream. Sends a JSON
+// body and returns the status line (search for "200" to assert).
 async fn http_post_json(port: u16, path: &str, body: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -233,40 +234,41 @@ async fn http_and_ws_serve_together_cross_protocol() {
     let script = POLL_SCRIPT
         .replace("HTTP_PORT", &http_port.to_string())
         .replace("WS_PORT", &ws_port.to_string());
-    // spawn_server skript yo'lini WS portga bog'lab nomlaydi — to'qnashuv yo'q.
+    // spawn_server names the script path by the WS port -- no collision.
     let (child, path) = spawn_server(ws_port, &script);
     let _killer = Killer(child);
-    // Ikkala server ham ko'tarilishini kutamiz (bir jarayonda birga).
+    // Wait for both servers to come up (together in one process).
     wait_port(ws_port).await;
     wait_port(http_port).await;
 
-    // WS klient ulanadi va "live" xonasiga qo'shiladi (:connect handler).
+    // The WS client connects and joins the "live" room (:connect handler).
     let url = format!("ws://127.0.0.1:{}", ws_port);
     let (mut ws, _) = connect_async(&url).await.expect("ws ulanish");
-    // room.join darhol bo'ladi; klientga xabar yuborilmaydi — kichik pauza.
+    // room.join happens immediately; no message is sent to the client -- small pause.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // HTTP POST yuboramiz — handler ichidan WS room'ga broadcast qo'zg'aladi.
+    // We send an HTTP POST -- from inside the handler a broadcast to the WS room is triggered.
     let resp = http_post_json(http_port, "/vote", r#"{"msg":"alfa"}"#).await;
-    assert!(resp.contains("200"), "HTTP 200 kutilgan: {}", resp);
+    assert!(resp.contains("200"), "expected HTTP 200: {}", resp);
 
-    // WS klient HTTP handler qo'zg'agan broadcast'ni oladi — birga ishlash isboti.
+    // The WS client receives the broadcast triggered by the HTTP handler -- proof they work together.
     let got = next_text(&mut ws).await;
-    assert!(got.contains("\"vote\""), "vote broadcast kutilgan: {}", got);
+    assert!(got.contains("\"vote\""), "expected vote broadcast: {}", got);
     assert!(
         got.contains("alfa"),
-        "broadcast body 'alfa' kutilgan: {}",
+        "expected broadcast body 'alfa': {}",
         got
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// cron.run http.serve'dan OLDIN kelsa ham serverni bloklamasligi kerak (issue #42).
-// Ilgari cron.run `loop { sleep }` bilan o'zidan keyingi http.serve'ni o'ldirardi —
-// port hech qachon ochilmasdi. Endi cron.run deferred: scheduler fonda, http.serve
-// ko'tariladi. Cron daqiqalik bo'lgani uchun bu yerda handler OTILISHINI emas,
-// DEFERRED semantikani tekshiramiz: server javob bersa, cron.run bloklamagani isbot.
+// cron.run must not block the server even if it comes BEFORE http.serve (issue #42).
+// Previously cron.run with `loop { sleep }` killed the http.serve that followed it --
+// the port never opened. Now cron.run is deferred: the scheduler runs in the
+// background, http.serve comes up. Since cron is minute-granular, here we check
+// the DEFERRED semantics, not that the handler FIRES: if the server responds,
+// that proves cron.run did not block.
 const CRON_HTTP_SCRIPT: &str = r#"
 cron.on "* * * * *" \->
   log "tick"
@@ -282,14 +284,14 @@ http.serve HTTP_PORT
 async fn cron_run_does_not_block_http_serve() {
     let http_port = 8316;
     let script = CRON_HTTP_SCRIPT.replace("HTTP_PORT", &http_port.to_string());
-    // spawn_server skript yo'lini portga bog'lab nomlaydi — bu yerda http portni
-    // identifikator sifatida beramiz (WS yo'q).
+    // spawn_server names the script path by the port -- here we pass the http port
+    // as the identifier (no WS).
     let (child, path) = spawn_server(http_port, &script);
     let _killer = Killer(child);
-    // cron.run bloklasa, http.serve hech qachon ishga tushmaydi -> wait_port panic.
+    // If cron.run blocks, http.serve never starts -> wait_port panics.
     wait_port(http_port).await;
 
-    // Server haqiqatan so'rovga javob beradi (cron.run undan keyin kelsa ham).
+    // The server really responds to the request (even if cron.run comes after it).
     let resp = http_post_json(http_port, "/ping", "").await;
     assert!(
         resp.contains("200") || resp.contains("ok"),
@@ -300,9 +302,9 @@ async fn cron_run_does_not_block_http_serve() {
     let _ = std::fs::remove_file(&path);
 }
 
-// Server o'zi davriy ping yuboradi — half-open (o'lik) ulanishlarni aniqlash
-// uchun (issue #107). Ping oralig'ini `FLUXON_WS_PING_SECS=1` bilan tezlashtiramiz
-// va klient ~1s ichida Ping frame'ini olishini tekshiramiz.
+// The server sends a periodic ping itself -- to detect half-open (dead)
+// connections (issue #107). We speed up the ping interval with
+// `FLUXON_WS_PING_SECS=1` and check that the client receives a Ping frame within ~1s.
 const PING_SCRIPT: &str = r#"
 use ws
 
@@ -323,15 +325,15 @@ async fn server_sends_periodic_ping() {
     let url = format!("ws://127.0.0.1:{}", port);
     let (mut ws, _) = connect_async(&url).await.expect("ulanish");
 
-    // ~1s ichida server ping yuborishi kerak. Ping frame klientga ham yetadi
-    // (tokio-tungstenite avtomatik pong qaytaradi, lekin frame'ni ko'rsatadi).
+    // Within ~1s the server must send a ping. The Ping frame reaches the client too
+    // (tokio-tungstenite replies pong automatically, but still surfaces the frame).
     let fut = async {
         loop {
             match ws.next().await {
                 Some(Ok(Message::Ping(_))) => return,
                 Some(Ok(_)) => continue,
-                Some(Err(e)) => panic!("ws o'qish xatosi: {}", e),
-                None => panic!("ulanish kutilmaganda yopildi"),
+                Some(Err(e)) => panic!("ws read error: {}", e),
+                None => panic!("connection closed unexpectedly"),
             }
         }
     };
@@ -342,10 +344,10 @@ async fn server_sends_periodic_ping() {
     let _ = std::fs::remove_file(&path);
 }
 
-// Uzoq handler (ping oralig'idan oshadigan) select loop'ni bloklaganda, o'tkazib
-// yuborilgan ping tick'lari burst bo'lib ulanishni noto'g'ri yopmasligi kerak
-// (MissedTickBehavior::Delay). Handler `time.sleep` bilan bloklaydi — u
-// spawn_blocking'da ishlaydi, ya'ni reader loop'ning await'ini ushlab turadi.
+// When a long handler (exceeding the ping interval) blocks the select loop, the
+// missed ping ticks must not burst and wrongly close the connection
+// (MissedTickBehavior::Delay). The handler blocks via `time.sleep` -- it runs in
+// spawn_blocking, i.e. it holds up the reader loop's await.
 const SLOW_HANDLER_SCRIPT: &str = r#"
 use ws
 
@@ -361,7 +363,7 @@ ws.serve PORT
 async fn long_handler_does_not_kill_connection() {
     let port = 9316;
     let script = SLOW_HANDLER_SCRIPT.replace("PORT", &port.to_string());
-    // Ping oralig'i 1s: 2.5s handler 2 oraliqdan oshadi → burst xavfi.
+    // Ping interval 1s: the 2.5s handler exceeds 2 intervals -> burst risk.
     let (child, path) = spawn_server_env(port, &script, &[("FLUXON_WS_PING_SECS", "1")]);
     let _killer = Killer(child);
     wait_port(port).await;
@@ -369,28 +371,29 @@ async fn long_handler_does_not_kill_connection() {
     let url = format!("ws://127.0.0.1:{}", port);
     let (mut ws, _) = connect_async(&url).await.expect("ulanish");
 
-    // "slow" — handler 2.5s bloklaydi, keyin javob qaytaradi.
+    // "slow" -- the handler blocks 2.5s, then returns a response.
     ws.send(Message::text("slow")).await.unwrap();
     let first = next_text_within(&mut ws, Duration::from_secs(6)).await;
-    assert_eq!(first, "ok:slow", "sekin handler javobi kutilgan");
+    assert_eq!(first, "ok:slow", "expected slow handler response");
 
-    // Eng muhimi: ulanish hali tirik — burst tick uni yopmadi. Yangi xabar
-    // tezda javob olishi kerak (yopilgan bo'lsa next_text timeout/panic beradi).
+    // Most importantly: the connection is still alive -- the burst tick did not
+    // close it. A new message must get a quick response (if closed, next_text
+    // times out / panics).
     ws.send(Message::text("again")).await.unwrap();
     let second = next_text_within(&mut ws, Duration::from_secs(3)).await;
     assert_eq!(
         second, "ok:again",
-        "uzoq handler'dan keyin ulanish noto'g'ri yopilgan"
+        "connection wrongly closed after a long handler"
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// review P2 post-ping holati: server ping yuborgach (awaiting_pong=true), mijoz
-// hali ping'ni o'qib pong qaytarmasdan turib sekin xabar yuboradi. Handler
-// `fire_handler().await` da bloklagani uchun pong (xabar orqasida navbatda)
-// o'qilmaydi — eski mantiqда keyingi tick sog'lom ulanishni yopardi. Endi xabar
-// o'zi tiriklik isboti, ulanish saqlanadi.
+// review P2 post-ping state: after the server sends a ping (awaiting_pong=true),
+// the client sends a slow message before it has read the ping and replied pong.
+// Because the handler blocks in `fire_handler().await`, the pong (queued behind
+// the message) is not read -- in the old logic the next tick closed a healthy
+// connection. Now the message itself is proof of liveness, the connection is kept.
 #[tokio::test]
 async fn slow_handler_with_outstanding_ping_keeps_connection() {
     let port = 9317;
@@ -402,28 +405,28 @@ async fn slow_handler_with_outstanding_ping_keeps_connection() {
     let url = format!("ws://127.0.0.1:{}", port);
     let (mut ws, _) = connect_async(&url).await.expect("ulanish");
 
-    // ~1.3s o'qimaymiz: server 1s'da ping yuboradi (awaiting_pong=true), lekin
-    // mijoz ping'ni o'qimagani uchun pong hali qaytmaydi.
+    // We don't read for ~1.3s: the server sends a ping at 1s (awaiting_pong=true),
+    // but since the client has not read the ping, no pong is returned yet.
     tokio::time::sleep(Duration::from_millis(1300)).await;
 
-    // Ping kutilayotgan holatda sekin xabar (handler 2.5s bloklaydi).
+    // A slow message while a ping is pending (the handler blocks 2.5s).
     ws.send(Message::text("slow")).await.unwrap();
 
-    // Handler tugab server qaror qabul qilguncha (~handler oxiri) O'QIMAYMIZ —
-    // aks holda mijoz ping'ni darhol o'qib pong qaytarib bug'ni yashirardi
-    // (deterministik bo'lishi uchun). Eski mantiqда server shu nuqtada
-    // awaiting_pong=true bilan ulanishni yopadi.
+    // We DON'T READ until the handler finishes and the server makes its decision
+    // (~end of the handler) -- otherwise the client would immediately read the ping
+    // and reply pong, hiding the bug (to keep it deterministic). In the old logic
+    // the server closed the connection at this point with awaiting_pong=true.
     tokio::time::sleep(Duration::from_millis(3000)).await;
 
     let first = next_text_within(&mut ws, Duration::from_secs(3)).await;
-    assert_eq!(first, "ok:slow", "sekin handler javobi kutilgan");
+    assert_eq!(first, "ok:slow", "expected slow handler response");
 
-    // Ulanish tirik qolishi kerak — pong navbatda turган bo'lsa ham yopilmagan.
+    // The connection must stay alive -- not closed even if the pong is queued.
     ws.send(Message::text("again")).await.unwrap();
     let second = next_text_within(&mut ws, Duration::from_secs(3)).await;
     assert_eq!(
         second, "ok:again",
-        "ping kutilayotganda sekin handler ulanishni noto'g'ri yopdi"
+        "slow handler wrongly closed the connection while a ping was pending"
     );
 
     let _ = std::fs::remove_file(&path);
@@ -450,19 +453,23 @@ async fn disconnect_cleans_room_membership() {
     b.send(Message::text(r#"{"t":"join","room":"r1","name":"b"}"#))
         .await
         .unwrap();
-    let _ = next_text(&mut a).await; // b ning joini (online:2)
+    let _ = next_text(&mut a).await; // b's join (online:2)
     let _ = next_text(&mut b).await;
 
-    // A uziladi -> server room a'zoligini tozalashi kerak.
+    // A disconnects -> the server must clean up the room membership.
     drop(a);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // B yana say qiladi -> faqat B oladi (A yo'q), broadcast xatosiz ketadi.
-    b.send(Message::text(r#"{"t":"say","room":"r1","body":"yana"}"#))
+    // B says again -> only B receives it (A is gone), the broadcast goes through without error.
+    b.send(Message::text(r#"{"t":"say","room":"r1","body":"again"}"#))
         .await
         .unwrap();
     let b_msg = next_text(&mut b).await;
-    assert!(b_msg.contains("yana"), "B o'z xabarini oldi: {}", b_msg);
+    assert!(
+        b_msg.contains("again"),
+        "B received its own message: {}",
+        b_msg
+    );
 
     let _ = std::fs::remove_file(&path);
 }

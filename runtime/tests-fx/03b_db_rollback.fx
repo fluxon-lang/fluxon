@@ -1,10 +1,10 @@
-# 03b — db.tx rollback: fail ichida bo'lsa butun blok bekor + xato yuqoriga.
-# Bu fayl ATAYLAB xato bilan tugaydi (exit != 0). Tashqi skript ikki narsani
-# tekshiradi: (1) "ROLLBACK-OK" chiqdi (qator qo'shilmadi), (2) exit kodi != 0.
+# 03b - db.tx rollback: a fail inside reverts the whole block + error propagates up.
+# This file INTENTIONALLY ends with an error (exit != 0). The outer script
+# checks two things: (1) "ROLLBACK-OK" printed (row not added), (2) exit code != 0.
 #
-# Ishga: DATABASE_URL=sqlite:/tmp/fluxon_rb_test.db ./target/release/fluxon run tests-fx/03b_db_rollback.fx
-# (fayl-asosli db kerak: tx ichidagi yozuv rollback bo'lganini keyin tekshirib bo'lmaydi
-#  in-memory bilan ham bo'ladi, chunki rollback ayni jarayonda ko'rinadi.)
+# Run: DATABASE_URL=sqlite:/tmp/fluxon_rb_test.db ./target/release/fluxon run tests-fx/03b_db_rollback.fx
+# (a file-based db is needed: a write inside tx cannot be checked afterwards once
+#  rolled back; in-memory also works since rollback is visible within the same process.)
 
 use db
 
@@ -12,15 +12,15 @@ tbl items
   id   serial pk
   name str
 
-db.ins "items" {name:"asl"}
+db.ins "items" {name:"original"}
 before = (db.q "select * from items").len    # 1
 
-# tx ichida ins + fail → rollback kutiladi
+# inside tx: ins + fail -> rollback expected
 db.tx \->
   db.ins "items" {name:"ghost"}
-  inside = (db.q "select * from items").len   # tx ichida 2 ko'rinadi
-  log "tx ichida qator soni = ${inside}"
-  fail "ataylab rollback"
+  inside = (db.q "select * from items").len   # inside tx shows 2
+  log "row count inside tx = ${inside}"
+  fail "intentional rollback"
 
-# BU YERGA YETIB KELMAYDI — fail yuqoriga ko'tariladi va dastur to'xtaydi.
-log "BU CHIQMASLIGI KERAK"
+# THIS LINE IS NEVER REACHED - the fail propagates up and the program stops.
+log "THIS SHOULD NOT PRINT"

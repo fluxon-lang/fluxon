@@ -1,29 +1,29 @@
-// Fluxon queue battery — fon navbati (background jobs).
+// Fluxon queue battery — background jobs.
 //
-// Til API (docs):
-//   queue.push "send" {ph:p body:t}            # navbatga ish qo'shadi (nom + payload map)
-//   queue.on "send" \job -> tools.send job.ph job.body   # shu nomli ish uchun ishlovchi
+// Language API (docs):
+//   queue.push "send" {ph:p body:t}            # enqueues a job (name + payload map)
+//   queue.on "send" \job -> tools.send job.ph job.body   # handler for jobs of this name
 //
-// Falsafa (spec): webhook tez javob qaytarishi uchun og'ir ishni fonga uzatasiz.
-// `queue.push` darhol qaytadi (bloklamaydi), ish fon worker thread'ida bajariladi.
+// Philosophy (spec): so a webhook can respond fast, you hand heavy work off to the
+// background. `queue.push` returns immediately (does not block); the job runs on the
+// background worker thread.
 //
-// Model (foydalanuvchi qarori):
-//   - BITTA worker thread, FIFO tartib. Ishlar ketma-ket bajariladi — tartib
-//     kafolatlangan, beqaror yuk ostida ham thread portlamaydi. (`cron` kabi fon
-//     thread, lekin u vaqt bo'yicha emas, navbat bo'yicha uyg'onadi.)
-//   - Handler hali ro'yxatga olinmagan ish uchun `queue.push` chaqirilsa, ish
-//     navbatda KUTIB turadi. Fluxon top-level kodda `queue.push` `queue.on` dan
-//     oldin yozilishi mumkin — worker Condvar'da uxlaydi, `queue.on` kelganda
-//     uyg'onib ishni bajaradi (busy-loop YO'Q, issue #105). Handler'siz ish
-//     handler'i BOR boshqa ishlarni to'sib qo'ymaydi.
-//   - Top-level kod tugaganda `queue_wait_drain` navbat bo'shashini kutadi —
-//     ishlar jim yo'qolmaydi (issue #105). Handler'i hech qachon ro'yxatga
-//     olinmagan ishlar shu yerda ogohlantirish bilan tashlanadi (ularni
-//     bajarishning iloji yo'q — kutish abadiy bo'lardi).
+// Model (user decision):
+//   - ONE worker thread, FIFO order. Jobs run sequentially — order is guaranteed,
+//     and the thread does not blow up under bursty load. (A background thread like
+//     `cron`, but it wakes on the queue rather than on time.)
+//   - If `queue.push` is called for a job whose handler is not yet registered, the
+//     job WAITS in the queue. In Fluxon top-level code, `queue.push` may be written
+//     before `queue.on` — the worker sleeps on the Condvar and wakes to run the job
+//     when `queue.on` arrives (NO busy-loop, issue #105). A job without a handler does
+//     not block other jobs that DO have one.
+//   - When top-level code finishes, `queue_wait_drain` waits for the queue to empty —
+//     jobs are not silently lost (issue #105). Jobs whose handler was never registered
+//     are dropped here with a warning (they cannot be run — waiting would be forever).
 //
-// Worker — oddiy `std::thread` + `Condvar` (tokio EMAS): handler'lar sinxron
-// tree-walking, async kerak emas. Handler `apply` orqali bitta `job` map argumenti
-// bilan chaqiriladi; xato worker'ni o'ldirmaydi (cron/ws fire kabi stderr diagnostika).
+// Worker — a plain `std::thread` + `Condvar` (NOT tokio): handlers are synchronous
+// tree-walking, so async is not needed. The handler is called via `apply` with a single
+// `job` map argument; an error does not kill the worker (stderr diagnostics like cron/ws fire).
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -36,34 +36,34 @@ use parking_lot::{Condvar, Mutex};
 use crate::interp::{Flow, Interp};
 use crate::value::Value;
 
-// Navbatdagi bitta ish: qaysi handler'ga (nom) va qanday ma'lumot bilan (payload).
+// A single queued job: which handler (name) and what data (payload).
 struct Job {
     name: String,
     payload: Value,
 }
 
-// queue battery holati — jarayonga bitta (Interp ichida Arc). Top-level kod
-// (`queue.push`/`queue.on`) to'ldiradi, worker fon thread'i o'qiydi.
+// queue battery state — one per process (an Arc inside Interp). Top-level code
+// (`queue.push`/`queue.on`) fills it; the background worker thread reads it.
 pub struct QueueState {
-    // FIFO navbat + nom->handler registri. Bir Mutex ostida — worker ikkalasini
-    // birgalikda ko'radi (ishni olib, nomiga handler bor-yo'qligini bir lock'da
-    // tekshiradi). Condvar yangi ish/handler kelganini worker'ga bildiradi.
+    // FIFO queue + name->handler registry. Under one Mutex — so the worker sees both
+    // together (it takes a job and checks whether a handler exists for its name under
+    // a single lock). The Condvar tells the worker a new job/handler has arrived.
     inner: Mutex<QueueInner>,
     not_empty: Condvar,
-    // Worker bitta ishni tugatganini bildiradi — `queue_wait_drain` shu orqali
-    // navbat bo'shashini kutadi (issue #105: ishlar jim yo'qolmasin).
+    // Signals that the worker has finished one job — `queue_wait_drain` uses this to
+    // wait for the queue to empty (issue #105: jobs must not be silently lost).
     idle: Condvar,
-    // Worker thread BIR marta yonishi uchun marker (idempotent start).
+    // Marker so the worker thread starts ONCE (idempotent start).
     started: OnceLock<()>,
 }
 
 struct QueueInner {
     queue: VecDeque<Job>,
     handlers: HashMap<String, Value>,
-    // Worker hozir bitta ishni bajaryaptimi — drain navbat bo'sh bo'lsa ham
-    // bajarilayotgan ish tugashini kutishi kerak.
+    // Whether the worker is currently running a job — drain must wait for the running
+    // job to finish even when the queue is empty.
     busy: bool,
-    // Handler'siz nom haqida stderr ogohlantirishi BIR marta chiqsin.
+    // So the stderr warning about a handler-less name is emitted ONCE.
     warned: HashSet<String>,
 }
 
@@ -90,82 +90,80 @@ impl Default for QueueState {
 }
 
 impl Interp {
-    // queue.<func> chaqiruvlari.
+    // queue.<func> calls.
     pub fn queue_dispatch(self: &Arc<Self>, func: &str, args: Vec<Value>) -> Result<Value, Flow> {
         match func {
             "push" => self.queue_push(args),
             "on" => self.queue_on(args),
-            _ => Err(Flow::err(format!(
-                "queue modulida '{func}' funksiyasi yo'q"
-            ))),
+            _ => Err(Flow::err(format!("queue module has no function '{func}'"))),
         }
     }
 
-    // queue.push <nom> <payload> — navbatga ish qo'shadi va worker'ni yoqadi.
-    // Bloklamaydi: ish darhol navbatga tushadi, worker fonda bajaradi. Payload
-    // ixtiyoriy (berilmasa Nil) — handler bittagina `job` argumenti oladi.
+    // queue.push <name> <payload> — enqueues a job and starts the worker.
+    // Does not block: the job is enqueued immediately and the worker runs it in the
+    // background. Payload is optional (Nil if omitted) — the handler takes a single
+    // `job` argument.
     fn queue_push(self: &Arc<Self>, args: Vec<Value>) -> Result<Value, Flow> {
         let name = match args.first() {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 return Err(Flow::err(
-                    "queue.push: 1-argument ish nomi (str) bo'lishi kerak",
+                    "queue.push: 1st argument must be the job name (str)",
                 ));
             }
         };
-        // Payload ixtiyoriy. Berilmasa bo'sh map o'rniga Nil — handler o'zi hal qiladi.
+        // Payload is optional. If omitted, Nil rather than an empty map — the handler
+        // decides for itself.
         let payload = args.get(1).cloned().unwrap_or(Value::Nil);
         {
             let mut inner = self.queue.inner.lock();
             inner.queue.push_back(Job { name, payload });
         }
-        // Worker fon thread'ini yoqamiz (bir marta) va uxlayotgan bo'lsa uyg'otamiz.
+        // Start the background worker thread (once) and wake it if it is sleeping.
         self.start_worker();
         self.queue.not_empty.notify_one();
         Ok(Value::Nil)
     }
 
-    // queue.on <nom> <handler> — shu nomli ishlar uchun ishlovchini ro'yxatga oladi.
-    // Bloklamaydi. Handler kutib turgan ishlar bo'lishi mumkin (push on'dan oldin
-    // yozilgan) — worker'ni uyg'otamiz, u endi handler topib ularni bajaradi.
+    // queue.on <name> <handler> — registers a handler for jobs of this name.
+    // Does not block. There may be jobs waiting for this handler (push written before
+    // on) — we wake the worker, which can now find the handler and run them.
     fn queue_on(self: &Arc<Self>, args: Vec<Value>) -> Result<Value, Flow> {
         let name = match args.first() {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 return Err(Flow::err(
-                    "queue.on: 1-argument ish nomi (str) bo'lishi kerak",
+                    "queue.on: 1st argument must be the job name (str)",
                 ));
             }
         };
         let handler = match args.get(1) {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
             _ => {
-                return Err(Flow::err(
-                    "queue.on: 2-argument handler (fn) bo'lishi kerak",
-                ));
+                return Err(Flow::err("queue.on: 2nd argument must be a handler (fn)"));
             }
         };
         {
             let mut inner = self.queue.inner.lock();
             inner.handlers.insert(name, handler);
         }
-        // Worker yonib turgan bo'lsin (faqat-queue skript uchun ham) va kutayotgan
-        // ishlarni endi handler bilan qayta ko'rsin.
+        // Make sure the worker is running (also for a queue-only script) and have it
+        // re-examine the waiting jobs now that a handler exists.
         self.start_worker();
         self.queue.not_empty.notify_one();
         Ok(Value::Nil)
     }
 
-    // Worker fon thread'ini bir marta yoqadi.
+    // Starts the background worker thread once.
     //
-    // MUHIM (cron bilan bir xil): bu yerda `freeze_globals` CHAQIRILMAYDI.
-    // `queue.push`/`queue.on` top-level kod O'RTASIDA chaqiriladi — o'sha paytda
-    // muzlatsak, keyingi global o'zgaruvchilar snapshot'ga tushmay qoladi va
-    // ularga murojaat "noma'lum nom" beradi. Worker global'ni RwLock orqali o'qiydi.
-    // Keyin `http.serve`/`ws.serve` chaqirilsa, ULAR muzlatadi va worker ham frozen
-    // snapshot'dan o'qiydi.
+    // IMPORTANT (same as cron): `freeze_globals` is NOT called here.
+    // `queue.push`/`queue.on` are called in the MIDDLE of top-level code — if we froze
+    // at that point, later global variables would not make it into the snapshot and
+    // referencing them would give "unknown name". The worker reads globals through the
+    // RwLock. If `http.serve`/`ws.serve` is called later, THEY freeze, and the worker
+    // then reads from the frozen snapshot too.
     fn start_worker(self: &Arc<Self>) {
-        // OnceLock::set faqat birinchi marta muvaffaqiyatli — keyingilari jim o'tadi.
+        // OnceLock::set succeeds only the first time — subsequent calls pass silently.
         if self.queue.started.set(()).is_err() {
             return;
         }
@@ -173,13 +171,12 @@ impl Interp {
         std::thread::spawn(move || run_worker(interp));
     }
 
-    // Top-level kod tugaganda chaqiriladi (interp.rs `run`): navbatdagi bajarib
-    // bo'ladigan ishlar va bajarilayotgan ish tugaguncha bloklaydi — skript
-    // chiqishida fon ishlar jim yo'qolmasin (issue #105). Handler'i hech qachon
-    // ro'yxatga olinmagan ishlarni bajarishning iloji yo'q — ogohlantirib
-    // tashlaymiz (aks holda kutish abadiy bo'lardi). Handler ichidan push
-    // qilingan yangi ishlar ham shu yerda kutiladi (predikat har uyg'onishda
-    // qayta tekshiriladi).
+    // Called when top-level code finishes (interp.rs `run`): blocks until the runnable
+    // jobs in the queue and the running job are done — so background jobs are not
+    // silently lost on script exit (issue #105). Jobs whose handler was never registered
+    // cannot be run — we drop them with a warning (otherwise the wait would be forever).
+    // New jobs pushed from inside a handler are also waited on here (the predicate is
+    // re-checked on each wakeup).
     pub fn queue_wait_drain(&self) {
         let mut inner = self.queue.inner.lock();
         loop {
@@ -194,42 +191,42 @@ impl Interp {
         }
         for job in inner.queue.drain(..) {
             eprintln!(
-                "queue: '{}' ishi bajarilmadi — handler ro'yxatga olinmagan (process tugadi)",
+                "queue: job '{}' not run — handler not registered (process ended)",
                 job.name
             );
         }
     }
 }
 
-// Worker sikli: navbatdan handler'i ro'yxatga olingan BIRINCHI ishni oladi va
-// chaqiradi. Handler'i hali yo'q ish navbatda qoladi (eski "qayta qo'yish +
-// 50ms uxlash" busy-loop'i emas — issue #105): worker Condvar'da uxlaydi,
-// `queue.on`/`queue.push` uyg'otadi. Handler'siz ish handler'i bor ishlarni
-// to'sib qo'ymaydi; bir nom ichida FIFO saqlanadi (bir nomli ishlarning handler
-// holati bir xil — tanlash tartibni buzmaydi).
+// Worker loop: takes and calls the FIRST job whose handler is registered. A job whose
+// handler is not yet present stays in the queue (not the old "re-enqueue + sleep 50ms"
+// busy-loop — issue #105): the worker sleeps on the Condvar and `queue.on`/`queue.push`
+// wake it. A handler-less job does not block jobs that have a handler; FIFO is preserved
+// within a name (jobs of one name share the same handler state — selecting does not break
+// the order).
 fn run_worker(interp: Arc<Interp>) {
     loop {
         let (job, handler) = {
             let mut inner = interp.queue.inner.lock();
             loop {
-                // MutexGuard orqali maydonlarni alohida borrow qilish uchun.
+                // To borrow the fields separately through the MutexGuard.
                 let st = &mut *inner;
                 if let Some(pos) = st
                     .queue
                     .iter()
                     .position(|j| st.handlers.contains_key(&j.name))
                 {
-                    // pos hozirgina topildi — remove albatta Some qaytaradi.
+                    // pos was just found — remove is guaranteed to return Some.
                     let Some(job) = st.queue.remove(pos) else {
                         continue;
                     };
                     let handler = st.handlers[&job.name].clone();
-                    // Drain navbat bo'sh bo'lsa ham shu ish tugashini kutsin.
+                    // Make drain wait for this job even if the queue is empty.
                     st.busy = true;
                     break (job, handler);
                 }
-                // Bajarib bo'ladigan ish yo'q. Handler'siz kutayotgan nomlar
-                // haqida BIR marta diagnostika beramiz (issue #105).
+                // No runnable job. Emit a diagnostic ONCE for the names waiting without
+                // a handler (issue #105).
                 let unknown: Vec<String> = st
                     .queue
                     .iter()
@@ -238,7 +235,7 @@ fn run_worker(interp: Arc<Interp>) {
                     .collect();
                 for name in unknown {
                     eprintln!(
-                        "queue: '{}' uchun handler yo'q (queue.on chaqirilmagan) — ish navbatda kutmoqda",
+                        "queue: no handler for '{}' (queue.on not called) — job waiting in queue",
                         name
                     );
                     st.warned.insert(name);
@@ -247,13 +244,13 @@ fn run_worker(interp: Arc<Interp>) {
             }
         };
 
-        // Handler'ni SHU thread'da, bitta `job` (payload) argumenti bilan
-        // chaqiramiz — FIFO va ketma-ketlik shu bilan kafolatlanadi. Xato
-        // worker'ni o'ldirmaydi.
+        // Call the handler on THIS thread with a single `job` (payload) argument — this
+        // is what guarantees FIFO and sequential execution. An error does not kill the
+        // worker.
         if let Err(flow) = interp.apply(handler, vec![job.payload]) {
-            eprintln!("queue handler '{}' xatosi: {}", job.name, flow_msg(&flow));
+            eprintln!("queue handler '{}' error: {}", job.name, flow_msg(&flow));
         }
-        // Ish tugadi — drain kutayotgan bo'lsa uyg'otamiz.
+        // The job is done — wake drain if it is waiting.
         interp.queue.inner.lock().busy = false;
         interp.queue.idle.notify_all();
     }
@@ -273,7 +270,7 @@ mod tests {
 
     use super::*;
 
-    // queue.push payload'siz ham ishlashi kerak (payload Nil bo'ladi).
+    // queue.push must work without a payload too (payload becomes Nil).
     #[test]
     fn push_payloadsiz_nil() {
         let interp = Arc::new(Interp::new());
@@ -283,11 +280,11 @@ mod tests {
         assert_eq!(inner.queue.len(), 1);
         match &inner.queue.front() {
             Some(job) => assert!(matches!(job.payload, Value::Nil)),
-            None => panic!("ish navbatga tushishi kerak edi"),
+            None => panic!("the job should have been enqueued"),
         }
     }
 
-    // queue.push 1-argument str bo'lmasa xato.
+    // queue.push errors if the 1st argument is not a str.
     #[test]
     fn push_nom_str_bolmasa_xato() {
         let interp = Arc::new(Interp::new());
@@ -295,23 +292,23 @@ mod tests {
         assert!(interp.queue_push(vec![]).is_err());
     }
 
-    // queue.on handler fn bo'lmasa xato; nom str bo'lmasa xato.
+    // queue.on errors if the handler is not an fn; errors if the name is not a str.
     #[test]
     fn on_argument_tekshiruvi() {
         let interp = Arc::new(Interp::new());
-        // Handler yo'q.
+        // No handler.
         assert!(interp.queue_on(vec![Value::Str("ish".into())]).is_err());
-        // Handler fn emas.
+        // Handler is not an fn.
         assert!(
             interp
                 .queue_on(vec![Value::Str("ish".into()), Value::Int(1)])
                 .is_err()
         );
-        // Nom str emas.
+        // Name is not a str.
         assert!(interp.queue_on(vec![Value::Int(1)]).is_err());
     }
 
-    // queue.on handler'ni registr'ga qo'shadi.
+    // queue.on adds the handler to the registry.
     #[test]
     fn on_handler_royxatga_oladi() {
         let interp = Arc::new(Interp::new());
@@ -325,17 +322,17 @@ mod tests {
         assert!(inner.handlers.contains_key("ish"));
     }
 
-    // queue modulida noma'lum funksiya xato beradi.
+    // An unknown function in the queue module returns an error.
     #[test]
     fn nomalum_funksiya_xato() {
         let interp = Arc::new(Interp::new());
         assert!(interp.queue_dispatch("yoq", vec![]).is_err());
     }
 
-    // Uchma-uch: queue.on handler ro'yxatga olinadi, queue.push ish qo'shadi va
-    // worker fon thread'i handler'ni HAQIQATAN chaqiradi (payload bilan). Native
-    // handler `AtomicUsize`'ni oshiradi — asosiy thread shu counter orqali ishni
-    // kuzatadi. Bu Condvar/worker oqimini to'g'ridan-to'g'ri tekshiradi.
+    // End-to-end: queue.on registers a handler, queue.push enqueues a job, and the
+    // background worker thread ACTUALLY calls the handler (with the payload). The native
+    // handler increments an `AtomicUsize` — the main thread observes the job through that
+    // counter. This directly exercises the Condvar/worker flow.
     #[test]
     fn worker_handlerni_haqiqatan_chaqiradi() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -346,15 +343,15 @@ mod tests {
         let handler = Value::Native(Arc::new(crate::value::NativeFn {
             name: "inc".into(),
             func: Box::new(move |args| {
-                // Payload bizga yetib kelganini ham tasdiqlaymiz (Int(7) kutamiz).
+                // Also assert the payload reached us (we expect Int(7)).
                 if matches!(args.first(), Some(Value::Int(7))) {
                     c.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(Value::Nil)
             }),
         }));
-        // Handler oldin ro'yxatga olinadi, keyin 3 ta ish push qilinadi.
-        // (Flow Debug derive qilmaydi -> expect() o'rniga is_ok() bilan tasdiqlaymiz.)
+        // The handler is registered first, then 3 jobs are pushed.
+        // (Flow does not derive Debug -> we assert with is_ok() instead of expect().)
         assert!(
             interp
                 .queue_on(vec![Value::Str("ish".into()), handler])
@@ -368,7 +365,7 @@ mod tests {
             );
         }
 
-        // Worker fon thread'i 3 ishni bajarguncha kutamiz (poll, maksimum ~2s).
+        // Wait for the background worker thread to run all 3 jobs (poll, max ~2s).
         for _ in 0..200 {
             if counter.load(Ordering::SeqCst) == 3 {
                 break;
@@ -378,12 +375,12 @@ mod tests {
         assert_eq!(
             counter.load(Ordering::SeqCst),
             3,
-            "worker 3 ishning hammasini bajarishi kerak edi"
+            "worker should have run all 3 jobs"
         );
     }
 
-    // Handler PUSH'dan KEYIN ro'yxatga olinadigan holat: ish navbatda kutib turadi,
-    // queue.on kelganda worker uni bajaradi (tartibga bog'liq emas).
+    // Case where the handler is registered AFTER the push: the job waits in the queue,
+    // and the worker runs it when queue.on arrives (order-independent).
     #[test]
     fn push_oldin_on_keyin_kutadi() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -392,22 +389,22 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let c = counter.clone();
 
-        // Avval push — handler hali yo'q, ish navbatda kutadi.
+        // First push — no handler yet, the job waits in the queue.
         assert!(
             interp
                 .queue_push(vec![Value::Str("kech".into()), Value::Nil])
                 .is_ok()
         );
 
-        // Worker birozdan keyin ham bajarmagan bo'lishi kerak (handler yo'q).
+        // The worker must still not have run it after a short wait (no handler).
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
-            "handler yo'q — bajarilmasin"
+            "no handler — should not run"
         );
 
-        // Endi handler keladi — kutib turgan ish bajarilishi kerak.
+        // Now the handler arrives — the waiting job should run.
         let handler = Value::Native(Arc::new(crate::value::NativeFn {
             name: "inc".into(),
             func: Box::new(move |_| {
@@ -430,12 +427,12 @@ mod tests {
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
-            "handler kelgach kutib turgan ish bajarilishi kerak"
+            "the waiting job should run once the handler arrives"
         );
     }
 
-    // Issue #105: drain navbatdagi ishlar TUGASHINI kutadi — qaytgach handler
-    // allaqachon ishlagan bo'ladi (poll/race'siz tekshiramiz).
+    // Issue #105: drain waits for the queued jobs to FINISH — by the time it returns the
+    // handler has already run (we verify without polling/races).
     #[test]
     fn drain_ishlar_tugashini_kutadi() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -446,7 +443,8 @@ mod tests {
         let handler = Value::Native(Arc::new(crate::value::NativeFn {
             name: "sekin".into(),
             func: Box::new(move |_| {
-                // Atayin sekin handler — drain kutmasa counter 3 ga yetmaydi.
+                // Deliberately slow handler — without drain waiting, the counter would not
+                // reach 3.
                 std::thread::sleep(Duration::from_millis(20));
                 c.fetch_add(1, Ordering::SeqCst);
                 Ok(Value::Nil)
@@ -465,19 +463,19 @@ mod tests {
         assert_eq!(
             counter.load(Ordering::SeqCst),
             3,
-            "drain hamma ish tugashini kutishi kerak"
+            "drain should wait for all jobs to finish"
         );
     }
 
-    // Issue #105: handler'i hech qachon ro'yxatga olinmagan ish drain'ni abadiy
-    // ushlab turmaydi — ogohlantirish bilan tashlanadi va navbat bo'shaydi.
+    // Issue #105: a job whose handler was never registered does not hold drain forever —
+    // it is dropped with a warning and the queue empties.
     #[test]
     fn drain_handlersiz_ishni_tashlab_yuboradi() {
         let interp = Arc::new(Interp::new());
         assert!(interp.queue_push(vec![Value::Str("yetim".into())]).is_ok());
 
-        // Drain'ni alohida thread'da chaqiramiz — regressiyada (abadiy kutish)
-        // test o'zi osilib qolmasin.
+        // Call drain on a separate thread — so the test itself does not hang on a
+        // regression (an infinite wait).
         let i2 = interp.clone();
         let h = std::thread::spawn(move || i2.queue_wait_drain());
         for _ in 0..200 {
@@ -488,17 +486,17 @@ mod tests {
         }
         assert!(
             h.is_finished(),
-            "drain handler'siz ishda osilib qolmasligi kerak"
+            "drain should not hang on a handler-less job"
         );
         h.join().unwrap();
         assert!(
             interp.queue.inner.lock().queue.is_empty(),
-            "tashlangan ish navbatdan chiqishi kerak"
+            "the dropped job should leave the queue"
         );
     }
 
-    // Issue #105: handler'siz ish navbat BOSHIDA tursa ham, handler'i bor ish
-    // to'silmaydi (eski busy-loop har aylanishda hammasini 50ms kechiktirardi).
+    // Issue #105: even if a handler-less job sits at the FRONT of the queue, a job that
+    // has a handler is not blocked (the old busy-loop delayed everything 50ms per cycle).
     #[test]
     fn handlersiz_ish_boshqalarni_tosmaydi() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -507,7 +505,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let c = counter.clone();
 
-        // Avval handler'siz ish — navbat boshini egallaydi.
+        // First a handler-less job — it takes the front of the queue.
         assert!(interp.queue_push(vec![Value::Str("yoq".into())]).is_ok());
 
         let handler = Value::Native(Arc::new(crate::value::NativeFn {
@@ -524,12 +522,12 @@ mod tests {
         );
         assert!(interp.queue_push(vec![Value::Str("bor".into())]).is_ok());
 
-        // Drain "bor" tugashini kutadi, "yoq"ni esa tashlab yuboradi.
+        // Drain waits for "bor" to finish and drops "yoq".
         interp.queue_wait_drain();
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
-            "handler'i bor ish handler'siz ish ortida qolib ketmasligi kerak"
+            "a job with a handler should not be stuck behind a handler-less job"
         );
     }
 }

@@ -1,24 +1,24 @@
-// Fluxon tokenlari — lexer chiqaradigan eng kichik ma'noli birliklar.
+// Fluxon tokens — the smallest meaningful units the lexer produces.
 //
-// Fluxon indentation-sezgir til, shuning uchun lexer oddiy belgilardan tashqari
-// blok boshlanishi/tugashini bildiruvchi sun'iy `Indent`/`Dedent` tokenlarini
-// ham chiqaradi (xuddi Python kabi). Statement chegarasi `Newline` bilan
-// belgilanadi — Fluxon'da `;` yo'q.
+// Most important responsibility: Fluxon is indentation-sensitive, so besides
+// ordinary symbols the lexer also emits synthetic `Indent`/`Dedent` tokens
+// marking block start/end (just like Python). A statement boundary is marked
+// by `Newline` — Fluxon has no `;`.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
-    // Literallar
+    // Literals
     Int(i64),
     Flt(f64),
-    Str(Vec<StrPart>), // interpolatsiya bo'laklari bilan
+    Str(Vec<StrPart>), // with interpolation pieces
     Sym(String),       // :ok  -> "ok"
     Ident(String),
     True,
     False,
     Nil,
-    Inf, // cheksiz iterator (each i in inf)
+    Inf, // infinite iterator (each i in inf)
 
-    // Kalit so'zlar
+    // Keywords
     Fn,
     Ret,
     If,
@@ -37,9 +37,9 @@ pub enum Tok {
     Try,
     Catch,
 
-    // Operatorlar va punktuatsiya
+    // Operators and punctuation
     Eq,        // =
-    Assign,    // <-  (mutable bind / qayta tayinlash)
+    Assign,    // <-  (mutable bind / reassignment)
     Plus,      // +
     Minus,     // -
     Star,      // *
@@ -59,32 +59,33 @@ pub enum Tok {
     DotDot,    // .. (range)
     PipeGt,    // |> (pipe)
     Arrow,     // -> (lambda/fn body)
-    Backslash, // \  (lambda boshi)
-    Colon,     // :  (map kalit ajratuvchi)
+    Backslash, // \  (lambda start)
+    Colon,     // :  (map key separator)
     LParen,    // (
     RParen,    // )
-    LBracket,  // [  (list ochuvchi)
+    LBracket,  // [  (list opener)
     RBracket,  // ]
-    LBrace,    // {  (map ochuvchi)
+    LBrace,    // {  (map opener)
     RBrace,    // }
-    Comma,     // , (Fluxon'da rasman yo'q, lekin xatoni aniqlash uchun ushlanadi)
-    Spread,    // ... (map/list spread — round3 da qo'shilgan)
+    Comma,     // , (not officially part of Fluxon, but captured for error reporting)
+    Spread,    // ... (map/list spread — added in round3)
 
-    // Tuzilma
+    // Structure
     Newline,
     Indent,
     Dedent,
     Eof,
 }
 
-// String literal interpolatsiya bo'laklari: "salom ${name}!" ->
+// String literal interpolation pieces: "salom ${name}!" ->
 // [Lit("salom "), Expr("name", 1)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
     Lit(String),
-    // ifoda manba matni + manbada boshlangan qator raqami. Parser ifodani
-    // qayta lex+parse qiladi; qator raqami xato diagnostikasi asl qatorni
-    // ko'rsatishi uchun saqlanadi (1-qatorga yiqilib qolmasligi uchun).
+    // Expression source text + the line number where it started in the source.
+    // The parser re-lexes and re-parses the expression; the line number is kept
+    // so error diagnostics point at the original line (rather than collapsing to
+    // line 1).
     Expr(String, usize),
 }
 
@@ -93,8 +94,8 @@ pub struct Token {
     pub tok: Tok,
     pub line: usize,
     pub col: usize,
-    // Bu token oldidan bo'shliq (yoki tab/newline) kelganmi. Grammatikada
-    // `arr[i]` (tutash -> indeks) va `f "x" [a]` (bo'shliqli -> alohida argument)
-    // ni ajratish uchun ishlatiladi.
+    // Whether whitespace (or a tab/newline) preceded this token. Used by the
+    // grammar to distinguish `arr[i]` (adjacent -> index) from `f "x" [a]`
+    // (spaced -> a separate argument).
     pub spaced: bool,
 }

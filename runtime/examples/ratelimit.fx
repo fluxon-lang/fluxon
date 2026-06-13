@@ -1,31 +1,32 @@
-# HTTP rate-limit — til darajasidagi primitiv (issue #79).
+# HTTP rate-limit — a language-level primitive (issue #79).
 #
-# http.limit middleware kabi deklaratsiya tartibida ishlaydi. Sintaksis:
-#   http.limit N :sec|:min|:hr \req -> kalit          # barcha yo'lga (http.use kabi)
-#   http.limit "/api/*" N :min  \req -> kalit          # prefiks bo'yicha (http.before kabi)
-# Limit oshsa avtomatik 429 + Retry-After (oyna tugashigacha soniya). Kalit
-# funksiyasi nil qaytarsa req.ip'ga qaytadi (kalitsiz so'rovni ham cheklash uchun).
+# http.limit works in declaration order like middleware. Syntax:
+#   http.limit N :sec|:min|:hr \req -> key          # all routes (like http.use)
+#   http.limit "/api/*" N :min  \req -> key          # by prefix (like http.before)
+# When the limit is exceeded: automatic 429 + Retry-After (seconds until the
+# window ends). If the key function returns nil it falls back to req.ip (so a
+# keyless request can be limited too).
 #
-# Ishga tushirish:  fluxon run examples/ratelimit.fx
-# Sinash (4-so'rov 429 qaytaradi):
+# Running: fluxon run examples/ratelimit.fx
+# Testing (the 4th request returns 429):
 #   for i in 1 2 3 4; do curl -i -H "x-api-key: demo" localhost:8080/api/ping; done
-#   curl -i localhost:8080/api/ping        # kalitsiz -> IP bo'yicha cheklanadi
+#   curl -i localhost:8080/api/ping        # keyless -> limited by IP
 
-# Avval auth: API kalitni ctx'ga yozamiz (haqiqiy ilovada db'dan tekshiriladi).
-# Bu http.limit'dan OLDIN e'lon qilingani uchun kalit funksiyasi req.ctx'ni ko'radi.
+# Auth first: write the API key into ctx (in a real app it's verified against db).
+# Since this is declared BEFORE http.limit, the key function sees req.ctx.
 http.before "/api/*" \req ->
   key = req.headers.x_api_key
   if !key
-    fail 401 "x-api-key kerak"
+    fail 401 "x-api-key required"
   req.ctx <- {api_key: key}
 
-# Per-key rate-limit: /api/* yo'llariga, har API kalit uchun 3 so'rov/daqiqa.
+# Per-key rate-limit: for /api/* routes, 3 requests/minute per API key.
 http.limit "/api/*" 3 :min \req -> req.ctx.api_key
 
 http.on :get "/api/ping" \req ->
   rep 200 {ok: true key: req.ctx.api_key}
 
-# Limitsiz yo'l — /api/* ga mos emas.
+# Unlimited route — does not match /api/*.
 http.on :get "/health" \req ->
   rep 200 {ok: true}
 

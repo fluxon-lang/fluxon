@@ -1,170 +1,171 @@
-# CLAUDE.md — Fluxon loyihasida ishlash qoidalari (AI agentlar uchun)
+# CLAUDE.md — How to work on Fluxon (for AI agents)
 
-Bu fayl Claude Code va boshqa AI agentlar uchun. Loyihada o'zgarish kiritishdan
-oldin **shu faylni oxirigacha o'qing**. Maqsad: yangi agent boshlang'ich
-holatdan tezroq chiqib, to'g'ri joyda, to'g'ri uslubda ish qilsin.
+This file is for Claude Code and other AI agents. Before making any change to the
+project, **read this file to the end**. The goal: get a new agent productive fast,
+working in the right place and in the right style.
 
-> Odam contributor'lar uchun: [`CONTRIBUTING.md`](CONTRIBUTING.md).
-> Runtime ichki tuzilishi: [`ARCHITECTURE.md`](ARCHITECTURE.md).
-
----
-
-## 0. Bu loyiha nima
-
-**Fluxon** — AI agentlar yaxshi yozadigan backend dasturlash tili. Falsafa:
-*"Til AI'ga moslashadi, AI tilga emas."* Bir ish = bir yo'l (canonical form),
-kam token, batteries-included (`http`/`db`/`ai`/`ws`/...).
-
-Bu repo ikki qismdan iborat:
-
-- **`runtime/`** — tilning interpretatori (Rust, tree-walking). **Asosiy ish shu
-  yerda.** Hamma kod, test, build shu papkada.
-- **`docs/` + `examples/` + `research/`** — til spetsifikatsiyasi, misollar va til
-  qanday dizayn qilingani (eksperimentlar).
+> For human contributors: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+> Runtime internals: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
-## 1. Til (MUHIM): hamma narsa o'zbekcha
+## 0. What this project is
 
-Bu loyiha o'zbek tilida olib boriladi. **Doim o'zbek tilida yozing:**
+**Fluxon** — a backend programming language that AI agents write well. Philosophy:
+*"The language adapts to the AI, not the AI to the language."* One task = one way
+(canonical form), few tokens, batteries-included (`http`/`db`/`ai`/`ws`/...).
 
-- Kod izohlari (`// ...`, `# ...`)
-- Commit xabarlari
-- PR sarlavha va tavsiflari
-- Hujjatlar
-- Foydalanuvchi bilan muloqot
+This repo has two parts:
 
-Texnik atamalar va kod identifikatorlari (`HashMap`, `eval_call`, `db.tx`) asl
-holida qoladi. O'zbek tilining barcha diakritik belgilarini to'g'ri yozing
-(`o'`, `g'`, `'`) — ASCII bilan almashtirmang.
+- **`runtime/`** — the language interpreter (Rust, tree-walking). **This is where
+  the main work happens.** All code, tests, and builds live here.
+- **`docs/` + `examples/` + `research/`** — the language specification, examples,
+  and how the language was designed (experiments).
 
 ---
 
-## 2. Qayerda nima (navigatsiya)
+## 1. Language
 
-Yangi battery yoki o'zgarish kiritishdan oldin tegishli faylni biling:
+Write **code, comments, commit messages, PR titles/descriptions, and
+documentation in English.** Technical terms and code identifiers (`HashMap`,
+`eval_call`, `db.tx`) stay as-is.
 
-| Vazifa | Fayl |
-|--------|------|
-| Token turlari, `Token.spaced` flag | `runtime/src/token.rs` |
-| Lexer: INDENT/DEDENT, string interpolatsiya | `runtime/src/lexer.rs` |
-| AST tugunlari (`Stmt`, `Expr`) | `runtime/src/ast.rs` |
-| Parser: precedence climbing, qavssiz chaqirish | `runtime/src/parser.rs` |
-| Qiymat turlari (`Value`, `NativeFn`) | `runtime/src/value.rs` |
+When **talking to the user**, the agent is language-neutral: reply in whatever
+language the user writes in. The codebase is English, but the conversation
+adapts to the user.
+
+> Note: `research/` and the `*.uz.md` documents are kept in Uzbek on purpose
+> (design history and future multi-language docs) — do not translate them.
+
+---
+
+## 2. Where things are (navigation)
+
+Before adding a new battery or making a change, find the relevant file:
+
+| Task | File |
+|------|------|
+| Token types, `Token.spaced` flag | `runtime/src/token.rs` |
+| Lexer: INDENT/DEDENT, string interpolation | `runtime/src/lexer.rs` |
+| AST nodes (`Stmt`, `Expr`) | `runtime/src/ast.rs` |
+| Parser: precedence climbing, parenless calls | `runtime/src/parser.rs` |
+| Value types (`Value`, `NativeFn`) | `runtime/src/value.rs` |
 | Interpreter: scope, control flow, dispatch | `runtime/src/interp.rs` |
-| Yadro modullari (`str/math/rand/json/time`) | `runtime/src/builtins.rs` |
-| `http` battery (server + klient) | `runtime/src/http_mod.rs` |
+| Core modules (`str/math/rand/json/time`) | `runtime/src/builtins.rs` |
+| `http` battery (server + client) | `runtime/src/http_mod.rs` |
 | `ai` battery (LLM — Anthropic Messages API) | `runtime/src/ai_mod.rs` |
 | `db` battery (SQLite, tx, schema) | `runtime/src/db_mod.rs` |
-| `auth` battery (JWT HS256 + parol hash argon2id) | `runtime/src/auth_mod.rs` |
+| `auth` battery (JWT HS256 + password hash argon2id) | `runtime/src/auth_mod.rs` |
 | `crypto` battery (sha256/hmac/b64/hex/uuid) | `runtime/src/crypto_mod.rs` |
-| CLI kirish nuqtasi + integratsiya testlari | `runtime/src/main.rs` |
+| CLI entry point + integration tests | `runtime/src/main.rs` |
 
-**Spec'ni o'qish kerak bo'lsa:** `docs/fluxon-agent.md` (~2700 token, ixcham —
-til qanday ishlashini AI uchun yozilgan). Batafsil: `docs/fluxon-human.uz.md`
-(o'zbekcha) yoki `docs/fluxon-human.md` (inglizcha).
+**If you need to read the spec:** `docs/fluxon-agent.md` (~2700 tokens, compact —
+written for an AI to learn how the language works). More detail:
+`docs/fluxon-human.md` (English) or `docs/fluxon-human.uz.md` (Uzbek).
 
-**Battery qo'shish/o'zgartirish naqshi** uchun → [`ARCHITECTURE.md`](ARCHITECTURE.md)
-ning "Yangi battery qo'shish" bo'limi. Naqsh `http_mod.rs` va `db_mod.rs` da
-allaqachon mavjud — ularni namuna sifatida o'qing.
+**For the pattern to add/change a battery** → the "Adding a new battery" section
+of [`ARCHITECTURE.md`](ARCHITECTURE.md). The pattern already exists in
+`http_mod.rs` and `db_mod.rs` — read them as examples.
 
 ---
 
-## 3. Build, test, ishga tushirish
+## 3. Build, test, run
 
-**Hamma `cargo` buyruqlari `runtime/` ichida ishlaydi** (root'da emas):
+**All `cargo` commands run inside `runtime/`** (not at the repo root):
 
 ```sh
 cd runtime
-cargo build                          # qurish
-cargo test                           # barcha testlar (hozir 197 ta)
-cargo run -- run examples/demo.fx    # bir .fx faylni ishga tushirish
-cargo fmt                            # formatlash
-cargo clippy --all-targets -- -D warnings   # lint (0 warning bo'lsin)
+cargo build                          # build
+cargo test                           # all tests
+cargo run -- run examples/demo.fx    # run a single .fx file
+cargo fmt                            # format
+cargo clippy --all-targets -- -D warnings   # lint (must be 0 warnings)
 ```
 
-`.fx` misollar `runtime/examples/` da. HTTP/WS server misollari (`server.fx`)
-portni ochib **bloklaydi** — smoke-test uchun `demo.fx` ishlating.
+`.fx` examples live in `runtime/examples/`. The HTTP/WS server examples
+(`server.fx`) open a port and **block** — for a smoke test use `demo.fx`.
 
 ---
 
-## 4. PR yashil bo'lishi uchun nima kerak
+## 4. What it takes for a green PR
 
-CI (`.github/workflows/ci.yml`) ubuntu + macOS da ishlaydi. Commit qilishdan
-oldin **mahalliy ravishda quyidagilarni tekshiring:**
+CI (`.github/workflows/ci.yml`) runs on ubuntu + macOS. Before committing,
+**check the following locally:**
 
-1. `cargo build --locked` — kompilyatsiya bo'ladi
-2. `cargo test --locked` — barcha testlar yashil
-3. `cargo fmt --check` — formatlanган
-4. `cargo clippy --all-targets -- -D warnings` — 0 warning
-5. `cargo run -- run examples/demo.fx` — smoke-test ishlaydi
+1. `cargo build --locked` — compiles
+2. `cargo test --locked` — all tests green
+3. `cargo fmt --check` — formatted
+4. `cargo clippy --all-targets -- -D warnings` — 0 warnings
+5. `cargo run -- run examples/demo.fx` — smoke test works
 
-> `build-test` job **majburiy** (qizil bo'lsa merge yo'q). `lint` job hozircha
-> non-blocking, lekin **yangi kod 0 warning** bilan kelishi kutiladi — eski
-> kelishuvni buzmang.
+> The `build-test` job is **required** (no merge if red). The `lint` job is
+> non-blocking for now, but **new code is expected to arrive with 0 warnings** —
+> do not break the existing agreement.
 
-Har yangi xulq-atvor uchun **test yozing**. Test konvensiyasi:
+Write a **test for every new behavior**. Test conventions:
 
-- **Native (Rust) testlar** — tegishli modul ichida `#[cfg(test)] mod ...`
+- **Native (Rust) tests** — inside the relevant module as `#[cfg(test)] mod ...`
   (`builtins.rs`, `interp.rs`, `db_mod.rs`).
-- **Integratsiya testlari** (`.fx` kodini run qilib natijani tekshirish) —
-  `main.rs` ning `mod tests` ichida. `run(src)` yordamchisidan foydalaning.
-- **DB testlari** global `DB_TEST_LOCK` mutex bilan serializatsiya qilinadi
-  (`DATABASE_URL` env race oldini olish) — namunani `db_mod.rs` dan ko'ring.
+- **Integration tests** (run `.fx` code and check the result) — inside the
+  `mod tests` of `main.rs`. Use the `run(src)` helper.
+- **DB tests** are serialized with the global `DB_TEST_LOCK` mutex (to avoid the
+  `DATABASE_URL` env race) — see the example in `db_mod.rs`.
 
 ---
 
-## 5. Kod uslubi (Rust)
+## 5. Code style (Rust)
 
-- **Edition 2024.** `cargo fmt` standart sozlamasi.
-- Izohlar **nima uchun** (why) ni tushuntirsin, **nima** (what) ni emas —
-  mavjud fayllar shu uslubda. Atrofdagi kodning izoh zichligiga moslang.
-- Yangi nom va idiomalar atrofdagi kodga o'xshasin.
-- `unsafe` ishlatmang. Mavjud kod butunlay xavfsiz (`db_mod.rs` connection pool
-  ham `Arc` bilan, `unsafe`'siz).
-- **`Value: Send + Sync` invariantini buzmang** — runtime thread-safe (har HTTP
-  request alohida thread'da). Yangi qiymat turi kiritsangiz Send+Sync bo'lsin.
-
----
-
-## 6. Git va commit qoidalari
-
-- Master'ga to'g'ridan-to'g'ri **commit qilmang** — har doim branch + PR.
-- Branch nomi: `battery-<nom>`, `perf-<nom>`, `docs/<nom>`, `fix-<nom>`.
-- Commit xabari **o'zbekcha**, qisqa va aniq: nima o'zgardi va nega.
-- Bir PR = bir mantiqiy o'zgarish. Aralashtirmang (masalan, battery + refactor).
-- Foydalanuvchi so'ramaguncha `commit`/`push` qilmang.
+- **Edition 2024.** Default `cargo fmt` settings.
+- Comments should explain **why**, not **what** — existing files follow this
+  style. Match the comment density of the surrounding code.
+- New names and idioms should resemble the surrounding code.
+- Do not use `unsafe`. The existing code is fully safe (`db_mod.rs` connection
+  pool uses `Arc`, without `unsafe`).
+- **Do not break the `Value: Send + Sync` invariant** — the runtime is
+  thread-safe (each HTTP request runs on its own thread). Any new value type you
+  introduce must be Send+Sync.
 
 ---
 
-## 7. Muhim invariantlar (buzmang)
+## 6. Git and commit rules
 
-Bular runtime'ning ishlashini ta'minlaydi — o'zgartirishdan oldin yaxshilab
-o'ylang va test bilan himoyalang:
-
-- **`=`/`exp`/param immutable**, `<-` mutable. Param `<-` bilan o'zgartirilishi
-  mumkin (eski xatti-harakat saqlangan).
-- **Closure capture, o'zaro rekursiya, shadowing, `each` loop var mutability** —
-  hozir to'g'ri ishlaydi, regressiya kiritmang.
-- **Scope/`Parent` enum** (`interp.rs`): top-level fn'lar `Parent::Root` marker
-  ushlaydi (root Arc'ni saqlamaydi) — bu Arc contention'ni yo'qotgan optimizatsiya.
-  Buni tushunmasdan o'zgartirmang → [`ARCHITECTURE.md`](ARCHITECTURE.md).
-- **`http.serve`** global'ni `freeze_globals` bilan muzlatadi (lock-free snapshot).
+- **Do not commit directly to master** — always branch + PR.
+- Branch name: `battery-<name>`, `perf-<name>`, `docs/<name>`, `fix-<name>`.
+- Commit message in **English**, short and precise: what changed and why.
+- One PR = one logical change. Do not mix (e.g. battery + refactor).
+- Do not `commit`/`push` unless the user asks.
 
 ---
 
-## 8. Batareyalar holati (hammasi tayyor)
+## 7. Important invariants (do not break)
 
-`docs/fluxon-agent.md` da spetsifikatsiyalangan barcha batareyalar
-runtime'da **implementatsiya qilingan**: `http`, `db`, `ai`, `auth`, `crypto`,
-`ws`, `cron`, `queue`, `reg` (`ai` — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`,
-Anthropic Messages API orqali; `runtime/src/ai_mod.rs`).
+These keep the runtime working — think carefully before changing them and guard
+them with tests:
 
-Yangi battery qo'shganda spec (`docs/fluxon-agent.md`) ni **manba haqiqat** deb
-oling — sintaksis u yerda belgilangan. Implementatsiya naqshi `http`/`db` bilan
-bir xil.
+- **`=`/`exp`/param are immutable**, `<-` is mutable. A param can be reassigned
+  with `<-` (the old behavior is preserved).
+- **Closure capture, mutual recursion, shadowing, `each` loop var mutability** —
+  these work correctly today; do not introduce regressions.
+- **Scope/`Parent` enum** (`interp.rs`): top-level fns hold a `Parent::Root`
+  marker (they do not keep the root Arc) — this is the optimization that
+  eliminated Arc contention. Do not change it without understanding it →
+  [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- **`http.serve`** freezes globals with `freeze_globals` (a lock-free snapshot).
 
-## 9. Kutilmagan xatolar va kamchiliklar
+---
 
-Hozirda `fluxon` ichida yetishmayotgan qismlar bo'lishi mumkin, yoki xato va kamchiliklar bo'lishi mumkin
-bunday holatda chiqgan muamo haqida github issue yordamida repoga bildirish kerak bo'ladi. 
+## 8. Battery status (all ready)
+
+All batteries specified in `docs/fluxon-agent.md` are **implemented** in the
+runtime: `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`
+(`ai` — `ai.ask`/`ai.json`/`ai.run`, `$AI_KEY`, via the Anthropic Messages API;
+`runtime/src/ai_mod.rs`).
+
+When adding a new battery, treat the spec (`docs/fluxon-agent.md`) as the
+**source of truth** — the syntax is defined there. The implementation pattern is
+the same as `http`/`db`.
+
+## 9. Unexpected bugs and gaps
+
+Fluxon may still have missing pieces, bugs, or rough edges. When you hit one,
+report it back to the repo via a GitHub issue.

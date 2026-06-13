@@ -1,19 +1,19 @@
-// HTTP CORS end-to-end testi (issue #135).
+// HTTP CORS end-to-end test (issue #135).
 //
-// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP so'rovlar bilan
-// `http.cors` ni tekshiramiz:
-//   - OPTIONS preflight avtomatik 204 + Access-Control-Allow-* qaytaradi
-//   - oddiy GET javobiga ham CORS header qo'shiladi
-//   - ruxsat etilmagan origin CORS header olmaydi
-//   - 404 javob ham CORS header oladi
+// We run the `fluxon` binary as a subprocess and check `http.cors` with real
+// HTTP requests:
+//   - OPTIONS preflight automatically returns 204 + Access-Control-Allow-*
+//   - a plain GET response also gets CORS headers added
+//   - a disallowed origin does not get CORS headers
+//   - a 404 response also gets CORS headers
 //
-// Pattern http_middleware_e2e.rs dan: vaqtinchalik .fx fayl + subprocess + raw HTTP/1.1.
+// Pattern from http_middleware_e2e.rs: temporary .fx file + subprocess + raw HTTP/1.1.
 
 use std::io::Write;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-// Skriptni vaqtinchalik faylga yozib, fluxon serverini ishga tushiradi.
+// Writes the script to a temporary file and starts the fluxon server.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("fluxon_cors_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
@@ -29,7 +29,7 @@ fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     (child, path)
 }
 
-// Port LISTEN bo'lguncha kutadi (server boot). Maks ~3s.
+// Waits until the port is LISTENing (server boot). Max ~3s.
 async fn wait_port(port: u16) {
     for _ in 0..60 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -43,7 +43,7 @@ async fn wait_port(port: u16) {
     panic!("port {} ochilmadi", port);
 }
 
-// Child drop bo'lganda jarayonni o'ldirish guard'i.
+// Guard that kills the process when Child is dropped.
 struct Killer(Child);
 impl Drop for Killer {
     fn drop(&mut self) {
@@ -52,14 +52,14 @@ impl Drop for Killer {
     }
 }
 
-// Raw HTTP/1.1 so'rov, ixtiyoriy Origin header bilan. To'liq javob matnini
-// qaytaradi (status + header + body) — test header'larni undan qidiradi.
+// Raw HTTP/1.1 request, with an optional Origin header. Returns the full
+// response text (status + headers + body) -- the test searches it for headers.
 async fn http_request(port: u16, method: &str, path: &str, origin: Option<&str>) -> String {
     http_request_full(port, method, path, origin, false).await
 }
 
-// `preflight: true` bo'lsa Access-Control-Request-Method header qo'shadi —
-// brauzer CORS preflight'i shu bilan belgilanadi (Fetch standarti).
+// If `preflight: true`, adds an Access-Control-Request-Method header -- this is
+// how a browser CORS preflight is identified (Fetch standard).
 async fn http_request_full(
     port: u16,
     method: &str,
@@ -90,8 +90,8 @@ async fn http_request_full(
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// Wildcard CORS (dev) — hammaga ochiq. Oddiy OPTIONS handler'i ham bor:
-// CORS yoqilgan bo'lsa ham preflight EMAS so'rov shu handler'ga tushishi kerak.
+// Wildcard CORS (dev) -- open to everyone. There is also a plain OPTIONS handler:
+// even with CORS enabled, a NON-preflight request must reach this handler.
 const STAR_SCRIPT: &str = r#"
 http.cors "*"
 
@@ -112,13 +112,13 @@ async fn cors_oddiy_javobga_header_qoshiladi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Oddiy GET — javob tanasi + Access-Control-Allow-Origin: * bo'lishi kerak.
+    // Plain GET -- response body + Access-Control-Allow-Origin: * expected.
     let resp = http_request(port, "GET", "/data", Some("https://app.example.com")).await;
-    assert!(resp.contains("200"), "200 kutilgan: {}", resp);
+    assert!(resp.contains("200"), "expected 200: {}", resp);
     assert!(
         resp.to_lowercase()
             .contains("access-control-allow-origin: *"),
-        "Allow-Origin: * kutilgan: {}",
+        "expected Allow-Origin: *: {}",
         resp
     );
 
@@ -133,8 +133,8 @@ async fn cors_preflight_options_avtomatik_javob() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // OPTIONS /data + Access-Control-Request-Method (haqiqiy preflight) — route
-    // handler yo'q, lekin CORS preflight 204 + Allow-* qaytaradi.
+    // OPTIONS /data + Access-Control-Request-Method (real preflight) -- no route
+    // handler, but CORS preflight returns 204 + Allow-*.
     let resp = http_request_full(
         port,
         "OPTIONS",
@@ -146,22 +146,22 @@ async fn cors_preflight_options_avtomatik_javob() {
     let low = resp.to_lowercase();
     assert!(
         resp.contains("204"),
-        "preflight 204 No Content kutilgan: {}",
+        "preflight expected 204 No Content: {}",
         resp
     );
     assert!(
         low.contains("access-control-allow-origin: *"),
-        "preflight Allow-Origin kutilgan: {}",
+        "preflight expected Allow-Origin: {}",
         resp
     );
     assert!(
         low.contains("access-control-allow-methods:"),
-        "preflight Allow-Methods kutilgan: {}",
+        "preflight expected Allow-Methods: {}",
         resp
     );
     assert!(
         low.contains("access-control-max-age:"),
-        "preflight Max-Age kutilgan: {}",
+        "preflight expected Max-Age: {}",
         resp
     );
 
@@ -170,21 +170,21 @@ async fn cors_preflight_options_avtomatik_javob() {
 
 #[tokio::test]
 async fn cors_oddiy_options_handlerga_tushadi() {
-    // CORS yoqilgan, lekin preflight EMAS OPTIONS (Access-Control-Request-Method
-    // yo'q) — foydalanuvchining `http.on :options "/data"` handler'iga tushishi
-    // kerak, bo'sh 204 EMAS (codex P2).
+    // CORS enabled, but a NON-preflight OPTIONS (no Access-Control-Request-Method)
+    // -- must reach the user's `http.on :options "/data"` handler, NOT an empty
+    // 204 (codex P2).
     let port = 8436;
     let script = STAR_SCRIPT.replace("PORT", &port.to_string());
     let (child, path) = spawn_server(port, &script);
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Origin bor, lekin Access-Control-Request-Method YO'Q — bu preflight emas.
+    // Origin is present, but NO Access-Control-Request-Method -- this is not a preflight.
     let resp = http_request(port, "OPTIONS", "/data", Some("https://app.example.com")).await;
-    assert!(resp.contains("200"), "handler 200 kutilgan: {}", resp);
+    assert!(resp.contains("200"), "handler expected 200: {}", resp);
     assert!(
         resp.contains("custom_options"),
-        "oddiy OPTIONS foydalanuvchi handler'iga tushishi kerak: {}",
+        "a plain OPTIONS should reach the user handler: {}",
         resp
     );
 
@@ -199,21 +199,21 @@ async fn cors_404_ham_header_oladi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Mavjud bo'lmagan yo'l — 404, lekin CORS header bo'lishi kerak (brauzer
-    // xato tanasini o'qiy olsin).
+    // A nonexistent path -- 404, but CORS headers must be present (so the browser
+    // can read the error body).
     let resp = http_request(port, "GET", "/yoq", Some("https://app.example.com")).await;
-    assert!(resp.contains("404"), "404 kutilgan: {}", resp);
+    assert!(resp.contains("404"), "expected 404: {}", resp);
     assert!(
         resp.to_lowercase()
             .contains("access-control-allow-origin: *"),
-        "404 javob ham CORS header olishi kerak: {}",
+        "a 404 response should also get CORS headers: {}",
         resp
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// Aniq origin ro'yxati + credentials.
+// Explicit origin list + credentials.
 const LIST_SCRIPT: &str = r#"
 http.cors ["https://app.example.com"] {creds: true}
 
@@ -231,17 +231,17 @@ async fn cors_ruxsat_etilgan_origin_aks_ettiriladi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Ro'yxatdagi origin — aks ettiriladi + Allow-Credentials: true.
+    // An origin from the list -- reflected + Allow-Credentials: true.
     let resp = http_request(port, "GET", "/me", Some("https://app.example.com")).await;
     let low = resp.to_lowercase();
     assert!(
         low.contains("access-control-allow-origin: https://app.example.com"),
-        "ruxsat etilgan origin aks ettirilishi kerak: {}",
+        "an allowed origin should be reflected: {}",
         resp
     );
     assert!(
         low.contains("access-control-allow-credentials: true"),
-        "Allow-Credentials kutilgan: {}",
+        "expected Allow-Credentials: {}",
         resp
     );
 
@@ -256,19 +256,19 @@ async fn cors_ruxsat_etilmagan_origin_header_olmaydi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Ro'yxatda yo'q origin — javob baribir 200 (server tomonidan), lekin
-    // CORS header YO'Q (brauzer so'rovni bloklaydi).
+    // An origin not in the list -- the response is still 200 (from the server),
+    // but NO CORS headers (the browser blocks the request).
     let resp = http_request(port, "GET", "/me", Some("https://evil.example.com")).await;
     assert!(
         !resp.to_lowercase().contains("access-control-allow-origin"),
-        "ruxsat etilmagan origin CORS header OLMASLIGI kerak: {}",
+        "a disallowed origin should NOT get CORS headers: {}",
         resp
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// Past max_body bilan POST handler — katta tana 413 qaytaradi.
+// POST handler with a low max_body -- a large body returns 413.
 const LIMIT_SCRIPT: &str = r#"
 http.cors "*"
 
@@ -280,9 +280,9 @@ http.serve PORT {max_body: 10}
 
 #[tokio::test]
 async fn cors_413_xato_javob_ham_header_oladi() {
-    // Body-read xato javobi (413 Payload Too Large) handler'gacha yetmaydi, lekin
-    // CORS yoqilgan bo'lsa baribir Access-Control-Allow-Origin olishi kerak —
-    // hujjat "har javobga qo'shiladi" deydi (codex P2).
+    // A body-read error response (413 Payload Too Large) never reaches the handler,
+    // but with CORS enabled it must still get Access-Control-Allow-Origin -- the
+    // docs say "added to every response" (codex P2).
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let port = 8437;
     let script = LIMIT_SCRIPT.replace("PORT", &port.to_string());
@@ -290,7 +290,7 @@ async fn cors_413_xato_javob_ham_header_oladi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Content-Length max_body (10) dan katta — tez yo'l tananing o'qimasdan 413.
+    // Content-Length larger than max_body (10) -- fast path returns 413 without reading the body.
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("ulanish");
@@ -301,11 +301,11 @@ async fn cors_413_xato_javob_ham_header_oladi() {
     stream.read_to_end(&mut buf).await.expect("o'qish");
     let resp = String::from_utf8_lossy(&buf).to_string();
 
-    assert!(resp.contains("413"), "413 kutilgan: {}", resp);
+    assert!(resp.contains("413"), "expected 413: {}", resp);
     assert!(
         resp.to_lowercase()
             .contains("access-control-allow-origin: *"),
-        "413 javob ham CORS header olishi kerak: {}",
+        "a 413 response should also get CORS headers: {}",
         resp
     );
 

@@ -1,12 +1,12 @@
-// Fluxon HTTP battery — server (http.on/http.serve/rep) va klient (http.get/post).
+// Fluxon HTTP battery — server (http.on/http.serve/rep) and client (http.get/post).
 //
-// Server tokio + hyper ustida quriladi. Fluxon handler'lari sinxron tree-walking
-// bo'lgani uchun har request `spawn_blocking` ichida bajariladi — bu CPU ishini
-// tokio worker'larini bloklamasdan HAQIQIY PARALLEL qiladi (Value: Send+Sync,
-// thread-safety refactor shuni ta'minlaydi).
+// The server is built on tokio + hyper. Because Fluxon handlers are synchronous
+// tree-walking, each request runs inside `spawn_blocking` — this makes the CPU
+// work TRULY PARALLEL without blocking tokio workers (Value: Send+Sync, the
+// thread-safety refactor guarantees this).
 //
 // `rep status body` -> {__resp:true status body} map (builtins.rs::install).
-// `fail status "msg"` -> Flow::Fail -> JSON xato javob.
+// `fail status "msg"` -> Flow::Fail -> JSON error response.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -30,9 +30,9 @@ use crate::builtins::{json_decode, json_encode};
 use crate::interp::{Flow, Interp};
 use crate::value::Value;
 
-// --- marshrut tuzilmasi ---
+// --- route structure ---
 
-// Yo'l segmenti: literal (`notes`) yoki parametr (`:id`).
+// Path segment: literal (`notes`) or parameter (`:id`).
 #[derive(Clone)]
 pub enum Seg {
     Lit(String),
@@ -46,24 +46,24 @@ pub struct Route {
     pub handler: Value, // Value::Fn (closure)
 }
 
-// Rate-limit holati: kalit -> (window_id, count). Fixed-window — `window_id =
-// now_sek / window_sek`. Arc<Mutex> shuning uchun limiter REGISTRATSIYA paytida
-// bir marta yaratiladi, har request shu BITTA holatni ulashadi (Middleware klonida
-// Arc nusxalanadi — pointer bir xil), shu sababli parallel request'lar atomik
-// sanaydi (issue #79: thread-safe). Holat in-memory — bitta instance uchun (docs).
+// Rate-limit state: key -> (window_id, count). Fixed-window — `window_id =
+// now_sec / window_sec`. Arc<Mutex> so the limiter is created once at
+// REGISTRATION time, and every request shares this SINGLE state (cloning a
+// Middleware copies the Arc — same pointer), which is why parallel requests count
+// atomically (issue #79: thread-safe). State is in-memory — for a single instance (docs).
 //
-// Xotira chegarasi: kalit funksiyasi foydalanuvchi nazoratidagi qiymatga
-// (`req.headers.x_api_key`) asoslansa, har yangi qiymat HashMap'ga kirib qoladi.
-// Public endpoint'da mijoz har so'rovda yangi kalit yuborib holatni cheksiz
-// o'stira oladi. Buni oldini olish uchun `LimitBucket` har `SWEEP_EVERY`
-// operatsiyada bir marta ESKI OYNADAGI kalitlarni tozalaydi (amortizatsiyalangan
-// O(1): tozalash sikli kamdan-kam ishlaydi). Eski oyna kaliti baribir keyingi
-// so'rovda count=0 dan qayta boshlanardi — shuning uchun o'chirish xavfsiz.
+// Memory bound: if the key function is based on a user-controlled value
+// (`req.headers.x_api_key`), every new value lands in the HashMap. On a public
+// endpoint a client can grow the state without bound by sending a new key on
+// every request. To prevent this, `LimitBucket` sweeps OLD-WINDOW keys once every
+// `SWEEP_EVERY` operations (amortized O(1): the cleanup loop runs rarely). An
+// old-window key would restart from count=0 on the next request anyway — so
+// removing it is safe.
 //
-// pub: `pub enum MwKind` (Middleware orqali) LimitState turini oshkor qiladi.
+// pub: `pub enum MwKind` (via Middleware) exposes the LimitState type.
 pub struct LimitBucket {
     counts: HashMap<String, (u64, u32)>,
-    // Oxirgi tozalashdan beri operatsiyalar soni (sweep'ni amortizatsiya qiladi).
+    // Number of operations since the last cleanup (amortizes the sweep).
     ops: u32,
 }
 
@@ -76,41 +76,41 @@ impl LimitBucket {
     }
 }
 
-// Necha operatsiyada bir marta eski oyna kalitlarini tozalaymiz.
+// How often (in operations) we sweep old-window keys.
 const SWEEP_EVERY: u32 = 1024;
 
-// HTTP server uchun standart so'rov tanasi (body) o'lcham chegarasi (issue #91).
-// Chegarasiz `collect()` butun tanani xotiraga yig'adi — mijoz ulkan body yuborib
-// server xotirasini to'ldira oladi (DoS). Default 10 MiB; `http.serve PORT
-// {max_body: N}` bilan sozlanadi. `max_body: 0` chegarani o'chiradi (cheklovsiz —
-// faqat ishonchli, ichki tarmoq orqasida ishlating).
+// Default request body size limit for the HTTP server (issue #91). An unbounded
+// `collect()` gathers the entire body into memory — a client can fill server
+// memory by sending a huge body (DoS). Default 10 MiB; configured via `http.serve
+// PORT {max_body: N}`. `max_body: 0` disables the limit (unbounded — use only
+// behind a trusted, internal network).
 const DEFAULT_MAX_BODY: usize = 10 * 1024 * 1024;
 
-// HTTP klient (http.get/post/...) standart timeout'i (issue #92). Timeout'siz
-// qotgan upstream butun skriptni (yoki handler ichida chaqirilsa, o'sha request
-// thread'ini) ABADIY bloklaydi. Default 30s; `http.get url {timeout: N}` (soniya)
-// bilan sozlanadi, `timeout: 0` — timeout'siz (faqat ishonchli upstream uchun).
-// Timeout butun so'rovni qamraydi: connect + yuborish + javob (redirect'lar bilan
-// birga) — qaysidir bosqichda osilib qolsa ham vaqt tugashi bilan xato qaytadi.
+// Default timeout for the HTTP client (http.get/post/...) (issue #92). Without a
+// timeout, a stuck upstream blocks the whole script FOREVER (or, if called inside
+// a handler, that request thread). Default 30s; configured via `http.get url
+// {timeout: N}` (seconds); `timeout: 0` — no timeout (only for trusted upstreams).
+// The timeout covers the whole request: connect + send + response (including
+// redirects) — even if it hangs at some stage, an error is returned once time runs out.
 const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 30;
 
-// HTTP server header o'qish timeout'i (issue #92). Slowloris-uslubdagi ulanish
-// header'larni juda sekin (yoki umuman) yubormay socket/task'ni cheksiz ushlab
-// turishi mumkin. hyper header'larni shu muddatda to'liq olmasa ulanishni yopadi.
-// (header_read_timeout faqat Builder::timer o'rnatilgan bo'lsa kuchga kiradi.)
+// HTTP server header-read timeout (issue #92). A slowloris-style connection may
+// send headers very slowly (or not at all), holding the socket/task indefinitely.
+// If hyper does not receive the headers fully within this period it closes the
+// connection. (header_read_timeout only takes effect when Builder::timer is set.)
 const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 
 pub type LimitState = Arc<Mutex<LimitBucket>>;
 
-// Middleware turi: oddiy fn (use/before) yoki rate-limiter (http.limit). Limit
-// ham SHU ro'yxatga qo'shiladi (alohida emas) — shunda u boshqa middleware bilan
-// DEKLARATSIYA TARTIBIDA ishlaydi: undan oldin e'lon qilingan auth `req.ctx`'ga
-// tenant_id yozsa, kalit funksiyasi `\req -> req.ctx.tenant_id` uni ko'radi (#79).
+// Middleware kind: a plain fn (use/before) or a rate-limiter (http.limit). Limit
+// is added to THIS SAME list (not separately) — so it runs in DECLARATION ORDER
+// relative to other middleware: if an auth declared before it writes tenant_id
+// into `req.ctx`, the key function `\req -> req.ctx.tenant_id` sees it (#79).
 #[derive(Clone)]
 pub enum MwKind {
-    // http.use / http.before — handler'ni chaqiradi; `fail`/`rep` zanjirni to'xtatadi.
+    // http.use / http.before — calls the handler; `fail`/`rep` stops the chain.
     Fn,
-    // http.limit — handler KALIT funksiyasi (req -> kalit). Limit oshsa 429.
+    // http.limit — the handler is the KEY function (req -> key). On exceeding the limit, 429.
     Limit {
         limit: u32,
         window_secs: u64,
@@ -118,9 +118,9 @@ pub enum MwKind {
     },
 }
 
-// Middleware (issue #67). `scope` = None — global (`http.use`, barcha yo'lga);
-// Some(shablon) — prefiks bo'yicha (`http.before "/api/*"`). Ro'yxatda
-// deklaratsiya tartibida saqlanadi (use/before/limit aralashsa ham tartib aniq).
+// Middleware (issue #67). `scope` = None — global (`http.use`, applies to every
+// path); Some(pattern) — by prefix (`http.before "/api/*"`). Stored in the list
+// in declaration order (the order is well-defined even when use/before/limit are mixed).
 #[derive(Clone)]
 pub struct Middleware {
     pub scope: Option<String>,
@@ -589,7 +589,7 @@ fn rate_limited_response(retry_after: u64) -> Value {
     let mut body = BTreeMap::new();
     body.insert(
         "error".to_string(),
-        Value::Str("rate limit oshib ketdi".to_string()),
+        Value::Str("rate limit exceeded".to_string()),
     );
     let mut headers = BTreeMap::new();
     headers.insert(
@@ -937,7 +937,7 @@ fn checked_status(n: i64) -> u16 {
     match u16::try_from(n) {
         Ok(s) if StatusCode::from_u16(s).is_ok() => s,
         _ => {
-            eprintln!("Fluxon HTTP: noto'g'ri status kodi {} → 500", n);
+            eprintln!("Fluxon HTTP: invalid status code {} → 500", n);
             500
         }
     }
@@ -948,7 +948,7 @@ fn checked_status(n: i64) -> u16 {
 // kutilmagan holatda panic o'rniga 500 qaytaradi.
 fn status_or_500(status: u16) -> StatusCode {
     StatusCode::from_u16(status).unwrap_or_else(|_| {
-        eprintln!("Fluxon HTTP: noto'g'ri status kodi {} → 500", status);
+        eprintln!("Fluxon HTTP: invalid status code {} → 500", status);
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
@@ -974,10 +974,7 @@ fn payload_too_large(limit: usize) -> Response<Full<Bytes>> {
     let mut m = BTreeMap::new();
     m.insert(
         "error".to_string(),
-        Value::Str(format!(
-            "so'rov tanasi juda katta (chegara: {} bayt)",
-            limit
-        )),
+        Value::Str(format!("request body too large (limit: {} bytes)", limit)),
     );
     json_response(413, json_encode(&Value::Map(m)))
 }
@@ -1152,7 +1149,7 @@ fn flow_to_response(flow: Flow) -> Response<Full<Bytes>> {
         Flow::Fail { status, message } => (checked_status(status.unwrap_or(400)), message),
         Flow::Error(e) => (500, e),
         Flow::Return(v) => return value_to_response(v), // handler ichida `ret`
-        Flow::Skip | Flow::Stop => (500, "handler skip/stop ishlatdi".to_string()),
+        Flow::Skip | Flow::Stop => (500, "handler used skip/stop".to_string()),
     };
     let mut m = BTreeMap::new();
     m.insert("error".to_string(), Value::Str(message));
@@ -1176,10 +1173,7 @@ impl Interp {
             "post" => http_client("POST", args, true),
             "put" => http_client("PUT", args, true),
             "del" => http_client("DELETE", args, false),
-            _ => Err(Flow::err(format!(
-                "http modulida '{}' funksiyasi yo'q",
-                func
-            ))),
+            _ => Err(Flow::err(format!("http module has no '{}' function", func))),
         }
     }
 
@@ -1189,17 +1183,17 @@ impl Interp {
             Some(Value::Sym(s)) | Some(Value::Str(s)) => s.to_lowercase(),
             _ => {
                 return Err(Flow::err(
-                    "http.on: 1-argument metod (:get/:post...) bo'lishi kerak",
+                    "http.on: argument 1 must be a method (:get/:post...)",
                 ));
             }
         };
         let path = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
-            _ => return Err(Flow::err("http.on: 2-argument yo'l (str) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.on: argument 2 must be a path (str)")),
         };
         let handler = match args.get(2) {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
-            _ => return Err(Flow::err("http.on: 3-argument handler (fn) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.on: argument 3 must be a handler (fn)")),
         };
         self.routes.lock().unwrap().push(Route {
             method,
@@ -1214,7 +1208,7 @@ impl Interp {
     fn http_use(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let handler = match args.first() {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
-            _ => return Err(Flow::err("http.use: argument handler (fn) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.use: argument must be a handler (fn)")),
         };
         self.middlewares.lock().unwrap().push(Middleware {
             scope: None,
@@ -1230,17 +1224,13 @@ impl Interp {
         let pat = match args.first() {
             Some(Value::Str(s)) => s.clone(),
             _ => {
-                return Err(Flow::err(
-                    "http.before: 1-argument yo'l (str) bo'lishi kerak",
-                ));
+                return Err(Flow::err("http.before: argument 1 must be a path (str)"));
             }
         };
         let handler = match args.get(1) {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
             _ => {
-                return Err(Flow::err(
-                    "http.before: 2-argument handler (fn) bo'lishi kerak",
-                ));
+                return Err(Flow::err("http.before: argument 2 must be a handler (fn)"));
             }
         };
         self.middlewares.lock().unwrap().push(Middleware {
@@ -1278,7 +1268,7 @@ impl Interp {
                         Value::Str(s) => list.push(s.clone()),
                         _ => {
                             return Err(Flow::err(
-                                "http.cors: origin ro'yxati str elementlardan iborat bo'lishi kerak",
+                                "http.cors: origin list must consist of str elements",
                             ));
                         }
                     }
@@ -1287,7 +1277,7 @@ impl Interp {
             }
             _ => {
                 return Err(Flow::err(
-                    "http.cors: 1-argument \"*\" yoki origin'lar ro'yxati bo'lishi kerak",
+                    "http.cors: argument 1 must be \"*\" or a list of origins",
                 ));
             }
         };
@@ -1318,7 +1308,7 @@ impl Interp {
             }
         } else if args.len() > 1 && !matches!(args.get(1), Some(Value::Nil)) {
             return Err(Flow::err(
-                "http.cors: 2-argument opsiyalar map'i bo'lishi kerak ({creds: true})",
+                "http.cors: argument 2 must be an options map ({creds: true})",
             ));
         }
 
@@ -1341,7 +1331,7 @@ impl Interp {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 return Err(Flow::err(
-                    "http.static: 1-argument prefiks (str) bo'lishi kerak, masalan \"/assets\"",
+                    "http.static: argument 1 must be a prefix (str), for example \"/assets\"",
                 ));
             }
         };
@@ -1349,7 +1339,7 @@ impl Interp {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 return Err(Flow::err(
-                    "http.static: 2-argument katalog (str) bo'lishi kerak, masalan \"./public\"",
+                    "http.static: argument 2 must be a directory (str), for example \"./public\"",
                 ));
             }
         };
@@ -1361,7 +1351,7 @@ impl Interp {
             ),
             _ => {
                 return Err(Flow::err(
-                    "http.static: 3-argument opsiyalar map'i bo'lishi kerak ({spa: true})",
+                    "http.static: argument 3 must be an options map ({spa: true})",
                 ));
             }
         };
@@ -1371,11 +1361,15 @@ impl Interp {
         } else {
             self.base_dir().join(p)
         };
-        let canon = std::fs::canonicalize(&resolved)
-            .map_err(|e| Flow::err(format!("http.static: '{}' katalogi ochilmadi: {}", dir, e)))?;
+        let canon = std::fs::canonicalize(&resolved).map_err(|e| {
+            Flow::err(format!(
+                "http.static: could not open directory '{}': {}",
+                dir, e
+            ))
+        })?;
         if !canon.is_dir() {
             return Err(Flow::err(format!(
-                "http.static: '{}' katalog emas (fayl ko'rsatilgan)",
+                "http.static: '{}' is not a directory (a file was given)",
                 dir
             )));
         }
@@ -1406,7 +1400,7 @@ impl Interp {
             Some(Value::Int(n)) if *n > 0 => *n as u32,
             _ => {
                 return Err(Flow::err(
-                    "http.limit: limit musbat int bo'lishi kerak (masalan 100)",
+                    "http.limit: limit must be a positive int (for example 100)",
                 ));
             }
         };
@@ -1414,14 +1408,12 @@ impl Interp {
             Some(Value::Sym(s)) | Some(Value::Str(s)) => match window_to_secs(s) {
                 Some(secs) => secs,
                 None => {
-                    return Err(Flow::err(
-                        "http.limit: oyna :sec, :min yoki :hr bo'lishi kerak",
-                    ));
+                    return Err(Flow::err("http.limit: window must be :sec, :min or :hr"));
                 }
             },
             _ => {
                 return Err(Flow::err(
-                    "http.limit: oyna birligi (:sec/:min/:hr) bo'lishi kerak",
+                    "http.limit: window unit (:sec/:min/:hr) is required",
                 ));
             }
         };
@@ -1429,7 +1421,7 @@ impl Interp {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
             _ => {
                 return Err(Flow::err(
-                    "http.limit: kalit funksiyasi (\\req -> ...) bo'lishi kerak",
+                    "http.limit: key function (\\req -> ...) is required",
                 ));
             }
         };
@@ -1453,7 +1445,7 @@ impl Interp {
     fn http_serve(self: &Arc<Self>, args: Vec<Value>) -> Result<Value, Flow> {
         let port = match args.first() {
             Some(Value::Int(n)) => *n as u16,
-            _ => return Err(Flow::err("http.serve: port (int) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.serve: port (int) is required")),
         };
         // Ixtiyoriy ikkinchi argument — opsiyalar map'i: `{max_body: BAYT}`.
         // Berilmasa default DEFAULT_MAX_BODY; `max_body: 0` chegarani o'chiradi.
@@ -1463,14 +1455,12 @@ impl Interp {
                 None => DEFAULT_MAX_BODY,
                 Some(Value::Int(n)) if *n >= 0 => *n as usize,
                 _ => {
-                    return Err(Flow::err(
-                        "http.serve: max_body manfiy bo'lmagan int bo'lishi kerak",
-                    ));
+                    return Err(Flow::err("http.serve: max_body must be a non-negative int"));
                 }
             },
             _ => {
                 return Err(Flow::err(
-                    "http.serve: ikkinchi argument opsiyalar map'i bo'lishi kerak ({max_body: N})",
+                    "http.serve: second argument must be an options map ({max_body: N})",
                 ));
             }
         };
@@ -1491,7 +1481,7 @@ pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     TcpListener::bind(addr)
         .await
-        .map_err(|e| Flow::err(format!("Fluxon HTTP port {} bind xatosi: {}", port, e)))
+        .map_err(|e| Flow::err(format!("Fluxon HTTP port {} bind error: {}", port, e)))
 }
 
 // Bitta HTTP server uchun accept loop — umumiy event-loop ichida spawn qilinadi
@@ -1505,7 +1495,7 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: us
         let (stream, peer) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("http accept xatosi: {}", e);
+                eprintln!("http accept error: {}", e);
                 continue;
             }
         };
@@ -1529,7 +1519,7 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: us
                 .serve_connection(io, service)
                 .await
             {
-                eprintln!("ulanish xatosi: {}", e);
+                eprintln!("connection error: {}", e);
             }
         });
     }
@@ -1765,7 +1755,7 @@ async fn handle_request(
             let mut m = BTreeMap::new();
             m.insert(
                 "error".to_string(),
-                Value::Str(format!("topilmadi: {} {}", method, path)),
+                Value::Str(format!("not found: {} {}", method, path)),
             );
             // 404 ham CORS header oladi — aks holda brauzer xato javob tanasini
             // CORS to'sig'i sabab o'qiy olmaydi (debugni qiyinlashtiradi).
@@ -1786,7 +1776,7 @@ async fn handle_request(
             // header bilan yakunlanadi (codex P2: har javob CORS oladi).
             Err(_) => {
                 return Ok(cors_finalize(
-                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    bad_request("could not read request body"),
                     &cors,
                     req_origin.as_deref(),
                 ));
@@ -1825,7 +1815,7 @@ async fn handle_request(
                     ));
                 }
                 return Ok(cors_finalize(
-                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    bad_request("could not read request body"),
                     &cors,
                     req_origin.as_deref(),
                 ));
@@ -2015,7 +2005,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
         Some(Value::Str(s)) => s.clone(),
         _ => {
             return Err(Flow::err(format!(
-                "http.{}: url (str) kerak",
+                "http.{}: url (str) is required",
                 method.to_lowercase()
             )));
         }
@@ -2058,7 +2048,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
             loop {
                 let uri: hyper::Uri = current
                     .parse()
-                    .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("invalid url: {}", e)))?;
 
                 let this_origin = uri_origin(&uri);
                 match &first_origin {
@@ -2094,12 +2084,12 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                 };
                 let req = builder
                     .body(Full::new(payload))
-                    .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("building request: {}", e)))?;
 
                 let resp = pooled_http_client()
                     .request(req)
                     .await
-                    .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("http request: {}", e)))?;
 
                 let status = resp.status().as_u16();
 
@@ -2115,7 +2105,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     hops += 1;
                     if hops > opts.max {
                         return Err(Flow::err(format!(
-                            "redirect limiti oshib ketdi ({} hop)",
+                            "redirect limit exceeded ({} hops)",
                             opts.max
                         )));
                     }
@@ -2172,7 +2162,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     .into_body()
                     .collect()
                     .await
-                    .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
+                    .map_err(|e| Flow::err(format!("reading response: {}", e)))?
                     .to_bytes();
                 let resp_body = match String::from_utf8(bytes.to_vec()) {
                     Ok(text) if resp_is_json => json_decode(&text).unwrap_or(Value::Str(text)),
@@ -2200,7 +2190,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
             Some(dur) => match tokio::time::timeout(dur, work).await {
                 Ok(r) => r,
                 Err(_) => Err(Flow::err(format!(
-                    "http so'rov timeout ({} sek ichida javob yo'q)",
+                    "http request timeout (no response within {} sec)",
                     dur.as_secs()
                 ))),
             },
@@ -2283,7 +2273,7 @@ mod tests {
     fn hstr(m: &BTreeMap<String, Value>, k: &str) -> String {
         match m.get(k) {
             Some(Value::Str(s)) => s.clone(),
-            _ => panic!("{k}: Str qiymat kutilgan edi"),
+            _ => panic!("{k}: Str value expected"),
         }
     }
 
@@ -2315,11 +2305,11 @@ mod tests {
             None,
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         match m.get("body") {
             Some(Value::Bytes(b)) => assert_eq!(**b, vec![0xff, 0xfe, 0x00]),
-            _ => panic!("ikkilik tana bytes bo'lishi kerak"),
+            _ => panic!("binary body must be bytes"),
         }
     }
 
@@ -2333,16 +2323,16 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             "1.1.1.1".into(),
-            Bytes::from("salom"),
+            Bytes::from("hello"),
             false,
             None,
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         match m.get("body") {
-            Some(Value::Str(s)) => assert_eq!(s, "salom"),
-            _ => panic!("matn tana str bo'lishi kerak"),
+            Some(Value::Str(s)) => assert_eq!(s, "hello"),
+            _ => panic!("text body must be str"),
         }
     }
 
@@ -2407,22 +2397,22 @@ mod tests {
         let body = multipart_body(
             "BB",
             &[
-                ("title", None, b"salom dunyo"),
-                ("doc", Some("a.txt"), b"matn fayl"),
+                ("title", None, b"hello world"),
+                ("doc", Some("a.txt"), b"text file"),
             ],
         );
-        let (fields, files) = parse_multipart(&body, "BB").expect("parse bo'lishi kerak");
+        let (fields, files) = parse_multipart(&body, "BB").expect("parse must succeed");
         match fields.get("title") {
-            Some(Value::Str(s)) => assert_eq!(s, "salom dunyo"),
-            _ => panic!("title str bo'lishi kerak"),
+            Some(Value::Str(s)) => assert_eq!(s, "hello world"),
+            _ => panic!("title must be str"),
         }
         assert_eq!(files.len(), 1);
         let Value::Map(f) = &files[0] else {
-            panic!("fayl map bo'lishi kerak");
+            panic!("file map expected");
         };
         assert!(matches!(f.get("name"), Some(Value::Str(s)) if s == "doc"));
         assert!(matches!(f.get("filename"), Some(Value::Str(s)) if s == "a.txt"));
-        assert!(matches!(f.get("content"), Some(Value::Str(s)) if s == "matn fayl"));
+        assert!(matches!(f.get("content"), Some(Value::Str(s)) if s == "text file"));
         assert!(matches!(f.get("size"), Some(Value::Int(9))));
     }
 
@@ -2432,13 +2422,13 @@ mod tests {
         // va baytlar aynan saqlanadi; size — bayt soni.
         let data: &[u8] = &[0xff, 0xd8, b'\r', b'\n', 0x00, 0xfe];
         let body = multipart_body("XX", &[("img", Some("a.jpg"), data)]);
-        let (_, files) = parse_multipart(&body, "XX").expect("parse bo'lishi kerak");
+        let (_, files) = parse_multipart(&body, "XX").expect("parse must succeed");
         let Value::Map(f) = &files[0] else {
-            panic!("fayl map bo'lishi kerak");
+            panic!("file map expected");
         };
         match f.get("content") {
             Some(Value::Bytes(b)) => assert_eq!(**b, data.to_vec()),
-            _ => panic!("ikkilik mazmun bytes bo'lishi kerak"),
+            _ => panic!("binary content must be bytes"),
         }
         assert!(matches!(f.get("size"), Some(Value::Int(6))));
     }
@@ -2454,7 +2444,7 @@ mod tests {
                 ("docs", Some("2.txt"), b"ikki"),
             ],
         );
-        let (_, files) = parse_multipart(&body, "MM").expect("parse bo'lishi kerak");
+        let (_, files) = parse_multipart(&body, "MM").expect("parse must succeed");
         assert_eq!(files.len(), 2);
     }
 
@@ -2463,16 +2453,16 @@ mod tests {
         // Fayl mazmunida `\r\n--abcXYZ` bor (boundary `abc` ning prefiksi, lekin
         // to'liq chegara qatori emas) — qism KESILMAY butun saqlanishi kerak
         // (codex P2 revyu: faqat `\r\n--boundary` qidirish mazmunni buzardi).
-        let data: &[u8] = b"birinchi\r\n--abcXYZ\r\nqolgan qism";
+        let data: &[u8] = b"first\r\n--abcXYZ\r\nremaining part";
         let body = multipart_body("abc", &[("doc", Some("a.txt"), data)]);
-        let (_, files) = parse_multipart(&body, "abc").expect("parse bo'lishi kerak");
+        let (_, files) = parse_multipart(&body, "abc").expect("parse must succeed");
         assert_eq!(files.len(), 1);
         let Value::Map(f) = &files[0] else {
-            panic!("fayl map bo'lishi kerak");
+            panic!("file map expected");
         };
         match f.get("content") {
             Some(Value::Str(s)) => assert_eq!(s.as_bytes(), data),
-            _ => panic!("mazmun butun str bo'lishi kerak"),
+            _ => panic!("content must be a whole str"),
         }
         assert!(matches!(f.get("size"), Some(Value::Int(n)) if *n == data.len() as i64));
     }
@@ -2484,16 +2474,16 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(b"--PP  \r\n");
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"\r\n\r\n");
-        body.extend_from_slice(b"qiymat");
+        body.extend_from_slice(b"value");
         body.extend_from_slice(b"\r\n--PP--\r\n");
-        let (fields, _) = parse_multipart(&body, "PP").expect("parse bo'lishi kerak");
-        assert!(matches!(fields.get("a"), Some(Value::Str(s)) if s == "qiymat"));
+        let (fields, _) = parse_multipart(&body, "PP").expect("parse must succeed");
+        assert!(matches!(fields.get("a"), Some(Value::Str(s)) if s == "value"));
     }
 
     #[test]
     fn parse_multipart_buzuq_tana_none() {
         // Boundary tanada umuman yo'q — None, chaqiruvchi xom body'ga qaytadi.
-        assert!(parse_multipart(b"shunchaki matn", "YOQ").is_none());
+        assert!(parse_multipart(b"just text", "NONE").is_none());
     }
 
     #[test]
@@ -2502,7 +2492,7 @@ mod tests {
         // fayllar ro'yxati bo'ladi.
         let body = multipart_body(
             "ZZ",
-            &[("title", None, b"rasmim"), ("pic", Some("p.png"), b"PNG")],
+            &[("title", None, b"my image"), ("pic", Some("p.png"), b"PNG")],
         );
         let req = build_req(
             "POST".into(),
@@ -2516,15 +2506,15 @@ mod tests {
             Some("ZZ".to_string()),
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         let Some(Value::Map(b)) = m.get("body") else {
-            panic!("body map bo'lishi kerak");
+            panic!("body map expected");
         };
-        assert!(matches!(b.get("title"), Some(Value::Str(s)) if s == "rasmim"));
+        assert!(matches!(b.get("title"), Some(Value::Str(s)) if s == "my image"));
         match m.get("files") {
             Some(Value::List(fs)) => assert_eq!(fs.len(), 1),
-            _ => panic!("files list bo'lishi kerak"),
+            _ => panic!("files must be a list"),
         }
     }
 
@@ -2544,11 +2534,11 @@ mod tests {
             None,
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         match m.get("files") {
             Some(Value::List(fs)) => assert!(fs.is_empty()),
-            _ => panic!("files bo'sh list bo'lishi kerak"),
+            _ => panic!("files must be an empty list"),
         }
     }
 
@@ -2563,17 +2553,17 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             "1.1.1.1".into(),
-            Bytes::from("oddiy matn"),
+            Bytes::from("plain text"),
             false,
             Some("QQ".to_string()),
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
-        assert!(matches!(m.get("body"), Some(Value::Str(s)) if s == "oddiy matn"));
+        assert!(matches!(m.get("body"), Some(Value::Str(s)) if s == "plain text"));
         match m.get("files") {
             Some(Value::List(fs)) => assert!(fs.is_empty()),
-            _ => panic!("files bo'sh list bo'lishi kerak"),
+            _ => panic!("files must be an empty list"),
         }
     }
 
@@ -2620,7 +2610,7 @@ mod tests {
                 let got: Vec<String> = items.iter().map(|v| v.to_text()).collect();
                 assert_eq!(got, vec!["a=1", "b=2"]);
             }
-            _ => panic!("set-cookie: List kutilgan edi"),
+            _ => panic!("set-cookie: List expected"),
         }
     }
 
@@ -2753,10 +2743,10 @@ mod tests {
         let mut headers = BTreeMap::new();
         headers.insert(
             "authorization".to_string(),
-            Value::Str("Bearer sekret".into()),
+            Value::Str("Bearer secret".into()),
         );
-        headers.insert("x-api-key".to_string(), Value::Str("kalit".into()));
-        headers.insert("x-custom".to_string(), Value::Str("qoladi".into()));
+        headers.insert("x-api-key".to_string(), Value::Str("key".into()));
+        headers.insert("x-custom".to_string(), Value::Str("stays".into()));
         let mut opts = BTreeMap::new();
         opts.insert("follow".to_string(), Value::Bool(true));
         opts.insert("headers".to_string(), Value::Map(headers));
@@ -2778,22 +2768,19 @@ mod tests {
         let Ok(Value::Map(res)) =
             follow_get_with_credentials(format!("http://127.0.0.1:{}/start", port_a))
         else {
-            panic!("so'rov muvaffaqiyatli bo'lishi kerak edi");
+            panic!("request must have succeeded");
         };
         assert!(matches!(res.get("status"), Some(Value::Int(200))));
 
         // Birinchi host (asl origin) credential'larni to'liq oladi.
         let req_a = ha.join().unwrap().remove(0).to_lowercase();
-        assert!(req_a.contains("authorization: bearer sekret"));
-        assert!(req_a.contains("x-api-key: kalit"));
+        assert!(req_a.contains("authorization: bearer secret"));
+        assert!(req_a.contains("x-api-key: key"));
         // Begona host'ga credential'lar ketmaydi, oddiy header esa boradi.
         let req_b = hb.join().unwrap().remove(0).to_lowercase();
-        assert!(
-            !req_b.contains("authorization"),
-            "Authorization sizib chiqdi"
-        );
-        assert!(!req_b.contains("x-api-key"), "x-api-key sizib chiqdi");
-        assert!(req_b.contains("x-custom: qoladi"));
+        assert!(!req_b.contains("authorization"), "Authorization leaked");
+        assert!(!req_b.contains("x-api-key"), "x-api-key leaked");
+        assert!(req_b.contains("x-custom: stays"));
     }
 
     #[test]
@@ -2809,14 +2796,14 @@ mod tests {
         let Ok(Value::Map(res)) =
             follow_get_with_credentials(format!("http://127.0.0.1:{}/start", port))
         else {
-            panic!("so'rov muvaffaqiyatli bo'lishi kerak edi");
+            panic!("request must have succeeded");
         };
         assert!(matches!(res.get("status"), Some(Value::Int(200))));
 
         let captured = h.join().unwrap();
         let req2 = captured[1].to_lowercase();
-        assert!(req2.contains("authorization: bearer sekret"));
-        assert!(req2.contains("x-api-key: kalit"));
+        assert!(req2.contains("authorization: bearer secret"));
+        assert!(req2.contains("x-api-key: key"));
     }
 
     #[test]
@@ -2860,7 +2847,10 @@ mod tests {
     fn opts_headers_parse_qiladi() {
         // headers map'i str qiymatlar bilan o'qiladi (issue #34).
         let mut hm = BTreeMap::new();
-        hm.insert("x-api-key".to_string(), Value::Str("sirli".to_string()));
+        hm.insert(
+            "x-api-key".to_string(),
+            Value::Str("secret-val".to_string()),
+        );
         hm.insert(
             "anthropic-version".to_string(),
             Value::Str("2023-06-01".to_string()),
@@ -2870,7 +2860,7 @@ mod tests {
         let o = parse_client_opts(Some(&Value::Map(m)));
         assert_eq!(
             o.headers.get("x-api-key").map(|s| s.as_str()),
-            Some("sirli")
+            Some("secret-val")
         );
         assert_eq!(
             o.headers.get("anthropic-version").map(|s| s.as_str()),
@@ -2953,12 +2943,12 @@ mod tests {
             Err(Flow::Error(msg)) => {
                 assert!(
                     msg.contains("timeout"),
-                    "timeout xatosi kutilgan, keldi: {}",
+                    "timeout error expected, got: {}",
                     msg
                 )
             }
-            Ok(_) => panic!("qotgan upstream'dan Ok kutilmagan — timeout bo'lishi kerak"),
-            Err(_) => panic!("Flow::Error(timeout) kutilgan"),
+            Ok(_) => panic!("Ok not expected from a stuck upstream — must be a timeout"),
+            Err(_) => panic!("Flow::Error(timeout) expected"),
         }
     }
 
@@ -2977,7 +2967,7 @@ mod tests {
         );
         match v {
             Value::Map(m) => m.get("body").cloned().unwrap(),
-            _ => panic!("build_req Map qaytarishi kerak"),
+            _ => panic!("build_req must return a Map"),
         }
     }
 
@@ -3013,7 +3003,7 @@ mod tests {
     #[test]
     fn oddiy_matn_string_boladi() {
         // JSON ko'rinishida bo'lmagan tana string bo'lib qoladi.
-        assert!(matches!(body_of("salom=dunyo", false), Value::Str(_)));
+        assert!(matches!(body_of("hello=world", false), Value::Str(_)));
     }
 
     #[test]
@@ -3068,7 +3058,7 @@ mod tests {
         );
         let req = with_ctx(req, cell.clone());
         let Value::Map(m) = &req else {
-            panic!("req Map bo'lishi kerak");
+            panic!("req must be a Map");
         };
         assert!(matches!(m.get("ctx"), Some(Value::Ctx(_))));
     }
@@ -3107,7 +3097,7 @@ mod tests {
         };
         // Value Debug derive qilmaydi — equals bilan tekshiramiz (assert_eq emas).
         let got = c.lock().unwrap().get("tenant_id").cloned().unwrap();
-        assert!(got.equals(&Value::Int(7)), "ctx klon orqali yangilandi");
+        assert!(got.equals(&Value::Int(7)), "ctx updated through the clone");
     }
 
     #[test]
@@ -3133,11 +3123,8 @@ mod tests {
         );
         let req_clone = req.clone();
         // Map equality ctx kalitiga yetadi -> (Ctx,Ctx) bir xil Arc -> ptr_eq.
-        assert!(
-            req.equals(&req_clone),
-            "req o'z kloniga teng, deadlock yo'q"
-        );
-        assert!(req.equals(&req), "req o'ziga teng, deadlock yo'q");
+        assert!(req.equals(&req_clone), "req equals its clone, no deadlock");
+        assert!(req.equals(&req), "req equals itself, no deadlock");
     }
 
     #[test]
@@ -3179,7 +3166,7 @@ mod tests {
         // str body standart "text/plain" beradi; custom content-type uni bosadi.
         let r = value_to_response(resp_map(
             200,
-            Value::Str("<h1>Salom</h1>".into()),
+            Value::Str("<h1>Hello</h1>".into()),
             Some(hmap(&[("content-type", Value::Str("text/html".into()))])),
         ));
         assert_eq!(r.headers().get("content-type").unwrap(), "text/html");
@@ -3232,7 +3219,7 @@ mod tests {
         // `rep 1000 ...` — yaroqsiz HTTP status. Jim 200 ga tushmasligi kerak
         // (issue #108): handler xato status qaytarganda mijoz muvaffaqiyat
         // ko'rmasin. 1000 HTTP diapazonidan tashqarida → 500.
-        let r = value_to_response(resp_map(1000, Value::Str("xato".into()), None));
+        let r = value_to_response(resp_map(1000, Value::Str("error".into()), None));
         assert_eq!(r.status().as_u16(), 500);
     }
 
@@ -3258,7 +3245,7 @@ mod tests {
     #[test]
     fn yaroqli_status_saqlanadi() {
         // Yaroqli status (404) o'zgartirilmaydi — fix faqat buzuq statusга tegadi.
-        let r = value_to_response(resp_map(404, Value::Str("topilmadi".into()), None));
+        let r = value_to_response(resp_map(404, Value::Str("not found".into()), None));
         assert_eq!(r.status().as_u16(), 404);
     }
 
@@ -3270,12 +3257,12 @@ mod tests {
             200,
             Value::Nil,
             Some(hmap(&[
-                ("x-bad", Value::Str("yomon\nqiymat".into())),
-                ("x-good", Value::Str("yaxshi".into())),
+                ("x-bad", Value::Str("bad\nvalue".into())),
+                ("x-good", Value::Str("good".into())),
             ])),
         ));
         assert!(r.headers().get("x-bad").is_none());
-        assert_eq!(r.headers().get("x-good").unwrap(), "yaxshi");
+        assert_eq!(r.headers().get("x-good").unwrap(), "good");
     }
 
     #[tokio::test]
@@ -3284,13 +3271,13 @@ mod tests {
         // Avval portni egallaymiz (0 → OS bo'sh port tanlaydi), so'ng o'sha
         // portga qayta bind urinamiz: aynan bir xil addr → EADDRINUSE.
         let Ok(occupied) = bind(0).await else {
-            panic!("bo'sh portga bind bo'lishi kerak");
+            panic!("bind to a free port must succeed");
         };
         let port = occupied.local_addr().unwrap().port();
         let res = bind(port).await;
         assert!(
             matches!(res, Err(Flow::Error(_))),
-            "band port → Err kutilgan"
+            "Err expected for a busy port"
         );
     }
 
@@ -3313,10 +3300,10 @@ mod tests {
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         let retry = check_and_count(&state, "t1", 3, 3600);
-        assert!(retry.is_some(), "4-so'rov bloklanishi kerak");
+        assert!(retry.is_some(), "the 4th request must be blocked");
         // Retry-After oyna tugashigacha — [1, window_secs] oralig'ida.
         let r = retry.unwrap();
-        assert!((1..=3600).contains(&r), "Retry-After mantiqiy: {}", r);
+        assert!((1..=3600).contains(&r), "Retry-After is sensible: {}", r);
     }
 
     #[test]
@@ -3337,7 +3324,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(
             check_and_count(&state, "k", 1, 1).is_none(),
-            "yangi oynada hisob tiklanishi kerak"
+            "count must reset in a new window"
         );
     }
 
@@ -3356,11 +3343,11 @@ mod tests {
         let bucket = state.lock().unwrap();
         assert!(
             !bucket.counts.contains_key("old"),
-            "eski oyna kaliti tozalanishi kerak"
+            "old window key must be swept"
         );
         assert!(
             bucket.counts.contains_key("new"),
-            "joriy oyna kaliti qolishi kerak"
+            "current window key must remain"
         );
     }
 
@@ -3389,7 +3376,7 @@ mod tests {
         assert_eq!(
             allowed.load(Ordering::SeqCst),
             100,
-            "aniq limit=100 so'rov o'tishi kerak (atomik sanash)"
+            "exactly limit=100 requests must pass (atomic counting)"
         );
     }
 
@@ -3432,7 +3419,7 @@ mod tests {
         };
         assert!(
             matches!(m.get("ip"), Some(Value::Str(s)) if s == "10.0.0.1"),
-            "req.ip o'rnatilishi kerak"
+            "req.ip must be set"
         );
     }
 
@@ -3521,8 +3508,8 @@ mod tests {
             pattern: parse_pattern("/users/:name"),
             handler: Value::Nil,
         }];
-        let (_r, params) = match_route(&routes, "get", "/users/%D0%90%D0%BB%D0%B8")
-            .expect("marshrut mos kelishi kerak");
+        let (_r, params) =
+            match_route(&routes, "get", "/users/%D0%90%D0%BB%D0%B8").expect("route must match");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "Али"));
     }
 
@@ -3537,7 +3524,8 @@ mod tests {
             pattern: parse_pattern("/users/:name"),
             handler: Value::Nil,
         }];
-        let (_r, params) = match_route(&routes, "get", "/users/a%2Fb").expect("bir segment — mos");
+        let (_r, params) =
+            match_route(&routes, "get", "/users/a%2Fb").expect("one segment — match");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "a%2Fb"));
     }
 
@@ -3693,7 +3681,7 @@ mod tests {
         assert!(strip_mount_prefix(&pref, &segv(&["assets", "app.css"])).is_some());
         assert!(strip_mount_prefix(&pref, &segv(&["assets"])).is_some());
         assert!(strip_mount_prefix(&pref, &segv(&["assetsx", "a.css"])).is_none());
-        assert!(strip_mount_prefix(&pref, &segv(&["boshqa"])).is_none());
+        assert!(strip_mount_prefix(&pref, &segv(&["other"])).is_none());
         // Qolgan qism — prefiksdan keyingi fayl yo'li.
         assert_eq!(
             strip_mount_prefix(&pref, &segv(&["assets", "img", "a.png"])).unwrap(),
@@ -3739,7 +3727,7 @@ mod tests {
         assert_eq!(mime_for(Path::new("font.woff2")), "font/woff2");
         assert_eq!(mime_for(Path::new("data.bin")), "application/octet-stream");
         assert_eq!(
-            mime_for(Path::new("kengaytmasiz")),
+            mime_for(Path::new("noextension")),
             "application/octet-stream"
         );
     }
@@ -3799,13 +3787,13 @@ mod tests {
         assert_eq!(p, dist.join("index.html"));
         assert_eq!(mime, "text/html; charset=utf-8");
         // Topilmagan yo'l — SPA fallback (root mount spa:true).
-        let (p, _, _) = resolve_static(&mounts, &decode_segs("/yo/q/sahifa"))
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/no/such/page"))
             .await
             .unwrap();
         assert_eq!(p, dist.join("index.html"));
         // /assets ostida topilmagan fayl: assets mount spa emas, lekin root SPA
         // mount prefiksi baribir mos — fallback unga tushadi.
-        let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/yoq.css"))
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/none.css"))
             .await
             .unwrap();
         assert_eq!(p, dist.join("index.html"));
@@ -3821,7 +3809,7 @@ mod tests {
         std::fs::create_dir_all(root.join("public")).unwrap();
         let public = std::fs::canonicalize(root.join("public")).unwrap();
         std::fs::write(public.join("ok.txt"), "ok").unwrap();
-        std::fs::write(root.join("secret.txt"), "sir").unwrap();
+        std::fs::write(root.join("secret.txt"), "secret").unwrap();
 
         let mounts = vec![StaticMount {
             prefix: vec!["assets".to_string()],
@@ -3863,12 +3851,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("public")).unwrap();
         let public = std::fs::canonicalize(root.join("public")).unwrap();
-        std::fs::write(root.join("secret.txt"), "MAXFIY").unwrap();
-        std::fs::write(public.join("ichki.txt"), "ichki").unwrap();
+        std::fs::write(root.join("secret.txt"), "SECRET").unwrap();
+        std::fs::write(public.join("inner.txt"), "inner").unwrap();
         // Tashqariga ishora: public/evil.txt -> ../secret.txt
         std::os::unix::fs::symlink(root.join("secret.txt"), public.join("evil.txt")).unwrap();
-        // Ichkariga ishora: public/alias.txt -> public/ichki.txt
-        std::os::unix::fs::symlink(public.join("ichki.txt"), public.join("alias.txt")).unwrap();
+        // Ichkariga ishora: public/alias.txt -> public/inner.txt
+        std::os::unix::fs::symlink(public.join("inner.txt"), public.join("alias.txt")).unwrap();
 
         let mounts = vec![StaticMount {
             prefix: vec!["assets".to_string()],
@@ -3879,13 +3867,13 @@ mod tests {
             resolve_static(&mounts, &decode_segs("/assets/evil.txt"))
                 .await
                 .is_none(),
-            "ildizdan tashqariga symlink xizmat qilinmasligi kerak"
+            "a symlink pointing outside the root must not be served"
         );
         let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/alias.txt"))
             .await
-            .expect("ildiz ichidagi symlink ishlashi kerak");
+            .expect("a symlink inside the root must work");
         // Canonical yo'l — symlink nishoni (haqiqiy fayl).
-        assert_eq!(p, public.join("ichki.txt"));
+        assert_eq!(p, public.join("inner.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

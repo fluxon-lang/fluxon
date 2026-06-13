@@ -1,7 +1,7 @@
-# 08 — io: terminal input/output (read_line, print, prompt).
-# Stdin orqali kiritma beriladi: "Firdavs\n42\n" (run_all.sh shuni quvuraydi).
-# io.print/io.prompt stdout'ga yozadi; tasdiqlash log (stderr) orqali ketadi —
-# ular aralashmaydi.
+# 08 - io: terminal input/output (read_line, print, prompt).
+# Input is fed via stdin: "Firdavs\n42\n" (run_all.sh pipes this).
+# io.print/io.prompt write to stdout; the assertion log (stderr) goes separately -
+# they do not mix.
 
 fails <- 0
 
@@ -12,24 +12,24 @@ fn eq got want label
     log "FAIL ${label}: got=${got} want=${want}"
     fails <- fails + 1
 
-# --- io.prompt: chiqarib, keyin bitta satr o'qiydi ---
-ism = io.prompt "Isming: "
-eq ism "Firdavs" "prompt read 1-satr"
+# --- io.prompt: prints, then reads a single line ---
+name = io.prompt "Your name: "
+eq name "Firdavs" "prompt read 1st line"
 
-# --- io.read_line: keyingi satr ---
-yosh = io.read_line
-eq yosh "42" "read_line 2-satr"
+# --- io.read_line: next line ---
+age = io.read_line
+eq age "42" "read_line 2nd line"
 
-# --- io.read_line: EOF'da nil ---
-oxiri = io.read_line
-eq oxiri nil "read_line EOF -> nil"
+# --- io.read_line: nil at EOF ---
+last = io.read_line
+eq last nil "read_line EOF -> nil"
 
-# --- io.print: nil qaytaradi (yon ta'sir stdout) ---
-natija = io.print ""
-eq natija nil "print -> nil"
+# --- io.print: returns nil (side effect to stdout) ---
+result = io.print ""
+eq result nil "print -> nil"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 08_io: HAMMASI O'TDI ==="
+  log "=== 08_io: ALL PASSED ==="
 else
-  log "=== 08_io: ${fails} TEST YIQILDI ==="
+  log "=== 08_io: ${fails} TESTS FAILED ==="

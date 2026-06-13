@@ -1,27 +1,27 @@
-// Fluxon crypto battery — kriptografik primitivlar (issue #131).
+// Fluxon crypto battery — cryptographic primitives (issue #131).
 //
-// Til API:
-//   crypto.sha256 s        # -> SHA-256 hex (kichik harf)
-//   crypto.hmac key msg    # -> HMAC-SHA256 hex — webhook imzo tekshirish
-//   crypto.b64 s           # -> base64 (standart alifbo, padding bilan)
-//   crypto.b64d s          # -> base64'ni ochish (UTF-8 matn), yoki err
-//   crypto.b64db s         # -> base64'ni ochish (bytes — ikkilik xavfsiz)
-//   crypto.hex s           # -> matn baytlarining hex ko'rinishi
+// Language API:
+//   crypto.sha256 s        # -> SHA-256 hex (lowercase)
+//   crypto.hmac key msg    # -> HMAC-SHA256 hex — verify webhook signatures
+//   crypto.b64 s           # -> base64 (standard alphabet, with padding)
+//   crypto.b64d s          # -> decode base64 (UTF-8 text), or err
+//   crypto.b64db s         # -> decode base64 (bytes — binary safe)
+//   crypto.hex s           # -> hex representation of the text bytes
 //   crypto.uuid            # -> UUID v4 (OS CSPRNG)
 //
-// Kirishlar str YOKI bytes (issue #132): fayl baytlarini hash'lash/kodlash
-// uchun alohida funksiya nomi kerak emas — arg_bytes ikkalasini qabul qiladi.
+// Inputs are str OR bytes (issue #132): no separate function name is needed to
+// hash/encode file bytes — arg_bytes accepts both.
 //
-// Primitivlar runtime ichida allaqachon bor edi (`auth` battery JWT uchun
-// hmac/sha2/base64 ishlatadi) — bu battery ularni foydalanuvchiga ochadi,
-// yangi dependency yo'q. Nega hex chiqish: Stripe/GitHub/Telegram webhook
-// imzolari hex'da keladi — `crypto.hmac` natijasi to'g'ridan-to'g'ri
-// taqqoslanadi, qo'shimcha konversiya kerak emas.
+// The primitives already existed inside the runtime (the `auth` battery uses
+// hmac/sha2/base64 for JWT) — this battery exposes them to the user, with no
+// new dependency. Why hex output: Stripe/GitHub/Telegram webhook signatures
+// arrive in hex — the `crypto.hmac` result is compared directly, no extra
+// conversion needed.
 //
-// Holatsiz va Interp'ga muhtoj emas (env o'qimaydi, IO yo'q), lekin auth/ai
-// kabi battery sifatida ulanadi (interp::eval_call + Field, lookup tekshiruvi
-// bilan): foydalanuvchi `crypto` nomini e'lon qilgan bo'lsa (masalan
-// `use ./crypto`), uniki ustun — shartsiz is_module ro'yxatiga kirmaydi.
+// Stateless and does not need Interp (reads no env, no IO), but it is wired in
+// as a battery like auth/ai (interp::eval_call + Field, with a lookup check):
+// if the user has declared the name `crypto` (for example `use ./crypto`),
+// theirs takes precedence — it is not in the unconditional is_module list.
 
 use base64::Engine;
 use base64::alphabet;
@@ -38,15 +38,15 @@ use crate::value::Value;
 
 type R = Result<Value, Flow>;
 
-// Dekodlashda padding majburiy emas: tashqi servislar base64'ni ham padding'li,
-// ham padding'siz yuboradi — ikkalasini ham qabul qilamiz (bir ish = bir yo'l,
-// foydalanuvchi padding haqida o'ylamasin).
+// Padding is not required when decoding: external services send base64 both
+// with and without padding — we accept both (one task = one way, the user
+// should not have to think about padding).
 const LENIENT_STD: GeneralPurpose = GeneralPurpose::new(
     &alphabet::STANDARD,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
 );
-// JWT segmentlari va ko'p webhook'lar url-safe alifboda (`-`/`_`) — standart
-// alifbo mos kelmasa shunisi bilan ham urinamiz.
+// JWT segments and many webhooks use the url-safe alphabet (`-`/`_`) — if the
+// standard alphabet does not match, we also try this one.
 const LENIENT_URL: GeneralPurpose = GeneralPurpose::new(
     &alphabet::URL_SAFE,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
@@ -62,7 +62,7 @@ pub fn crypto_module(func: &str, args: Vec<Value>) -> R {
             let key = arg_bytes(&args, 0, "crypto.hmac")?;
             let msg = arg_bytes(&args, 1, "crypto.hmac")?;
             let mut mac = Hmac::<Sha256>::new_from_slice(key.as_slice())
-                .expect("HMAC har xil kalit uzunligini qabul qiladi");
+                .expect("HMAC accepts keys of any length");
             mac.update(msg.as_slice());
             Ok(Value::Str(to_hex(&mac.finalize().into_bytes())))
         }
@@ -73,14 +73,14 @@ pub fn crypto_module(func: &str, args: Vec<Value>) -> R {
         "b64d" => {
             let s = arg_str(&args, 0, "crypto.b64d")?;
             let bytes = decode_lenient(&s, "crypto.b64d")?;
-            // Natija matn bo'lishi shart. Ikkilik ma'lumotni jim buzib qaytarish
-            // (lossy) xavfli, aniq xato beramiz — ikkilik uchun crypto.b64db bor.
+            // The result must be text. Silently corrupting binary data (lossy)
+            // is unsafe, so we return an explicit error — crypto.b64db is for binary.
             String::from_utf8(bytes)
                 .map(Value::Str)
-                .map_err(|_| Flow::err("crypto.b64d: natija UTF-8 matn emas".to_string()))
+                .map_err(|_| Flow::err("crypto.b64d: result is not UTF-8 text".to_string()))
         }
-        // b64d'ning ikkilik juftligi (fs.read/fs.readb naqshi, issue #132):
-        // natija bytes — rasm/fayl kabi UTF-8 bo'lmagan yuklamalar uchun.
+        // The binary counterpart of b64d (fs.read/fs.readb pattern, issue #132):
+        // result is bytes — for non-UTF-8 payloads like images/files.
         "b64db" => {
             let s = arg_str(&args, 0, "crypto.b64db")?;
             Ok(Value::Bytes(Arc::new(decode_lenient(&s, "crypto.b64db")?)))
@@ -91,22 +91,22 @@ pub fn crypto_module(func: &str, args: Vec<Value>) -> R {
         }
         "uuid" => Ok(Value::Str(uuid_v4())),
         _ => Err(Flow::err(format!(
-            "crypto.{} yo'q (sha256/hmac/b64/b64d/b64db/hex/uuid)",
+            "crypto.{} not found (sha256/hmac/b64/b64d/b64db/hex/uuid)",
             func
         ))),
     }
 }
 
-// Lenient base64 dekodlash (b64d/b64db umumiy yo'li): padding ixtiyoriy,
-// standart alifbo mos kelmasa url-safe bilan ham urinamiz.
+// Lenient base64 decoding (shared path for b64d/b64db): padding optional, and
+// if the standard alphabet does not match we also try url-safe.
 fn decode_lenient(s: &str, who: &str) -> Result<Vec<u8>, Flow> {
     LENIENT_STD
         .decode(s.as_bytes())
         .or_else(|_| LENIENT_URL.decode(s.as_bytes()))
-        .map_err(|_| Flow::err(format!("{}: kirish base64 emas", who)))
+        .map_err(|_| Flow::err(format!("{}: input is not base64", who)))
 }
 
-// Baytlarni kichik-harf hex matnga aylantiradi.
+// Converts bytes to lowercase hex text.
 fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -116,14 +116,14 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
-// UUID v4 (RFC 4122): 16 tasodifiy bayt + versiya/variant bitlari. Manba —
-// OS CSPRNG (`rand` moduli bilan bir xil, #97 naqshi), shuning uchun
-// to'qnashuv/bashorat xavfi yo'q. uuid crate'siz — format oddiy.
+// UUID v4 (RFC 4122): 16 random bytes + version/variant bits. Source is the
+// OS CSPRNG (same as the `rand` module, #97 pattern), so there is no collision
+// or predictability risk. Without the uuid crate — the format is simple.
 fn uuid_v4() -> String {
     use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut b = [0u8; 16];
     OsRng.fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40; // versiya = 4
+    b[6] = (b[6] & 0x0f) | 0x40; // version = 4
     b[8] = (b[8] & 0x3f) | 0x80; // variant = RFC 4122
     let h = to_hex(&b);
     format!(
@@ -147,25 +147,25 @@ mod tests {
     fn out_str(r: R) -> String {
         match r {
             Ok(Value::Str(x)) => x,
-            _ => panic!("str kutilgan"),
+            _ => panic!("str expected"),
         }
     }
 
-    // SHA-256 ma'lum vektor (FIPS 180-2: "abc").
+    // SHA-256 known vector (FIPS 180-2: "abc").
     #[test]
     fn sha256_malum_vektor() {
         assert_eq!(
             out_str(crypto_module("sha256", vec![s("abc")])),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        // Bo'sh matn ham aniq qiymat beradi.
+        // Empty text also yields a known value.
         assert_eq!(
             out_str(crypto_module("sha256", vec![s("")])),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 
-    // HMAC-SHA256 ma'lum vektor (RFC 4231, test case 2).
+    // HMAC-SHA256 known vector (RFC 4231, test case 2).
     #[test]
     fn hmac_malum_vektor() {
         assert_eq!(
@@ -180,24 +180,24 @@ mod tests {
     #[test]
     fn b64_roundtrip_va_lenient_dekodlash() {
         assert_eq!(
-            out_str(crypto_module("b64", vec![s("salom dunyo")])),
-            "c2Fsb20gZHVueW8="
+            out_str(crypto_module("b64", vec![s("hello world")])),
+            "aGVsbG8gd29ybGQ="
         );
-        // Padding'li ham, padding'siz ham ochiladi.
+        // Decodes both with and without padding.
         assert_eq!(
-            out_str(crypto_module("b64d", vec![s("c2Fsb20gZHVueW8=")])),
-            "salom dunyo"
+            out_str(crypto_module("b64d", vec![s("aGVsbG8gd29ybGQ=")])),
+            "hello world"
         );
         assert_eq!(
-            out_str(crypto_module("b64d", vec![s("c2Fsb20gZHVueW8")])),
-            "salom dunyo"
+            out_str(crypto_module("b64d", vec![s("aGVsbG8gd29ybGQ")])),
+            "hello world"
         );
     }
 
-    // JWT segmentlari url-safe alifboda — b64d ularni ham ochadi.
+    // JWT segments use the url-safe alphabet — b64d decodes them too.
     #[test]
     fn b64d_url_safe_alifbo() {
-        // Baytlari standart alifboda '+'/'/' talab qiladigan matn.
+        // Text whose bytes require '+'/'/' in the standard alphabet.
         let src = "subjects?_d";
         let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(src.as_bytes());
         assert_eq!(out_str(crypto_module("b64d", vec![s(&enc)])), src);
@@ -205,12 +205,12 @@ mod tests {
 
     #[test]
     fn b64d_xato_holatlar() {
-        // base64 bo'lmagan kirish -> aniq xato.
+        // Non-base64 input -> explicit error.
         assert!(matches!(
-            crypto_module("b64d", vec![s("bu base64 emas!!!")]),
+            crypto_module("b64d", vec![s("this is not base64!!!")]),
             Err(Flow::Error(_))
         ));
-        // Yaroqli base64, lekin natija UTF-8 emas -> aniq xato (jim buzilmaydi).
+        // Valid base64, but the result is not UTF-8 -> explicit error (no silent corruption).
         let bad = STANDARD.encode([0xff, 0xfe, 0x00]);
         assert!(matches!(
             crypto_module("b64d", vec![s(&bad)]),
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(out_str(crypto_module("hex", vec![s("")])), "");
     }
 
-    // UUID v4 shakli: 8-4-4-4-12, versiya nibble = 4, variant ∈ {8,9,a,b}.
+    // UUID v4 shape: 8-4-4-4-12, version nibble = 4, variant in {8,9,a,b}.
     #[test]
     fn uuid_shakli_va_unikalligi() {
         use std::collections::HashSet;
@@ -236,18 +236,18 @@ mod tests {
             assert_eq!(
                 parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
                 vec![8, 4, 4, 4, 12],
-                "shakl buzildi: {}",
+                "shape broken: {}",
                 u
             );
             assert!(u.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
-            assert_eq!(&u[14..15], "4", "versiya 4 emas: {}", u);
-            assert!("89ab".contains(&u[19..20]), "variant noto'g'ri: {}", u);
-            assert!(seen.insert(u), "takror UUID — CSPRNG buzildi");
+            assert_eq!(&u[14..15], "4", "version is not 4: {}", u);
+            assert!("89ab".contains(&u[19..20]), "invalid variant: {}", u);
+            assert!(seen.insert(u), "duplicate UUID — CSPRNG broken");
         }
     }
 
-    // bytes kirish (issue #132): bir xil baytlar str bilan bir xil natija beradi —
-    // fayl baytlarini hash'lash matnni hash'lash bilan bitta yo'l.
+    // bytes input (issue #132): the same bytes yield the same result as a str —
+    // hashing file bytes is the same path as hashing text.
     #[test]
     fn bytes_kirish_str_bilan_bir_xil() {
         let by = Value::Bytes(Arc::new(b"abc".to_vec()));
@@ -261,38 +261,38 @@ mod tests {
         );
         assert_eq!(out_str(crypto_module("hex", vec![by.clone()])), "616263");
         assert_eq!(
-            out_str(crypto_module("hmac", vec![s("kalit"), by])),
-            out_str(crypto_module("hmac", vec![s("kalit"), s("abc")]))
+            out_str(crypto_module("hmac", vec![s("key"), by])),
+            out_str(crypto_module("hmac", vec![s("key"), s("abc")]))
         );
     }
 
-    // b64db: ikkilik xavfsiz dekodlash — UTF-8 bo'lmagan yuklama bytes qaytadi
-    // (b64d shu kirishda ataylab xato beradi).
+    // b64db: binary-safe decoding — a non-UTF-8 payload returns bytes
+    // (b64d deliberately errors on this same input).
     #[test]
     fn b64db_ikkilik_aylana() {
         let data = vec![0xff, 0xfe, 0x00, 0x88];
         let enc = STANDARD.encode(&data);
         match crypto_module("b64db", vec![s(&enc)]) {
             Ok(Value::Bytes(b)) => assert_eq!(*b, data),
-            _ => panic!("crypto.b64db bytes qaytarishi kerak"),
+            _ => panic!("crypto.b64db must return bytes"),
         }
-        // bytes -> b64 -> b64db to'liq aylana.
+        // bytes -> b64 -> b64db full round trip.
         let enc2 = out_str(crypto_module(
             "b64",
             vec![Value::Bytes(Arc::new(data.clone()))],
         ));
         match crypto_module("b64db", vec![s(&enc2)]) {
             Ok(Value::Bytes(b)) => assert_eq!(*b, data),
-            _ => panic!("b64 -> b64db aylanasi buzildi"),
+            _ => panic!("b64 -> b64db roundtrip broken"),
         }
-        // Yaroqsiz base64 — aniq xato.
+        // Invalid base64 — explicit error.
         assert!(matches!(
-            crypto_module("b64db", vec![s("bu base64 emas!!!")]),
+            crypto_module("b64db", vec![s("this is not base64!!!")]),
             Err(Flow::Error(_))
         ));
     }
 
-    // Argument turi noto'g'ri bo'lsa aniq xato (panic emas).
+    // Wrong argument type yields an explicit error (not a panic).
     #[test]
     fn notogri_argument_aniq_xato() {
         assert!(matches!(
@@ -300,11 +300,11 @@ mod tests {
             Err(Flow::Error(_))
         ));
         assert!(matches!(
-            crypto_module("hmac", vec![s("kalit")]),
+            crypto_module("hmac", vec![s("key")]),
             Err(Flow::Error(_))
         ));
         assert!(matches!(
-            crypto_module("yoq_funksiya", vec![]),
+            crypto_module("no_func", vec![]),
             Err(Flow::Error(_))
         ));
     }

@@ -1,19 +1,19 @@
-// HTTP rate-limit (http.limit) end-to-end testi (issue #79).
+// HTTP rate-limit (http.limit) end-to-end test (issue #79).
 //
-// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP so'rovlar bilan
-// to'liq oqimni tekshiramiz:
-//   - http.limit N :min \req -> kalit  — N so'rovdan keyin 429 + Retry-After
-//   - har kalit (tenant/api-key) alohida sanaydi
-//   - path-scoped variant ("/api/*") faqat o'sha prefiksga ta'sir qiladi
-//   - kalit nil bo'lsa req.ip'ga fallback
+// We run the `fluxon` binary as a subprocess and check the full flow with real
+// HTTP requests:
+//   - http.limit N :min \req -> key  -- after N requests, 429 + Retry-After
+//   - each key (tenant/api-key) is counted separately
+//   - the path-scoped variant ("/api/*") only affects that prefix
+//   - if the key is nil, falls back to req.ip
 //
-// Pattern http_middleware_e2e.rs dan: vaqtinchalik .fx fayl + subprocess + raw HTTP.
+// Pattern from http_middleware_e2e.rs: temporary .fx file + subprocess + raw HTTP.
 
 use std::io::Write;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-// Skriptni vaqtinchalik faylga yozib, fluxon serverini ishga tushiradi.
+// Writes the script to a temporary file and starts the fluxon server.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("fluxon_rl_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
@@ -29,7 +29,7 @@ fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     (child, path)
 }
 
-// Port LISTEN bo'lguncha kutadi (server boot). Maks ~3s.
+// Waits until the port is LISTENing (server boot). Max ~3s.
 async fn wait_port(port: u16) {
     for _ in 0..60 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -43,7 +43,7 @@ async fn wait_port(port: u16) {
     panic!("port {} ochilmadi", port);
 }
 
-// Child drop bo'lganda jarayonni o'ldirish guard'i.
+// Guard that kills the process when Child is dropped.
 struct Killer(Child);
 impl Drop for Killer {
     fn drop(&mut self) {
@@ -52,8 +52,8 @@ impl Drop for Killer {
     }
 }
 
-// Raw HTTP/1.1 GET. Ixtiyoriy bitta custom header (nom, qiymat) — kalit funksiyasi
-// shuni o'qiydi. To'liq javob matnini qaytaradi (status qatori + header + body).
+// Raw HTTP/1.1 GET. An optional single custom header (name, value) -- the key
+// function reads it. Returns the full response text (status line + headers + body).
 async fn http_get(port: u16, path: &str, header: Option<(&str, &str)>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -73,8 +73,8 @@ async fn http_get(port: u16, path: &str, header: Option<(&str, &str)>) -> String
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// Per-key limit: x-client header bo'yicha 3 so'rov/min. 4-si 429 + Retry-After.
-// Boshqa x-client alohida bucket — uning so'rovi o'tadi.
+// Per-key limit: 3 requests/min by the x-client header. The 4th is 429 + Retry-After.
+// A different x-client is a separate bucket -- its request passes.
 const PERKEY_SCRIPT: &str = r#"
 http.limit 3 :min \req -> req.headers.x_client
 
@@ -92,32 +92,37 @@ async fn limit_perkey_429_va_retry_after() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // "a" kaliti bilan 3 ta so'rov — hammasi 200.
+    // 3 requests with key "a" -- all 200.
     for i in 1..=3 {
         let resp = http_get(port, "/ping", Some(("x-client", "a"))).await;
-        assert!(resp.contains("200"), "{}-so'rov 200 kutilgan: {}", i, resp);
+        assert!(
+            resp.contains("200"),
+            "{}-th request expected 200: {}",
+            i,
+            resp
+        );
     }
-    // 4-so'rov — limit oshdi, 429 + Retry-After header.
+    // 4th request -- limit exceeded, 429 + Retry-After header.
     let resp = http_get(port, "/ping", Some(("x-client", "a"))).await;
-    assert!(resp.contains("429"), "4-so'rov 429 kutilgan: {}", resp);
+    assert!(resp.contains("429"), "4th request expected 429: {}", resp);
     assert!(
         resp.to_lowercase().contains("retry-after"),
-        "Retry-After header kutilgan: {}",
+        "expected Retry-After header: {}",
         resp
     );
 
-    // Boshqa kalit "b" — alohida hisob, hali o'tishi kerak.
+    // A different key "b" -- separate count, should still pass.
     let resp = http_get(port, "/ping", Some(("x-client", "b"))).await;
     assert!(
         resp.contains("200"),
-        "boshqa kalit alohida sanalishi kerak: {}",
+        "another key should be counted separately: {}",
         resp
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// Path-scoped limit: faqat "/api/*" cheklanadi; "/health" cheksiz.
+// Path-scoped limit: only "/api/*" is limited; "/health" is unlimited.
 const PATH_SCRIPT: &str = r#"
 http.limit "/api/*" 2 :min \req -> req.headers.x_client
 
@@ -138,7 +143,7 @@ async fn limit_path_scoped_faqat_prefiksga_tasir() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // /api/data — limit=2; 1,2 o'tadi, 3-si 429.
+    // /api/data -- limit=2; 1,2 pass, the 3rd is 429.
     assert!(
         http_get(port, "/api/data", Some(("x-client", "z")))
             .await
@@ -152,16 +157,16 @@ async fn limit_path_scoped_faqat_prefiksga_tasir() {
     let resp = http_get(port, "/api/data", Some(("x-client", "z"))).await;
     assert!(
         resp.contains("429"),
-        "/api/data 3-so'rov 429 kutilgan: {}",
+        "/api/data 3rd request expected 429: {}",
         resp
     );
 
-    // /health "/api/*" ga mos EMAS — limitsiz, ko'p so'rov ham 200.
+    // /health does NOT match "/api/*" -- unlimited, even many requests are 200.
     for _ in 0..5 {
         let resp = http_get(port, "/health", Some(("x-client", "z"))).await;
         assert!(
             resp.contains("200"),
-            "/health limitsiz bo'lishi kerak: {}",
+            "/health should be rate-limit-free: {}",
             resp
         );
     }
@@ -169,8 +174,8 @@ async fn limit_path_scoped_faqat_prefiksga_tasir() {
     let _ = std::fs::remove_file(&path);
 }
 
-// Kalit nil (header yo'q) -> mijoz IP'siga fallback. Bir IP'dan (127.0.0.1) 2
-// so'rov/min; 3-si 429.
+// Key nil (no header) -> falls back to the client IP. From one IP (127.0.0.1),
+// 2 requests/min; the 3rd is 429.
 const IP_FALLBACK_SCRIPT: &str = r#"
 http.limit 2 :min \req -> req.headers.x_client
 
@@ -188,13 +193,13 @@ async fn limit_nil_kalit_ip_fallback() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // x-client header YO'Q -> kalit nil -> req.ip (127.0.0.1) bo'yicha sanaydi.
+    // NO x-client header -> key nil -> counts by req.ip (127.0.0.1).
     assert!(http_get(port, "/ping", None).await.contains("200"));
     assert!(http_get(port, "/ping", None).await.contains("200"));
     let resp = http_get(port, "/ping", None).await;
     assert!(
         resp.contains("429"),
-        "kalitsiz so'rov IP bo'yicha cheklanishi kerak: {}",
+        "a request without a key should be limited by IP: {}",
         resp
     );
 

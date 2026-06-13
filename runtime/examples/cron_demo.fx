@@ -1,35 +1,35 @@
-# Cron demo — rejalashtirilgan fon vazifalari HTTP server bilan birga.
+# Cron demo — scheduled background tasks together with an HTTP server.
 #
-# cron.on hech narsani bloklamaydi (http.on kabi faqat ro'yxatga oladi). Eng
-# oxirgi yozilgan bloklovchi chaqiruv (bu yerda http.serve) processni tirik
-# ushlaydi; cron fonda o'z vaqtida ishlaydi.
+# cron.on does not block anything (like http.on it only registers). The last
+# blocking call written (here http.serve) keeps the process alive; cron runs
+# on schedule in the background.
 #
-# Server YO'Q bo'lsa, http.serve o'rniga cron.run yoziladi (processni ushlab
-# turish uchun). cron.run va http.serve/ws.serve ixtiyoriy tartibda BIRGA ham
-# ishlaydi — hech biri ikkinchisini bloklamaydi.
+# If there is NO server, write cron.run instead of http.serve (to keep the
+# process alive). cron.run and http.serve/ws.serve also work TOGETHER in any
+# order — neither blocks the other.
 
 use http
 
-# Fon vazifa: har daqiqada bir marta belgi qoldiradi (demo uchun tez interval).
+# Background task: leaves a mark once a minute (fast interval for the demo).
 fn tick
-  log "cron: har daqiqalik tik"
+  log "cron: per-minute tick"
 
-# Fon vazifa: har kuni ertalab 9:00 da kunlik hisobot.
+# Background task: a daily report every morning at 9:00.
 fn daily
-  log "cron: kunlik hisobot (09:00)"
+  log "cron: daily report (09:00)"
 
-# Rejalashtirilgan vazifalarni ro'yxatga olamiz — bloklamaydi.
-cron.on * * * * * tick           # har daqiqa
-cron.on 0 9 * * * daily          # har kun 09:00
-cron.on 30 9 * * 1-5 \->          # ish kunlari 09:30 (inline lambda)
-  log "cron: ish kuni eslatmasi"
+# Register the scheduled tasks — does not block.
+cron.on * * * * * tick           # every minute
+cron.on 0 9 * * * daily          # every day at 09:00
+cron.on 30 9 * * 1-5 \->          # weekdays at 09:30 (inline lambda)
+  log "cron: weekday reminder"
 
-# Oddiy HTTP endpoint.
-http.on :get "/" \req -> rep 200 {ok:true msg:"cron demo ishlayapti"}
+# Simple HTTP endpoint.
+http.on :get "/" \req -> rep 200 {ok:true msg:"cron demo is running"}
 
-# Server processni ushlab turadi; cron fonda tiktaklaydi.
+# The server keeps the process alive; cron ticks in the background.
 http.serve 8080
 
-# --- Server YO'Q, faqat cron bo'lsa shunday yozilardi: ---
+# --- If there is NO server, only cron, it would be written like this: ---
 # cron.on * * * * * tick
-# cron.run     # processni o'z qo'liga oladi (bloklaydi)
+# cron.run     # takes over the process (blocks)

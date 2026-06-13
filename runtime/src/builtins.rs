@@ -1,12 +1,13 @@
-// Fluxon yadro kutubxonasi (batteries'siz qism).
+// Fluxon core library (the part without batteries).
 //
-// Uch xil chaqiruv:
-//   - global funksiyalar (log) — Env'ga o'rnatiladi (`install`)
-//   - modul funksiyalari (str.up, math.floor, rand.int, json) — `call_module`
-//   - qiymat metodlari (l.push, m.set, s.up emas...) — `call_method`
+// Three kinds of call:
+//   - global functions (log) — installed into Env (`install`)
+//   - module functions (str.up, math.floor, rand.int, json) — `call_module`
+//   - value methods (l.push, m.set, not s.up...) — `call_method`
 //
-// list metodlari qiymat ustida (.push/.filter), str/math/rand modul orqali —
-// bu spec'dagi farqni aniq aks ettiradi: `l.len` (a'zo) vs `str.len s` (modul).
+// list methods act on the value (.push/.filter), str/math/rand go through the
+// module — this mirrors the spec distinction exactly: `l.len` (member) vs
+// `str.len s` (module).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,9 +18,9 @@ use crate::value::{NativeFn, Value};
 
 type R = Result<Value, Flow>;
 
-// `fluxon test` hisobotidagi "N assert" soni. Atomic — http.serve handler'lari
-// assert'ni parallel thread'larda chaqirishi mumkin. Test runner har fayldan
-// oldin reset qiladi (fayllar ketma-ket, bitta protsessda ishlaydi).
+// The "N assert" count in the `fluxon test` report. Atomic — http.serve handlers
+// may call assert from parallel threads. The test runner resets it before each
+// file (files run sequentially, in a single process).
 static ASSERT_PASSED: AtomicU64 = AtomicU64::new(0);
 
 pub fn assert_passed_reset() {
@@ -30,7 +31,7 @@ pub fn assert_passed() -> u64 {
     ASSERT_PASSED.load(Ordering::Relaxed)
 }
 
-// --- global funksiyalarni o'rnatish ---
+// --- install global functions ---
 pub fn install(env: &Env) {
     let mut s = env.write();
     let mut add = |name: &str, f: Box<dyn Fn(Vec<Value>) -> R + Send + Sync>| {
@@ -42,41 +43,41 @@ pub fn install(env: &Env) {
             })),
         );
     };
-    // `log` global funksiya EMAS — darajali dispatch battery (issue #139):
-    // `log.debug`/`log.info`/`log.warn`/`log.err`, bare `log` = info. $LOG_LEVEL
-    // va $LOG_FORMAT'ni o'qish kerakligi uchun Interp'da (log_dispatch) ushlanadi,
-    // bu yerda global o'rnatilmaydi (ai/crypto bilan bir xil naqsh).
-    // assert cond ["xabar"] — test primitivi (issue #136). Shart truthy bo'lsa
-    // jim davom etadi (hisoblagich +1), aks holda runtime xato — bajarish
-    // to'xtaydi va `fluxon test` faylni FAIL deb belgilaydi. Operatorli shart
-    // qavsda yoziladi (qavssiz chaqiruv qoidasi): `assert (x == 2) "x ikki emas"`.
+    // `log` is NOT a global function — it is a leveled dispatch battery (issue #139):
+    // `log.debug`/`log.info`/`log.warn`/`log.err`, bare `log` = info. Because it
+    // needs to read $LOG_LEVEL and $LOG_FORMAT it is handled in Interp (log_dispatch),
+    // not installed as a global here (same pattern as ai/crypto).
+    // assert cond ["message"] — test primitive (issue #136). If the condition is
+    // truthy it continues silently (counter +1), otherwise a runtime error —
+    // execution stops and `fluxon test` marks the file as FAIL. A condition with
+    // operators is written in parens (the bare-call rule): `assert (x == 2) "x is not two"`.
     add(
         "assert",
         Box::new(|args: Vec<Value>| {
             let cond = match args.first() {
                 Some(v) => v,
-                None => return Err(Flow::err("assert: shart argumenti kerak")),
+                None => return Err(Flow::err("assert: condition argument required")),
             };
             if cond.truthy() {
                 ASSERT_PASSED.fetch_add(1, Ordering::Relaxed);
                 return Ok(Value::Nil);
             }
             Err(Flow::err(match args.get(1) {
-                Some(msg) => format!("assert yiqildi: {}", msg.to_text()),
-                None => "assert yiqildi".to_string(),
+                Some(msg) => format!("assert failed: {}", msg.to_text()),
+                None => "assert failed".to_string(),
             }))
         }),
     );
-    // rep status body [headers] — HTTP javobi. Yangi Value variant qo'shmaslik
-    // uchun maxsus kalitli map sifatida ifodalanadi:
+    // rep status body [headers] — an HTTP response. To avoid adding a new Value
+    // variant it is represented as a map with special keys:
     // {__resp:true status:N body:V headers:{...}}. http_mod::value_to_response
-    // shu kalitlarni taniydi.
+    // recognizes these keys.
     //
-    // Ixtiyoriy 3-argument — custom header'lar map'i (issue #16). Body'dan
-    // alohida 3-arg qilingani body bilan to'qnashmaslik uchun: `rep 200 {ok}`
-    // da butun map = body, shuning uchun header'ni body ichidan o'qib bo'lmaydi.
-    // Header qiymati str (bitta sarlavha) yoki list (takror sarlavha, masalan
-    // bir nechta Set-Cookie) bo'lishi mumkin.
+    // Optional 3rd argument — a map of custom headers (issue #16). It is a
+    // separate 3rd arg rather than living in the body so it does not collide with
+    // the body: in `rep 200 {ok}` the whole map is the body, so a header could not
+    // be read out of the body. A header value can be a str (single header) or a
+    // list (repeated header, e.g. multiple Set-Cookie).
     add(
         "rep",
         Box::new(|args: Vec<Value>| {
@@ -84,19 +85,20 @@ pub fn install(env: &Env) {
                 Some(Value::Int(n)) => *n,
                 Some(other) => {
                     return Err(Flow::err(format!(
-                        "rep: 1-argument status (int) bo'lishi kerak, {} berildi",
+                        "rep: 1st argument must be status (int), got {}",
                         other.type_name()
                     )));
                 }
-                None => return Err(Flow::err("rep: status argumenti kerak")),
+                None => return Err(Flow::err("rep: status argument required")),
             };
             let body = args.get(1).cloned().unwrap_or(Value::Nil);
             let mut m = BTreeMap::new();
             m.insert("__resp".to_string(), Value::Bool(true));
             m.insert("status".to_string(), Value::Int(status));
             m.insert("body".to_string(), body);
-            // 3-argument bo'lsa — headers map. Map bo'lmasa aniq xato beramiz,
-            // chunki jim e'tiborsiz qoldirish AI uchun chalg'ituvchi.
+            // If a 3rd argument is present — the headers map. If it is not a map
+            // we return an explicit error, because silently ignoring it is
+            // misleading for the AI.
             if let Some(h) = args.get(2) {
                 match h {
                     Value::Map(_) => {
@@ -104,7 +106,7 @@ pub fn install(env: &Env) {
                     }
                     other => {
                         return Err(Flow::err(format!(
-                            "rep: 3-argument headers (map) bo'lishi kerak, {} berildi",
+                            "rep: 3rd argument must be headers (map), got {}",
                             other.type_name()
                         )));
                     }
@@ -115,31 +117,31 @@ pub fn install(env: &Env) {
     );
 }
 
-// ---------------- log darajalari (issue #139) ----------------
+// ---------------- log levels (issue #139) ----------------
 //
-// `log` darajali logger: `log.debug`/`log.info`/`log.warn`/`log.err`, bare
-// `log` = info. Darajalar tartiblangan (debug < info < warn < err) — $LOG_LEVEL
-// minimal darajani belgilaydi, undan PAST xabarlar jim chiqarilmaydi. $LOG_FORMAT
-// =json bo'lsa har qator JSON obyekt (time/level/msg) — log agregatorlar uchun.
+// `log` is a leveled logger: `log.debug`/`log.info`/`log.warn`/`log.err`, bare
+// `log` = info. Levels are ordered (debug < info < warn < err) — $LOG_LEVEL sets
+// the minimum level, messages BELOW it are silently dropped. With $LOG_FORMAT
+// =json each line is a JSON object (time/level/msg) — for log aggregators.
 //
-// env'larni Interp o'qiydi (OS env + .env, db/ai konvensiyasi) va shu yerga
-// uzatadi; bu funksiya holatsiz va sof formatlash/filtr mantig'i.
+// Interp reads the envs (OS env + .env, the db/ai convention) and passes them
+// here; this function is stateless and pure formatting/filter logic.
 
-// Daraja tartibi (kichik = past). Noma'lum nom info kabi qaraladi (xavfsiz default).
+// Level order (smaller = lower). An unknown name is treated as info (safe default).
 fn log_level_rank(name: &str) -> u8 {
     match name {
         "debug" => 0,
         "info" => 1,
         "warn" => 2,
-        // `err` kanonik, `error` ham qabul (LOG_LEVEL'da odam yozishi mumkin).
+        // `err` is canonical, `error` is also accepted (a human may write it in LOG_LEVEL).
         "err" | "error" => 3,
         _ => 1,
     }
 }
 
-// Log qatorini formatlaydi. `min_level` (=$LOG_LEVEL) berilgan va xabar darajasi
-// undan past bo'lsa None qaytaradi (filtrlangan — hech narsa chiqmaydi). `json`
-// (=$LOG_FORMAT=json) da strukturali qator, aks holda `[LEVEL] xabar`.
+// Formats a log line. If `min_level` (=$LOG_LEVEL) is given and the message level
+// is below it, returns None (filtered — nothing is emitted). With `json`
+// (=$LOG_FORMAT=json) a structured line, otherwise `[LEVEL] message`.
 pub fn format_log(
     level: &str,
     args: &[Value],
@@ -157,8 +159,8 @@ pub fn format_log(
         .collect::<Vec<_>>()
         .join(" ");
     if json {
-        // Vaqt UTC, time.now bilan bir xil format. json_str to'g'ri escape qiladi —
-        // xabar ichidagi tirnoq/yangi qator JSON'ni buzmaydi.
+        // Time is UTC, same format as time.now. json_str escapes correctly —
+        // quotes/newlines inside the message do not break the JSON.
         Some(format!(
             "{{\"time\":{},\"level\":{},\"msg\":{}}}",
             json_str(&fmt_unix(now_unix())),
@@ -170,20 +172,20 @@ pub fn format_log(
     }
 }
 
-// format_log natijasini stderr'ga chiqaradi (filtrlangan bo'lsa jim). Eski `log`
-// kabi stderr'ga `\n` qo'shadi — stdout (io.print/prompt) bilan aralashmasin.
+// Emits the format_log result to stderr (silent if filtered). Like the old `log`
+// it appends `\n` to stderr — so it does not mix with stdout (io.print/prompt).
 pub fn emit_log(level: &str, args: &[Value], min_level: Option<&str>, json: bool) {
     if let Some(line) = format_log(level, args, min_level, json) {
         eprintln!("{}", line);
     }
 }
 
-// `log` qiymat sifatida (callback `xs.each log`, saqlash `f log`) ishlatilganda
-// qaytariladigan info-darajali Native shim — eski global `log` bilan moslik
-// (issue #139). To'g'ridan-to'g'ri `log "..."` chaqiruvi apply_callee'da env-aware
-// log_dispatch'dan o'tadi; bu shim faqat qiymat pozitsiyasi uchun va Interp'siz,
-// shuning uchun $LOG_LEVEL/$LOG_FORMAT'ni OS env'dan o'qiydi (.env bu yo'lda
-// ko'rilmaydi — qiymat sifatida log ishlatish kamdan-kam holat).
+// The info-level Native shim returned when `log` is used as a value (callback
+// `xs.each log`, storing `f log`) — for compatibility with the old global `log`
+// (issue #139). A direct `log "..."` call goes through the env-aware log_dispatch
+// in apply_callee; this shim is only for the value position and runs without
+// Interp, so it reads $LOG_LEVEL/$LOG_FORMAT from the OS env (.env is not seen on
+// this path — using log as a value is a rare case).
 pub fn log_value_shim() -> Value {
     Value::Native(Arc::new(NativeFn {
         name: "log".into(),
@@ -198,7 +200,7 @@ pub fn log_value_shim() -> Value {
     }))
 }
 
-// --- modul nomimi? ---
+// --- is it a module name? ---
 pub fn is_module(name: &str) -> bool {
     matches!(
         name,
@@ -206,7 +208,7 @@ pub fn is_module(name: &str) -> bool {
     )
 }
 
-// --- modul funksiyasi chaqiruvi ---
+// --- module function call ---
 pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
     match module {
         "str" => str_module(func, args),
@@ -218,7 +220,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "fs" => fs_module(func, args),
         "sh" => sh_module(func, args),
         "bytes" => bytes_module(func, args),
-        _ => Err(Flow::err(format!("noma'lum modul: {}", module))),
+        _ => Err(Flow::err(format!("unknown module: {}", module))),
     }
 }
 
@@ -265,8 +267,8 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             let s = arg_str(&args, 0, "str.replace")?;
             let old = arg_str(&args, 1, "str.replace")?;
             let new = arg_str(&args, 2, "str.replace")?;
-            // Bo'sh pattern bilan Rust replace har belgi orasiga qo'shadi —
-            // bu hech kim kutmaydigan natija, shuning uchun s o'zgarmaydi.
+            // With an empty pattern Rust's replace inserts between every char —
+            // nobody expects that result, so s is left unchanged.
             if old.is_empty() {
                 return Ok(Value::Str(s));
             }
@@ -282,23 +284,23 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             let suf = arg_str(&args, 1, "str.ends")?;
             Ok(Value::Bool(s.ends_with(&suf)))
         }
-        // str.pad s n ch — chapdan ch bilan n uzunlikka to'ldiradi (padStart):
-        // raqam formatlash ("7" → "007") asosiy ehtiyoj. Uzunlik str.len bilan
-        // bir xil o'lchovda (chars), bayt emas. n <= len bo'lsa s o'zgarmaydi.
+        // str.pad s n ch — pads on the left with ch up to length n (padStart):
+        // number formatting ("7" → "007") is the main need. Length is in the same
+        // unit as str.len (chars), not bytes. If n <= len, s is unchanged.
         "pad" => {
             let s = arg_str(&args, 0, "str.pad")?;
             let n = arg_int(&args, 1, "str.pad")?.max(0) as usize;
             let ch = arg_str(&args, 2, "str.pad")?;
             let Some(c) = ch.chars().next() else {
-                return Err(Flow::err("str.pad: 3-argument bo'sh bo'lmasligi kerak"));
+                return Err(Flow::err("str.pad: 3rd argument must not be empty"));
             };
             let len = s.chars().count();
             if n <= len {
                 return Ok(Value::Str(s));
             }
-            // Natija baytlarini checked hisoblaymiz va isize::MAX (Rust
-            // allokatsiya chegarasi) dan oshganini rad qilamiz — aks holda
-            // with_capacity Fluxon xatosi o'rniga "capacity overflow" panic berardi.
+            // Compute the result byte count with checked math and reject if it
+            // exceeds isize::MAX (Rust's allocation limit) — otherwise
+            // with_capacity would panic with "capacity overflow" instead of a Fluxon error.
             let bytes = (n - len)
                 .checked_mul(c.len_utf8())
                 .and_then(|b| b.checked_add(s.len()))
@@ -316,13 +318,13 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             let n = arg_int(&args, 1, "str.repeat")?;
             if n < 0 {
                 return Err(Flow::err(format!(
-                    "str.repeat: takror soni manfiy bo'lmasligi kerak ({})",
+                    "str.repeat: repeat count must not be negative ({})",
                     n
                 )));
             }
-            // Natija baytlari isize::MAX (Rust allokatsiya chegarasi) dan
-            // oshmasin: usize'ga sig'sa ham String::repeat "capacity overflow"
-            // panic beradi — o'rniga aniq Fluxon xatosi.
+            // Keep the result byte count from exceeding isize::MAX (Rust's
+            // allocation limit): even if it fits usize, String::repeat panics with
+            // "capacity overflow" — give an explicit Fluxon error instead.
             match s.len().checked_mul(n as usize) {
                 Some(b) if b <= isize::MAX as usize => Ok(Value::Str(s.repeat(n as usize))),
                 _ => Err(Flow::overflow("str.repeat")),
@@ -336,53 +338,50 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "str" => Ok(Value::Str(arg(&args, 0, "str.str")?.to_text())),
-        // str.sym "pending" → :pending. Query-string statuslarini sym filtrga
-        // aylantirish uchun (db.eq {status:(str.split q "," |> ...).map str.sym}).
-        // Avval bu uchun json.dec("\":"+s+"\"") hack ishlatilardi (issue #78).
-        // Sym/str ham qabul qilinadi (idempotent); atrofdagi bo'sh joy kesiladi.
+        // str.sym "pending" → :pending. For turning query-string statuses into sym
+        // filters (db.eq {status:(str.split q "," |> ...).map str.sym}).
+        // Previously a json.dec("\":"+s+"\"") hack was used for this (issue #78).
+        // Sym/str are also accepted (idempotent); surrounding whitespace is trimmed.
         "sym" => match arg(&args, 0, "str.sym")? {
             Value::Str(s) => Ok(Value::Sym(s.trim().to_string())),
             Value::Sym(s) => Ok(Value::Sym(s.clone())),
             other => Err(Flow::err(format!(
-                "str.sym: str kutilgan, {} berildi",
+                "str.sym: str expected, got {}",
                 other.type_name()
             ))),
         },
-        _ => Err(Flow::err(format!(
-            "str modulida '{}' funksiyasi yo'q",
-            func
-        ))),
+        _ => Err(Flow::err(format!("str module has no function '{}'", func))),
     }
 }
 
-// ---------------- bytes (ikkilik ma'lumot, issue #132) ----------------
+// ---------------- bytes (binary data, issue #132) ----------------
 //
-// bytes qiymatining literal sintaksisi yo'q — funksiya orqali yaratiladi
-// (fs.readb, crypto.b64db, bytes.of). str.len BELGI sanaydi, bytes.len BAYT —
-// ikkalasi ataylab alohida o'lchov.
+// bytes values have no literal syntax — they are created via functions
+// (fs.readb, crypto.b64db, bytes.of). str.len counts CHARS, bytes.len counts
+// BYTES — deliberately two separate units.
 fn bytes_module(func: &str, args: Vec<Value>) -> R {
     match func {
-        // bytes.of s -> matnning UTF-8 baytlari. bytes berilsa o'zi qaytadi
-        // (idempotent — konversiya zanjirlarida qulay).
+        // bytes.of s -> the UTF-8 bytes of the text. If bytes are given they are
+        // returned as-is (idempotent — handy in conversion chains).
         "of" => match arg(&args, 0, "bytes.of")? {
             Value::Bytes(b) => Ok(Value::Bytes(b.clone())),
             Value::Str(s) | Value::Sym(s) => Ok(Value::Bytes(Arc::new(s.clone().into_bytes()))),
             other => Err(Flow::err(format!(
-                "bytes.of: argument str yoki bytes bo'lishi kerak, {} berildi",
+                "bytes.of: argument must be str or bytes, got {}",
                 other.type_name()
             ))),
         },
-        // bytes.str b -> UTF-8 matn; yaroqsiz baytlarda aniq xato (jim buzilmaydi —
-        // crypto.b64d bilan bir xil printsip).
+        // bytes.str b -> UTF-8 text; an explicit error on invalid bytes (not a
+        // silent corruption — same principle as crypto.b64d).
         "str" => {
             let b = arg_bytes(&args, 0, "bytes.str")?;
             String::from_utf8(b.as_ref().clone())
                 .map(Value::Str)
-                .map_err(|_| Flow::err("bytes.str: baytlar UTF-8 matn emas".to_string()))
+                .map_err(|_| Flow::err("bytes.str: bytes are not valid UTF-8 text".to_string()))
         }
         "len" => Ok(Value::Int(arg_bytes(&args, 0, "bytes.len")?.len() as i64)),
-        // bytes.slice b a c — str.slice semantikasi (chegaralar clamp, a >= b ->
-        // bo'sh), lekin bayt indekslarida.
+        // bytes.slice b a c — str.slice semantics (bounds clamp, a >= b ->
+        // empty), but on byte indices.
         "slice" => {
             let b = arg_bytes(&args, 0, "bytes.slice")?;
             let a = arg_int(&args, 1, "bytes.slice")? as usize;
@@ -395,7 +394,7 @@ fn bytes_module(func: &str, args: Vec<Value>) -> R {
             Ok(Value::Bytes(Arc::new(b[a..c].to_vec())))
         }
         _ => Err(Flow::err(format!(
-            "bytes modulida '{}' funksiyasi yo'q (of/str/len/slice)",
+            "bytes module has no function '{}' (of/str/len/slice)",
             func
         ))),
     }
@@ -408,8 +407,8 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
         "floor" => Ok(Value::Int(x.floor() as i64)),
         "ceil" => Ok(Value::Int(x.ceil() as i64)),
         "abs" => {
-            // int kirsa int, flt kirsa flt qaytaramiz.
-            // i64::MIN.abs() panic beradi (musbat juftligi sig'maydi) — checked.
+            // int in -> int out, flt in -> flt out.
+            // i64::MIN.abs() panics (its positive counterpart does not fit) — checked.
             match &args[0] {
                 Value::Int(n) => Ok(Value::Int(
                     n.checked_abs().ok_or_else(|| Flow::overflow("math.abs"))?,
@@ -418,21 +417,21 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "round" => Ok(Value::Int(x.round() as i64)),
-        // min/max argumentning o'zini qaytaradi — int kirsa int qoladi
-        // (abs bilan bir uslub), aralash int/flt da ham tur yo'qolmaydi.
+        // min/max return the argument itself — int in stays int (same style as
+        // abs), and the type is not lost for mixed int/flt either.
         "min" | "max" => {
-            // arg_num ikkinchi argument son ekanini tekshiradi (x birinchini).
+            // arg_num checks the second argument is a number (x checked the first).
             let y = arg_num(&args, 1, &format!("math.{}", func))?;
             use std::cmp::Ordering;
-            // Taqqoslash yo'qotishsiz: int f64 ga o'tkazilsa 2^53 dan katta
-            // qo'shni qiymatlar yaxlitlanib teng chiqadi va tie qoidasi
-            // noto'g'ri tomonni qaytaradi. int/int — i64 da, aralash —
-            // cmp_int_flt bilan; faqat flt/flt f64 da qoladi (u aniq).
+            // Lossless comparison: casting an int to f64 rounds neighboring values
+            // above 2^53 so they compare equal, and the tie rule then returns the
+            // wrong side. int/int — in i64, mixed — via cmp_int_flt; only flt/flt
+            // stays in f64 (which is exact there).
             let ord = match (&args[0], &args[1]) {
                 (Value::Int(a), Value::Int(b)) => a.cmp(b),
                 (Value::Int(a), Value::Flt(b)) => cmp_int_flt(*a, *b),
                 (Value::Flt(a), Value::Int(b)) => cmp_int_flt(*b, *a).reverse(),
-                // NaN tartibsiz — Equal deb olamiz (saralash bilan bir xil).
+                // NaN is unordered — treat as Equal (same as sorting).
                 _ => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
             };
             let pick_first = if func == "min" {
@@ -449,51 +448,50 @@ fn math_module(func: &str, args: Vec<Value>) -> R {
         "pow" => {
             let y = arg_num(&args, 1, "math.pow")?;
             match (&args[0], &args[1]) {
-                // int ^ manfiy bo'lmagan int → int (checked: overflow'da panic
-                // emas, Fluxon xatosi; i64 ga sig'maydigan daraja ham overflow).
+                // int ^ non-negative int → int (checked: on overflow a Fluxon
+                // error, not a panic; an exponent that does not fit i64 is also overflow).
                 (Value::Int(a), Value::Int(b)) if *b >= 0 => {
                     let e = u32::try_from(*b).map_err(|_| Flow::overflow("math.pow"))?;
                     Ok(Value::Int(
                         a.checked_pow(e).ok_or_else(|| Flow::overflow("math.pow"))?,
                     ))
                 }
-                // manfiy daraja yoki flt aralashgan — natija flt.
+                // negative exponent or a flt involved — the result is flt.
                 _ => Ok(Value::Flt(x.powf(y))),
             }
         }
         "sqrt" => {
-            // Manfiy sondan ildiz NaN berardi — Fluxon'da NaN qiymati kutilmaydi,
-            // o'rniga aniq xato.
+            // The root of a negative number would yield NaN — Fluxon does not
+            // expect a NaN value, so an explicit error instead.
             if x < 0.0 {
-                return Err(Flow::err("math.sqrt: manfiy sondan ildiz olib bo'lmaydi"));
+                return Err(Flow::err(
+                    "math.sqrt: cannot take square root of a negative number",
+                ));
             }
             Ok(Value::Flt(x.sqrt()))
         }
-        _ => Err(Flow::err(format!(
-            "math modulida '{}' funksiyasi yo'q",
-            func
-        ))),
+        _ => Err(Flow::err(format!("math module has no function '{}'", func))),
     }
 }
 
-// i64 ni f64 bilan yo'qotishsiz taqqoslash: i64→f64 o'tkazish 2^53 dan keyin
-// yaxlitlaydi, shuning uchun f64 tomon i64 chegaralariga solishtiriladi-da,
-// butun va kasr qismlari alohida taqqoslanadi. NaN — Equal (saralashdagi
-// kelishuv bilan bir xil).
+// Compares an i64 with an f64 losslessly: the i64->f64 cast rounds beyond 2^53,
+// so the f64 is first compared against the i64 bounds, then the integer and
+// fractional parts are compared separately. NaN — Equal (same convention as
+// sorting).
 fn cmp_int_flt(a: i64, b: f64) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     if b.is_nan() {
         return Equal;
     }
-    // i64::MAX as f64 = 2^63 (yuqoriga yaxlitlangan) — b shu qiymatdan boshlab
-    // har qanday i64 dan katta. i64::MIN as f64 = -2^63 esa aniq ifodalanadi.
+    // i64::MAX as f64 = 2^63 (rounded up) — from that value on, b is greater than
+    // any i64. i64::MIN as f64 = -2^63 is represented exactly.
     if b >= i64::MAX as f64 {
         return Less;
     }
     if b < i64::MIN as f64 {
         return Greater;
     }
-    // Endi b.trunc() i64 ga sig'adi va cast yo'qotishsiz.
+    // Now b.trunc() fits in i64 and the cast is lossless.
     match a.cmp(&(b.trunc() as i64)) {
         Equal if b.fract() > 0.0 => Less,
         Equal if b.fract() < 0.0 => Greater,
@@ -501,26 +499,26 @@ fn cmp_int_flt(a: i64, b: f64) -> std::cmp::Ordering {
     }
 }
 
-// ---------------- rand (dependency'siz LCG) ----------------
+// ---------------- rand (dependency-free LCG) ----------------
 fn rand_module(func: &str, args: Vec<Value>) -> R {
     match func {
         "int" => {
             let a = arg_int(&args, 0, "rand.int")?;
             let b = arg_int(&args, 1, "rand.int")?;
             if b < a {
-                return Err(Flow::err("rand.int: yuqori chegara pastdan kichik"));
+                return Err(Flow::err("rand.int: upper bound is less than lower bound"));
             }
-            // span i128 da: a/b chekka qiymatlarda (masalan a juda manfiy,
-            // b juda musbat) b - a + 1 i64 ga sig'maydi va overflow berardi.
+            // span in i128: at extreme a/b values (e.g. a very negative,
+            // b very positive) b - a + 1 does not fit i64 and would overflow.
             let span = (b as i128) - (a as i128) + 1; // [1, 2^64]
             let r = if span > u64::MAX as i128 {
-                next_rand() // to'liq i64 oralig'i — har qanday u64 mos qiymat
+                next_rand() // full i64 range — any u64 is a valid value
             } else {
                 next_rand() % (span as u64)
             };
-            // Haqiqiy natija a + r doim [a, b] ichida — ikkilik to'ldiruvchi
-            // modulyar arifmetikasida wrapping_add aynan shu qiymatni beradi
-            // (oraliq yig'indi i64 dan toshsa ham).
+            // The actual result a + r is always within [a, b] — in two's-complement
+            // modular arithmetic wrapping_add gives exactly that value (even if the
+            // intermediate sum overflows i64).
             Ok(Value::Int(a.wrapping_add(r as i64)))
         }
         "str" => {
@@ -533,46 +531,43 @@ fn rand_module(func: &str, args: Vec<Value>) -> R {
             }
             Ok(Value::Str(out))
         }
-        _ => Err(Flow::err(format!(
-            "rand modulida '{}' funksiyasi yo'q",
-            func
-        ))),
+        _ => Err(Flow::err(format!("rand module has no function '{}'", func))),
     }
 }
 
 // ---------------- time ----------------
-// Barcha vaqtlar UTC matn "YYYY-MM-DD HH:MM:SS" formatida — SQLite
-// CURRENT_TIMESTAMP (tbl `now` ustuni) bilan AYNAN bir xil, shuning uchun
-// `created > (time.ago 24 :hr)` kabi DB filtrlari to'g'ridan-to'g'ri ishlaydi.
+// All times are UTC text in "YYYY-MM-DD HH:MM:SS" format — EXACTLY the same as
+// SQLite CURRENT_TIMESTAMP (the tbl `now` column), so DB filters like
+// `created > (time.ago 24 :hr)` work directly.
 fn time_module(func: &str, args: Vec<Value>) -> R {
     match func {
-        // hozirgi vaqt -> UTC matn timestamp
+        // current time -> UTC text timestamp
         "now" => Ok(Value::Str(fmt_unix(now_unix()))),
-        // time.ago N :birlik -> hozirdan N birlik oldingi UTC matn
+        // time.ago N :unit -> UTC text N units before now
         "ago" => {
             let n = arg_int(&args, 0, "time.ago")?;
             let unit = arg_str(&args, 1, "time.ago")?;
             let secs = unit_secs(&unit).ok_or_else(|| {
                 Flow::err(format!(
-                    "time.ago: birlik :sec/:min/:hr/:day bo'lishi kerak, :{} berildi",
+                    "time.ago: unit must be :sec/:min/:hr/:day, got :{}",
                     unit
                 ))
             })?;
-            // Katta N da n * secs (yoki ayirma) i64 dan toshadi — checked.
+            // For large N, n * secs (or the subtraction) overflows i64 — checked.
             let ts = n
                 .checked_mul(secs)
                 .and_then(|off| now_unix().checked_sub(off))
                 .ok_or_else(|| Flow::overflow("time.ago"))?;
             Ok(Value::Str(fmt_unix(ts)))
         }
-        // time.in N :birlik -> hozirdan N birlik KEYINGI UTC matn (TTL/expiry).
-        // time.ago ning ko'zgusi — yagona farq qo'shish/ayirish ishorasi.
+        // time.in N :unit -> UTC text N units AFTER now (TTL/expiry).
+        // The mirror of time.ago — the only difference is the add/subtract sign.
         "in" => {
             let n = arg_int(&args, 0, "time.in")?;
             let unit = arg_str(&args, 1, "time.in")?;
             let secs = unit_secs(&unit).ok_or_else(|| {
                 Flow::err(format!(
-                    "time.in: birlik :sec/:min/:hr/:day bo'lishi kerak, :{} berildi",
+                    "time.in: unit must be :sec/:min/:hr/:day, got :{}",
                     unit
                 ))
             })?;
@@ -582,22 +577,22 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                 .ok_or_else(|| Flow::overflow("time.in"))?;
             Ok(Value::Str(fmt_unix(ts)))
         }
-        // time.sleep secs -> secs soniya kutadi (flt ham — 0.5 yarim soniya).
-        // Polling/retry backoff uchun: xato holatda qayta urinishdan oldin
-        // kutish (burst/rate-limit halqasini oldini olish). Manfiy qiymat 0 ga
-        // klamp qilinadi (Duration::from_secs_f64 manfiyda panic beradi).
+        // time.sleep secs -> waits secs seconds (flt too — 0.5 = half a second).
+        // For polling/retry backoff: waiting before retrying on an error (to avoid
+        // a burst/rate-limit loop). A negative value is clamped to 0
+        // (Duration::from_secs_f64 panics on a negative value).
         "sleep" => {
             let secs = arg_num(&args, 0, "time.sleep")?.max(0.0);
             std::thread::sleep(std::time::Duration::from_secs_f64(secs));
             Ok(Value::Nil)
         }
-        // time.fmt timestamp "..." -> matn formatlash.
-        // Kirish: matn timestamp ("YYYY-MM-DD HH:MM:SS", ISO mintaqa ham) yoki unix int.
-        // Token'lar: YYYY MM DD HH mm ss. Sukutda UTC wall-clock'ni formatlaydi.
+        // time.fmt timestamp "..." -> text formatting.
+        // Input: a text timestamp ("YYYY-MM-DD HH:MM:SS", ISO with zone too) or a unix int.
+        // Tokens: YYYY MM DD HH mm ss. By default formats the UTC wall-clock.
         //
-        // Ixtiyoriy 3-argument — IANA zona nomi: `time.fmt t "HH:mm" "Asia/Tashkent"`.
-        // UTC instant'ni o'sha zonaning local wall-clock'iga (DST hisobga olinib)
-        // o'tkazib formatlaydi — foydalanuvchiga mahalliy vaqtni ko'rsatish uchun.
+        // Optional 3rd argument — an IANA zone name: `time.fmt t "HH:mm" "Asia/Tashkent"`.
+        // Converts the UTC instant to that zone's local wall-clock (DST aware) and
+        // formats it — to show the user a local time.
         "fmt" => {
             let ts = arg_ts(&args, 0, "time.fmt")?;
             let pat = arg_str(&args, 1, "time.fmt")?;
@@ -605,23 +600,23 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                 Some(_) => {
                     let zone = arg_str(&args, 2, "time.fmt")?;
                     let out = fmt_in_zone(ts, &pat, &zone).ok_or_else(|| {
-                        Flow::err(format!("time.fmt: noma'lum IANA zona nomi: {}", zone))
+                        Flow::err(format!("time.fmt: unknown IANA zone name: {}", zone))
                     })?;
                     Ok(Value::Str(out))
                 }
                 None => Ok(Value::Str(strftime(ts, &pat))),
             }
         }
-        // time.parse "2026-06-10T10:00:00Z" -> kanonik UTC matn timestamp.
-        // Ixtiyoriy ISO-8601 matnni (mijoz/tashqi API bergan) ichki kanonik
-        // "YYYY-MM-DD HH:MM:SS" UTC formatiga keltiradi — shunda time.add/time.diff
-        // va DB filtrlari u bilan bevosita ishlaydi. "Z", "±HH:MM"/"±HHMM" mintaqa
-        // va kasr sekundni tushunadi; mintaqasiz matn UTC deb qabul qilinadi.
+        // time.parse "2026-06-10T10:00:00Z" -> canonical UTC text timestamp.
+        // Normalizes an arbitrary ISO-8601 text (from a client/external API) to the
+        // internal canonical "YYYY-MM-DD HH:MM:SS" UTC format — so time.add/time.diff
+        // and DB filters work with it directly. Understands "Z", "±HH:MM"/"±HHMM"
+        // zones and fractional seconds; text without a zone is taken as UTC.
         //
-        // Ixtiyoriy 2-argument — IANA zona nomi: `time.parse "2026-03-08 09:00" "America/New_York"`.
-        // Bu holda matndagi wall-clock vaqt o'sha zonada (DST hisobga olinib) talqin
-        // qilinadi va UTC ga aylantiriladi — fiksrlangan offset emas. "09:00 local"
-        // har kuni to'g'ri UTC ga tushadi, yoz/qish o'tishida ham (PRD §6.8).
+        // Optional 2nd argument — an IANA zone name: `time.parse "2026-03-08 09:00" "America/New_York"`.
+        // In this case the wall-clock time in the text is interpreted in that zone
+        // (DST aware) and converted to UTC — not a fixed offset. "09:00 local" maps
+        // to the correct UTC every day, including across DST transitions (PRD §6.8).
         "parse" => {
             let s = arg_str(&args, 0, "time.parse")?;
             let ts = match args.get(1) {
@@ -629,31 +624,31 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                     let zone = arg_str(&args, 1, "time.parse")?;
                     parse_in_zone(&s, &zone).ok_or_else(|| {
                         Flow::err(format!(
-                            "time.parse: '{}' zonasida '{}' vaqtini o'qib bo'lmadi \
-                             (noma'lum zona yoki DST sakrashida mavjud bo'lmagan local vaqt)",
-                            zone, s
+                            "time.parse: could not parse time '{}' in zone '{}' \
+                             (unknown zone or nonexistent local time during a DST jump)",
+                            s, zone
                         ))
                     })?
                 }
                 None => parse_iso(&s).ok_or_else(|| {
                     Flow::err(format!(
-                        "time.parse: ISO timestamp matnini o'qib bo'lmadi: {}",
+                        "time.parse: could not parse ISO timestamp text: {}",
                         s
                     ))
                 })?,
             };
             Ok(Value::Str(fmt_unix(ts)))
         }
-        // time.add t N :birlik -> t timestamp'ga N birlik QO'SHIB UTC matn qaytaradi.
-        // time.in dan farqi: hozirdan emas, IXTIYORIY berilgan vaqtdan offset hisoblaydi
-        // (masalan end_at = start_at + duration). N manfiy bo'lsa ayiradi (orqaga siljitadi).
+        // time.add t N :unit -> returns UTC text with N units ADDED to timestamp t.
+        // Unlike time.in: it offsets from an ARBITRARY given time, not from now
+        // (e.g. end_at = start_at + duration). If N is negative it subtracts (shifts back).
         "add" => {
             let base = arg_ts(&args, 0, "time.add")?;
             let n = arg_int(&args, 1, "time.add")?;
             let unit = arg_str(&args, 2, "time.add")?;
             let secs = unit_secs(&unit).ok_or_else(|| {
                 Flow::err(format!(
-                    "time.add: birlik :sec/:min/:hr/:day bo'lishi kerak, :{} berildi",
+                    "time.add: unit must be :sec/:min/:hr/:day, got :{}",
                     unit
                 ))
             })?;
@@ -663,17 +658,17 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                 .ok_or_else(|| Flow::overflow("time.add"))?;
             Ok(Value::Str(fmt_unix(ts)))
         }
-        // time.sub t N :birlik -> t timestamp'dan N birlik AYIRIB UTC matn qaytaradi.
-        // time.add ning ko'zgusi (time.ago/time.in juftligi kabi). Qavssiz chaqiruvda
-        // manfiy son binar `-` bilan adashishini oldini olish uchun alohida funksiya —
-        // buffer-inclusive interval boshi `time.sub start_at 5 :min` deb yoziladi.
+        // time.sub t N :unit -> returns UTC text with N units SUBTRACTED from timestamp t.
+        // The mirror of time.add (like the time.ago/time.in pair). A separate function
+        // to avoid a negative number being confused with the binary `-` in a bare call —
+        // a buffer-inclusive interval start is written as `time.sub start_at 5 :min`.
         "sub" => {
             let base = arg_ts(&args, 0, "time.sub")?;
             let n = arg_int(&args, 1, "time.sub")?;
             let unit = arg_str(&args, 2, "time.sub")?;
             let secs = unit_secs(&unit).ok_or_else(|| {
                 Flow::err(format!(
-                    "time.sub: birlik :sec/:min/:hr/:day bo'lishi kerak, :{} berildi",
+                    "time.sub: unit must be :sec/:min/:hr/:day, got :{}",
                     unit
                 ))
             })?;
@@ -683,45 +678,42 @@ fn time_module(func: &str, args: Vec<Value>) -> R {
                 .ok_or_else(|| Flow::overflow("time.sub"))?;
             Ok(Value::Str(fmt_unix(ts)))
         }
-        // time.diff a b -> (a - b) ikki vaqt orasidagi farq SEKUNDDA (int).
-        // Musbat natija = a, b dan keyin (kelajakda). Birlikka bo'lib o'tiladi
-        // (masalan `(time.diff end start) / 60` -> daqiqada davomiylik).
+        // time.diff a b -> (a - b) the difference between two times IN SECONDS (int).
+        // A positive result = a is after b (in the future). Divide by a unit
+        // (e.g. `(time.diff end start) / 60` -> duration in minutes).
         "diff" => {
             let a = arg_ts(&args, 0, "time.diff")?;
             let b = arg_ts(&args, 1, "time.diff")?;
             Ok(Value::Int(a - b))
         }
-        _ => Err(Flow::err(format!(
-            "time modulida '{}' funksiyasi yo'q",
-            func
-        ))),
+        _ => Err(Flow::err(format!("time module has no function '{}'", func))),
     }
 }
 
 // ---------------- io ----------------
-// Terminal input/output. `log` har doim stderr'ga `\n` qo'shadi; interaktiv CLI
-// (REPL, agent, wizard) uchun stdin'dan o'qish va `\n`siz prompt kerak. Prompt
-// va kiritma stdout/stdin orqali ketadi (log stderr — ular aralashmasin).
+// Terminal input/output. `log` always appends `\n` to stderr; an interactive CLI
+// (REPL, agent, wizard) needs to read from stdin and a prompt without `\n`. The
+// prompt and input go through stdout/stdin (log is stderr — they must not mix).
 fn io_module(func: &str, args: Vec<Value>) -> R {
     use std::io::Write;
     match func {
-        // io.read_line -> stdin'dan bitta satr (oxirgi \n olib tashlanadi).
-        // EOF (Ctrl-D, quvur tugashi) -> nil, shunda chaqiruvchi tsiklni to'xtatadi.
+        // io.read_line -> a single line from stdin (the trailing \n is removed).
+        // EOF (Ctrl-D, end of a pipe) -> nil, so the caller stops the loop.
         "read_line" => {
             let mut line = String::new();
             match std::io::stdin().read_line(&mut line) {
                 Ok(0) => Ok(Value::Nil),
                 Ok(_) => {
-                    // satr oxiridagi \n (va Windows \r) ni olib tashlaymiz
+                    // strip the trailing \n (and Windows \r)
                     let trimmed = line.trim_end_matches(['\n', '\r']);
                     Ok(Value::Str(trimmed.to_string()))
                 }
                 Err(e) => Err(Flow::err(format!("io.read_line: {}", e))),
             }
         }
-        // io.print s -> stdout'ga \n SIZ chiqarish (prompt ko'rsatish uchun).
-        // Darhol flush — aks holda prompt buferda qolib, foydalanuvchi kiritmadan
-        // oldin uni ko'rmaydi.
+        // io.print s -> write to stdout WITHOUT a \n (to show a prompt).
+        // Flush immediately — otherwise the prompt stays in the buffer and the user
+        // does not see it before typing input.
         "print" => {
             let s = arg_str(&args, 0, "io.print")?;
             let mut out = std::io::stdout();
@@ -730,8 +722,8 @@ fn io_module(func: &str, args: Vec<Value>) -> R {
                 .map_err(|e| Flow::err(format!("io.print: {}", e)))?;
             Ok(Value::Nil)
         }
-        // io.prompt msg -> msg'ni \n siz chiqarib, keyin bitta satr o'qiydi.
-        // io.print + io.read_line uchun qulay shorthand.
+        // io.prompt msg -> prints msg without a \n, then reads a single line.
+        // A convenient shorthand for io.print + io.read_line.
         "prompt" => {
             let s = arg_str(&args, 0, "io.prompt")?;
             let mut out = std::io::stdout();
@@ -740,20 +732,20 @@ fn io_module(func: &str, args: Vec<Value>) -> R {
                 .map_err(|e| Flow::err(format!("io.prompt: {}", e)))?;
             io_module("read_line", vec![])
         }
-        _ => Err(Flow::err(format!("io modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!("io module has no function '{}'", func))),
     }
 }
 
-// ---------------- fs (lokal fayl tizimi) ----------------
+// ---------------- fs (local file system) ----------------
 //
-// Konvensiya: muvaffaqiyatda foydali qiymat (matn/bool/ro'yxat) yoki :ok sym;
-// haqiqiy IO xatosida Flow::err — sababni yo'qotmaslik uchun (io battery shunday).
-// Yagona istisno: fs.read fayl yo'qligida nil qaytaradi (bu kutilgan holat, xato
-// emas — "fayl bormi?" tekshiruvini read ichida birlashtirish uchun qulay).
+// Convention: on success a useful value (text/bool/list) or the :ok sym; on a
+// real IO error a Flow::err — so the cause is not lost (the io battery is like this).
+// The only exception: fs.read returns nil when the file is missing (an expected
+// case, not an error — handy for folding the "does the file exist?" check into read).
 fn fs_module(func: &str, args: Vec<Value>) -> R {
     match func {
-        // fs.read path -> fayl matni (str), yoki fayl yo'q bo'lsa nil.
-        // UTF-8 emas faylda yoki ruxsat xatosida Flow::err.
+        // fs.read path -> the file text (str), or nil if the file is missing.
+        // Flow::err on a non-UTF-8 file or a permission error.
         "read" => {
             let path = arg_str(&args, 0, "fs.read")?;
             match std::fs::read_to_string(&path) {
@@ -762,9 +754,9 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
                 Err(e) => Err(Flow::err(format!("fs.read {}: {}", path, e))),
             }
         }
-        // fs.readb path -> fayl baytlari (bytes), yo'q bo'lsa nil. fs.read'ning
-        // ikkilik juftligi (issue #132) — rasm/PDF kabi UTF-8 bo'lmagan fayllar
-        // fs.read'da xato beradi, bular shu orqali o'qiladi.
+        // fs.readb path -> the file bytes (bytes), or nil if missing. The binary
+        // counterpart of fs.read (issue #132) — non-UTF-8 files like images/PDFs
+        // error in fs.read, and are read through this instead.
         "readb" => {
             let path = arg_str(&args, 0, "fs.readb")?;
             match std::fs::read(&path) {
@@ -773,10 +765,10 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
                 Err(e) => Err(Flow::err(format!("fs.readb {}: {}", path, e))),
             }
         }
-        // fs.write path content -> faylni ustiga yozadi (oldingi mazmun o'chadi).
-        // Oraliq papkalar mavjud bo'lishi kerak (kerak bo'lsa fs.mkdirp).
-        // content str YOKI bytes — yozish uchun alohida "writeb" kerak emas,
-        // chunki manba turi yo'lni o'zgartirmaydi (o'qishdan farqli).
+        // fs.write path content -> overwrites the file (previous content is lost).
+        // Intermediate directories must exist (use fs.mkdirp if needed).
+        // content is str OR bytes — no separate "writeb" is needed for writing,
+        // because the source type does not change the path (unlike reading).
         "write" => {
             let path = arg_str(&args, 0, "fs.write")?;
             let content = arg_bytes(&args, 1, "fs.write")?;
@@ -784,8 +776,8 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
                 .map_err(|e| Flow::err(format!("fs.write {}: {}", path, e)))?;
             Ok(Value::Sym("ok".into()))
         }
-        // fs.append path content -> mavjud fayl oxiriga qo'shadi (yo'q bo'lsa
-        // yaratadi). content str yoki bytes (fs.write bilan bir xil).
+        // fs.append path content -> appends to the end of an existing file (creates
+        // it if missing). content is str or bytes (same as fs.write).
         "append" => {
             use std::io::Write;
             let path = arg_str(&args, 0, "fs.append")?;
@@ -799,13 +791,13 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
                 .map_err(|e| Flow::err(format!("fs.append {}: {}", path, e)))?;
             Ok(Value::Sym("ok".into()))
         }
-        // fs.exists path -> bool (fayl YOKI papka mavjudmi).
+        // fs.exists path -> bool (whether a file OR directory exists).
         "exists" => {
             let path = arg_str(&args, 0, "fs.exists")?;
             Ok(Value::Bool(std::path::Path::new(&path).exists()))
         }
-        // fs.ls path -> papka ichidagi nomlar ro'yxati [str] (to'liq yo'l emas,
-        // faqat nom). Tartib deterministik bo'lishi uchun saralanadi.
+        // fs.ls path -> a list of names inside the directory [str] (just the name,
+        // not the full path). Sorted so the order is deterministic.
         "ls" => {
             let path = arg_str(&args, 0, "fs.ls")?;
             let entries = std::fs::read_dir(&path)
@@ -818,9 +810,9 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
             names.sort();
             Ok(Value::List(names.into_iter().map(Value::Str).collect()))
         }
-        // fs.del path -> faylni yoki bo'sh papkani o'chiradi -> :ok.
-        // Papka bo'sh bo'lmasa Flow::err (rekursiv o'chirish ataylab yo'q —
-        // tasodifiy butun daraxtni o'chirib qo'ymaslik uchun xavfsizroq).
+        // fs.del path -> deletes a file or an empty directory -> :ok.
+        // If the directory is not empty, Flow::err (recursive delete is deliberately
+        // absent — safer, so a whole tree is not accidentally removed).
         "del" => {
             let path = arg_str(&args, 0, "fs.del")?;
             let p = std::path::Path::new(&path);
@@ -832,32 +824,32 @@ fn fs_module(func: &str, args: Vec<Value>) -> R {
             res.map_err(|e| Flow::err(format!("fs.del {}: {}", path, e)))?;
             Ok(Value::Sym("ok".into()))
         }
-        // fs.mkdirp path -> papkani (kerakli oraliq papkalar bilan) yaratadi -> :ok.
-        // Papka allaqachon mavjud bo'lsa xato emas (idempotent).
+        // fs.mkdirp path -> creates the directory (with the needed intermediate dirs) -> :ok.
+        // Not an error if the directory already exists (idempotent).
         "mkdirp" => {
             let path = arg_str(&args, 0, "fs.mkdirp")?;
             std::fs::create_dir_all(&path)
                 .map_err(|e| Flow::err(format!("fs.mkdirp {}: {}", path, e)))?;
             Ok(Value::Sym("ok".into()))
         }
-        _ => Err(Flow::err(format!("fs modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!("fs module has no function '{}'", func))),
     }
 }
 
-// ---------------- sh (tashqi shell buyruqlari) ----------------
+// ---------------- sh (external shell commands) ----------------
 //
 // sh.run cmd -> {stdout: str  stderr: str  code: int}.
-// Buyruq SHELL orqali ishga tushiriladi (Unix: `sh -c`, Windows: `cmd /C`) —
-// shunda `cd x && cargo build`, quvurlar (`|`), `&&`, glob kabi shell xususiyatlari
-// ishlaydi (issue #26 da Sonnet aynan shu naqshni taxmin qildi). Bu coding agent,
-// CI skript, build avtomatizatsiyasi uchun kerak.
+// The command is run through the SHELL (Unix: `sh -c`, Windows: `cmd /C`) — so
+// shell features like `cd x && cargo build`, pipes (`|`), `&&`, glob work (in
+// issue #26 Sonnet guessed exactly this pattern). Needed for a coding agent,
+// CI scripts, build automation.
 //
-// `code == 0` muvaffaqiyat (Unix konvensiyasi). Jarayon signal bilan o'lsa (Unix'da
-// exit code yo'q) code = -1. Buyruqning O'ZI muvaffaqiyatsiz bo'lishi (non-zero code)
-// Flow::err EMAS — bu kutilgan natija, chaqiruvchi `code` orqali tekshiradi. Faqat
-// jarayonni umuman boshlab bo'lmasa (masalan shell topilmasa) Flow::err.
+// `code == 0` is success (the Unix convention). If the process dies from a signal
+// (no exit code on Unix) code = -1. The command ITSELF failing (a non-zero code)
+// is NOT a Flow::err — that is an expected result, the caller checks via `code`.
+// Only when the process cannot be started at all (e.g. the shell is not found) Flow::err.
 //
-// Xavfli buyruqlarni bloklash ataylab YO'Q — bu foydalanuvchi mas'uliyati (issue #26).
+// Blocking dangerous commands is deliberately ABSENT — that is the user's responsibility (issue #26).
 fn sh_module(func: &str, args: Vec<Value>) -> R {
     match func {
         "run" => {
@@ -875,12 +867,12 @@ fn sh_module(func: &str, args: Vec<Value>) -> R {
             }
             let output = command
                 .output()
-                .map_err(|e| Flow::err(format!("sh.run: buyruqni boshlab bo'lmadi: {}", e)))?;
-            // stdout/stderr ni lossy UTF-8 sifatida o'qiymiz — ikkilik chiqishda ham
-            // panic bo'lmaydi (json dekoderdan farqli, bu yerda matn kafolati yo'q).
+                .map_err(|e| Flow::err(format!("sh.run: could not start command: {}", e)))?;
+            // Read stdout/stderr as lossy UTF-8 — no panic even on binary output
+            // (unlike the json decoder, there is no text guarantee here).
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            // signal bilan tugagan jarayonda kod None bo'ladi -> -1.
+            // a process ended by a signal has code None -> -1.
             let code = output.status.code().unwrap_or(-1) as i64;
             let mut m = BTreeMap::new();
             m.insert("stdout".to_string(), Value::Str(stdout));
@@ -888,7 +880,7 @@ fn sh_module(func: &str, args: Vec<Value>) -> R {
             m.insert("code".to_string(), Value::Int(code));
             Ok(Value::Map(m))
         }
-        _ => Err(Flow::err(format!("sh modulida '{}' funksiyasi yo'q", func))),
+        _ => Err(Flow::err(format!("sh module has no function '{}'", func))),
     }
 }
 
@@ -910,8 +902,8 @@ fn unit_secs(unit: &str) -> Option<i64> {
     }
 }
 
-// unix sekund -> (year, month, day, hour, min, sec) UTC.
-// civil_from_days: Howard Hinnant algoritmi (dependency'siz, doimiy vaqt).
+// unix seconds -> (year, month, day, hour, min, sec) UTC.
+// civil_from_days: Howard Hinnant's algorithm (dependency-free, constant time).
 fn civil(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = unix.div_euclid(86_400);
     let secs_of_day = unix.rem_euclid(86_400);
@@ -920,14 +912,14 @@ fn civil(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
         ((secs_of_day % 3600) / 60) as u32,
         (secs_of_day % 60) as u32,
     );
-    // days: 1970-01-01 dan boshlab. Hinnant: era'ni mart'dan boshlaydi.
+    // days: counted from 1970-01-01. Hinnant: starts the era in March.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097); // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11] (mart=0)
+    let mp = (5 * doy + 2) / 153; // [0, 11] (March=0)
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
@@ -939,7 +931,7 @@ fn fmt_unix(unix: i64) -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, h, mi, s)
 }
 
-// "YYYY-MM-DD HH:MM:SS" (yoki "YYYY-MM-DDTHH:MM:SS") -> unix sekund (UTC).
+// "YYYY-MM-DD HH:MM:SS" (or "YYYY-MM-DDTHH:MM:SS") -> unix seconds (UTC).
 fn parse_ts(s: &str) -> Option<i64> {
     let s = s.trim();
     let b = s.as_bytes();
@@ -953,10 +945,10 @@ fn parse_ts(s: &str) -> Option<i64> {
     let h = num(11, 13)?;
     let mi = num(14, 16)?;
     let se = num(17, 19)?;
-    // Diapazonlarni tekshiramiz — days_from_civil overflow'ni jimgina
-    // "tuzatadi" (mavjud bo'lmagan 02-31 -> 03-03), shuning uchun bu yerda
-    // rad etamiz: booking oqimida noto'g'ri sana sukutsiz qabul qilinmasin.
-    // se 60 — kabisa sekund (ISO ruxsat beradi) — qabul qilamiz.
+    // Validate the ranges — days_from_civil silently "fixes" an overflow (a
+    // nonexistent 02-31 -> 03-03), so we reject it here: a wrong date must not be
+    // accepted silently in a booking flow.
+    // se 60 — a leap second (ISO allows it) — we accept it.
     if !(1..=12).contains(&mo)
         || !(1..=days_in_month(y, mo)).contains(&d)
         || !(0..=23).contains(&h)
@@ -968,7 +960,7 @@ fn parse_ts(s: &str) -> Option<i64> {
     Some(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se)
 }
 
-// Berilgan yil/oy uchun kunlar soni (kabisa yilni hisobga oladi).
+// Number of days for the given year/month (leap year aware).
 fn days_in_month(y: i64, m: i64) -> i64 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -977,30 +969,30 @@ fn days_in_month(y: i64, m: i64) -> i64 {
             let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
             if leap { 29 } else { 28 }
         }
-        _ => 0, // noto'g'ri oy — chaqiruvchi mo'ni allaqachon tekshiradi
+        _ => 0, // invalid month — the caller already checks mo
     }
 }
 
-// Ixtiyoriy ISO-8601 matnni unix sekundga (UTC) o'giradi. parse_ts ustiga
-// quriladi: avval sana+vaqt asosini ("YYYY-MM-DD[ T]HH:MM:SS") o'qiydi, so'ng
-// 19-belgidan keyingi qismdan ixtiyoriy kasr sekund (".sss" — sekund aniqligida
-// tashlanadi) va vaqt mintaqasini ("Z", "±HH:MM", "±HHMM", "±HH") tushunadi.
-// Mintaqa ko'rsatilmasa UTC deb olinadi. Matndagi vaqt mahalliy -> UTC = vaqt - offset.
-// Timestamp'lar ASCII, shuning uchun bayt indeksi = belgi indeksi (boundary xavfsiz).
+// Converts an arbitrary ISO-8601 text to unix seconds (UTC). Built on top of
+// parse_ts: first reads the date+time base ("YYYY-MM-DD[ T]HH:MM:SS"), then from
+// the part after the 19th char understands an optional fractional second (".sss"
+// — dropped, since we work at second precision) and a time zone ("Z", "±HH:MM",
+// "±HHMM", "±HH"). With no zone it is taken as UTC. The text time is local ->
+// UTC = time - offset. Timestamps are ASCII, so byte index = char index (boundary safe).
 fn parse_iso(s: &str) -> Option<i64> {
     let s = s.trim();
-    let base = parse_ts(s)?; // birinchi 19 belgi (sana + vaqt); len >= 19 kafolat
+    let base = parse_ts(s)?; // first 19 chars (date + time); len >= 19 guaranteed
     let mut rest = &s[19..];
-    // kasr sekundni o'tkazib yuboramiz (".123") — sekund aniqligida ishlaymiz.
+    // skip the fractional second (".123") — we work at second precision.
     if let Some(after_dot) = rest.strip_prefix('.') {
         let digits = after_dot.bytes().take_while(|b| b.is_ascii_digit()).count();
         rest = &after_dot[digits..];
     }
     let offset = match rest.chars().next() {
-        None => 0,                  // mintaqasiz -> UTC
+        None => 0,                  // no zone -> UTC
         Some('Z') | Some('z') => 0, // Zulu (UTC)
         Some(sign @ ('+' | '-')) => {
-            // ":" ni e'tiborsiz qoldirib faqat raqamlarni olamiz: HHMM yoki HH.
+            // ignore ":" and take only the digits: HHMM or HH.
             let digits: String = rest[1..].chars().filter(|c| c.is_ascii_digit()).collect();
             let (hh, mm) = match digits.len() {
                 2 => (digits.parse::<i64>().ok()?, 0),
@@ -1013,17 +1005,17 @@ fn parse_iso(s: &str) -> Option<i64> {
             let off = hh * 3600 + mm * 60;
             if sign == '-' { -off } else { off }
         }
-        _ => return None, // tanish bo'lmagan qoldiq -> noto'g'ri matn
+        _ => return None, // unrecognized remainder -> invalid text
     };
     Some(base - offset)
 }
 
-// (year, month, day) UTC -> 1970-01-01 dan kunlar (Hinnant teskari).
+// (year, month, day) UTC -> days since 1970-01-01 (Hinnant inverse).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
-    let mp = if m > 2 { m - 3 } else { m + 9 }; // mart=0
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // March=0
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
@@ -1034,8 +1026,8 @@ fn strftime(unix: i64, pat: &str) -> String {
     strftime_fields(y, mo, d, h, mi, s, pat)
 }
 
-// Sana/vaqt maydonlaridan matn yasaydi — UTC (civil) va zona-aware (fmt_in_zone)
-// yo'llari bir xil token to'plamini ishlatsin uchun ajratib olingan.
+// Builds text from date/time fields — extracted so the UTC (civil) and
+// zone-aware (fmt_in_zone) paths use the same token set.
 fn strftime_fields(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32, pat: &str) -> String {
     pat.replace("YYYY", &format!("{:04}", y))
         .replace("MM", &format!("{:02}", mo))
@@ -1104,10 +1096,7 @@ fn json_module(func: &str, args: Vec<Value>) -> R {
             let s = arg_str(&args, 0, "json.dec")?;
             json_decode(&s)
         }
-        _ => Err(Flow::err(format!(
-            "json modulida '{}' funksiyasi yo'q",
-            func
-        ))),
+        _ => Err(Flow::err(format!("json module has no function '{}'", func))),
     }
 }
 
@@ -1187,7 +1176,7 @@ pub fn json_decode(s: &str) -> R {
     // Qiymatdan keyin chiqindi qolmasligi kerak — `"1 garbage"` endi xato beradi
     // (avval jim `1` qaytarardi).
     if p.i < p.b.len() {
-        return Err(Flow::err("json: qiymatdan keyin ortiqcha matn"));
+        return Err(Flow::err("json: extra text after value"));
     }
     Ok(v)
 }
@@ -1205,7 +1194,7 @@ impl<'a> JsonParser<'a> {
     fn value(&mut self) -> R {
         self.skip_ws();
         if self.i >= self.b.len() {
-            return Err(Flow::err("json: kutilmagan oxir"));
+            return Err(Flow::err("json: unexpected end"));
         }
         match self.b[self.i] {
             b'{' => self.object(),
@@ -1218,7 +1207,7 @@ impl<'a> JsonParser<'a> {
                     self.i += 4;
                     Ok(Value::Nil)
                 } else {
-                    Err(Flow::err("json: noto'g'ri qiymat (null kutilgan)"))
+                    Err(Flow::err("json: invalid value (null expected)"))
                 }
             }
             _ => self.number(),
@@ -1237,7 +1226,7 @@ impl<'a> JsonParser<'a> {
             let key = self.string()?;
             self.skip_ws();
             if self.i >= self.b.len() || self.b[self.i] != b':' {
-                return Err(Flow::err("json: ':' kutilgan"));
+                return Err(Flow::err("json: ':' expected"));
             }
             self.i += 1;
             let val = self.value()?;
@@ -1251,7 +1240,7 @@ impl<'a> JsonParser<'a> {
                     self.i += 1;
                     break;
                 }
-                _ => return Err(Flow::err("json: ',' yoki '}' kutilgan")),
+                _ => return Err(Flow::err("json: ',' or '}' expected")),
             }
         }
         Ok(Value::Map(m))
@@ -1276,7 +1265,7 @@ impl<'a> JsonParser<'a> {
                     self.i += 1;
                     break;
                 }
-                _ => return Err(Flow::err("json: ',' yoki ']' kutilgan")),
+                _ => return Err(Flow::err("json: ',' or ']' expected")),
             }
         }
         Ok(Value::List(out))
@@ -1285,10 +1274,10 @@ impl<'a> JsonParser<'a> {
         // Kesilgan input (masalan `{`) bilan chegaradan o'tib panic bo'lmasin —
         // ishonchsiz tashqi ma'lumot (HTTP body) crash qildirmasligi shart.
         if self.i >= self.b.len() {
-            return Err(Flow::err("json: kutilmagan tugash"));
+            return Err(Flow::err("json: unexpected end"));
         }
         if self.b[self.i] != b'"' {
-            return Err(Flow::err("json: satr kutilgan"));
+            return Err(Flow::err("json: string expected"));
         }
         self.i += 1;
         // Natijani BAYTLAR sifatida yig'amiz, oxirida UTF-8 str'ga aylantiramiz —
@@ -1301,13 +1290,13 @@ impl<'a> JsonParser<'a> {
             match c {
                 b'"' => {
                     return String::from_utf8(out)
-                        .map_err(|_| Flow::err("json: satr noto'g'ri UTF-8"));
+                        .map_err(|_| Flow::err("json: string is invalid UTF-8"));
                 }
                 b'\\' => {
                     // Satr `\` bilan tugab qolsa (masalan `"ab\`) escape baytini
                     // o'qishda chegaradan o'tmaylik — aks holda panic.
                     if self.i >= self.b.len() {
-                        return Err(Flow::err("json: kutilmagan tugash"));
+                        return Err(Flow::err("json: unexpected end"));
                     }
                     let e = self.b[self.i];
                     self.i += 1;
@@ -1353,17 +1342,17 @@ impl<'a> JsonParser<'a> {
                 _ => out.push(c),
             }
         }
-        Err(Flow::err("json: yopilmagan satr"))
+        Err(Flow::err("json: unterminated string"))
     }
 
     // Joriy pozitsiyadan 4 hex raqamni o'qib u16 qaytaradi (\uXXXX uchun).
     fn hex4(&mut self) -> Result<u16, Flow> {
         if self.i + 4 > self.b.len() {
-            return Err(Flow::err("json: \\u uchun 4 hex raqam kerak"));
+            return Err(Flow::err("json: \\u requires 4 hex digits"));
         }
         let slice = &self.b[self.i..self.i + 4];
-        let s = std::str::from_utf8(slice).map_err(|_| Flow::err("json: \\u noto'g'ri"))?;
-        let v = u16::from_str_radix(s, 16).map_err(|_| Flow::err("json: \\u noto'g'ri hex"))?;
+        let s = std::str::from_utf8(slice).map_err(|_| Flow::err("json: \\u invalid"))?;
+        let v = u16::from_str_radix(s, 16).map_err(|_| Flow::err("json: \\u invalid hex"))?;
         self.i += 4;
         Ok(v)
     }
@@ -1375,7 +1364,7 @@ impl<'a> JsonParser<'a> {
             self.i += 5;
             Ok(Value::Bool(false))
         } else {
-            Err(Flow::err("json: noto'g'ri bool"))
+            Err(Flow::err("json: invalid bool"))
         }
     }
     // JSON son grammatikasini qat'iy tutamiz: [-] int [frac] [exp].
@@ -1395,14 +1384,14 @@ impl<'a> JsonParser<'a> {
                     self.i += 1;
                 }
             }
-            _ => return Err(Flow::err("json: noto'g'ri son")),
+            _ => return Err(Flow::err("json: invalid number")),
         }
         // kasr qismi: '.' dan keyin kamida bitta raqam
         if self.b.get(self.i) == Some(&b'.') {
             is_float = true;
             self.i += 1;
             if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
-                return Err(Flow::err("json: noto'g'ri son"));
+                return Err(Flow::err("json: invalid number"));
             }
             while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
                 self.i += 1;
@@ -1416,7 +1405,7 @@ impl<'a> JsonParser<'a> {
                 self.i += 1;
             }
             if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
-                return Err(Flow::err("json: noto'g'ri son"));
+                return Err(Flow::err("json: invalid number"));
             }
             while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
                 self.i += 1;
@@ -1426,11 +1415,11 @@ impl<'a> JsonParser<'a> {
         if is_float {
             text.parse::<f64>()
                 .map(Value::Flt)
-                .map_err(|_| Flow::err("json: noto'g'ri son"))
+                .map_err(|_| Flow::err("json: invalid number"))
         } else {
             text.parse::<i64>()
                 .map(Value::Int)
-                .map_err(|_| Flow::err("json: noto'g'ri son"))
+                .map_err(|_| Flow::err("json: invalid number"))
         }
     }
 }
@@ -1441,11 +1430,11 @@ pub fn call_method(recv: &Value, method: &str, args: Vec<Value>) -> R {
         Value::List(xs) => list_method(xs, method, args),
         Value::Map(m) => map_method(m, method, args),
         Value::Str(_) => Err(Flow::err(format!(
-            "str metodlari modul orqali chaqiriladi: str.{} s (qiymat metodi emas)",
+            "str methods are called via the module: str.{} s (not a value method)",
             method
         ))),
         other => Err(Flow::err(format!(
-            "{} tipida '.{}' metodi yo'q",
+            "{} type has no '.{}' method",
             other.type_name(),
             method
         ))),
@@ -1525,7 +1514,7 @@ fn list_method(xs: &[Value], method: &str, args: Vec<Value>) -> R {
             let other = arg(&args, 0, "list.zip")?;
             let Value::List(ys) = other else {
                 return Err(Flow::err(format!(
-                    "list.zip: argument list bo'lishi kerak, {} berildi",
+                    "list.zip: argument must be a list, got {}",
                     other.type_name()
                 )));
             };
@@ -1541,10 +1530,13 @@ fn list_method(xs: &[Value], method: &str, args: Vec<Value>) -> R {
         // shu yerda chaqira olmaydi (apply Interp'da). Shuning uchun bu metodlar
         // maxsus ishlov talab qiladi — pastdagi izohga qarang.
         "filter" | "map" | "reduce" | "find" | "any" | "all" => Err(Flow::err(format!(
-            "ichki: list.{} alohida yo'l bilan ishlov beriladi",
+            "internal: list.{} is handled via a separate path",
             method
         ))),
-        _ => Err(Flow::err(format!("list metodi '{}' mavjud emas", method))),
+        _ => Err(Flow::err(format!(
+            "list method '{}' does not exist",
+            method
+        ))),
     }
 }
 
@@ -1566,7 +1558,7 @@ pub fn sort_default(xs: &[Value]) -> R {
             (Value::Str(x), Value::Str(y)) => Ok(x.cmp(y)),
             (Value::Sym(x), Value::Sym(y)) => Ok(x.cmp(y)),
             (a, b) => Err(Flow::err(format!(
-                "list.sort: {} va {} ni taqqoslab bo'lmaydi — komparator bering: l.sort \\a b -> ...",
+                "list.sort: cannot compare {} and {} — provide a comparator: l.sort \\a b -> ...",
                 a.type_name(),
                 b.type_name()
             ))),
@@ -1641,7 +1633,7 @@ fn map_method(m: &BTreeMap<String, Value>, method: &str, args: Vec<Value>) -> R 
                 Value::Map(o) => o.clone(),
                 other => {
                     return Err(Flow::err(format!(
-                        "map.merge: argument map bo'lishi kerak, {} berildi",
+                        "map.merge: argument must be a map, got {}",
                         other.type_name()
                     )));
                 }
@@ -1650,7 +1642,7 @@ fn map_method(m: &BTreeMap<String, Value>, method: &str, args: Vec<Value>) -> R 
             new.extend(other);
             Ok(Value::Map(new))
         }
-        _ => Err(Flow::err(format!("map metodi '{}' mavjud emas", method))),
+        _ => Err(Flow::err(format!("map method '{}' does not exist", method))),
     }
 }
 
@@ -1664,14 +1656,14 @@ fn key_of(v: &Value) -> String {
 // ---------------- argument yordamchilari ----------------
 fn arg<'a>(args: &'a [Value], i: usize, who: &str) -> Result<&'a Value, Flow> {
     args.get(i)
-        .ok_or_else(|| Flow::err(format!("{}: {}-argument yetishmadi", who, i + 1)))
+        .ok_or_else(|| Flow::err(format!("{}: argument {} is missing", who, i + 1)))
 }
 pub(crate) fn arg_str(args: &[Value], i: usize, who: &str) -> Result<String, Flow> {
     match arg(args, i, who)? {
         Value::Str(s) => Ok(s.clone()),
         Value::Sym(s) => Ok(s.clone()),
         other => Err(Flow::err(format!(
-            "{}: {}-argument str bo'lishi kerak, {} berildi",
+            "{}: argument {} must be str, got {}",
             who,
             i + 1,
             other.type_name()
@@ -1686,7 +1678,7 @@ pub(crate) fn arg_bytes(args: &[Value], i: usize, who: &str) -> Result<Arc<Vec<u
         Value::Bytes(b) => Ok(b.clone()),
         Value::Str(s) | Value::Sym(s) => Ok(Arc::new(s.clone().into_bytes())),
         other => Err(Flow::err(format!(
-            "{}: {}-argument bytes yoki str bo'lishi kerak, {} berildi",
+            "{}: argument {} must be bytes or str, got {}",
             who,
             i + 1,
             other.type_name()
@@ -1697,7 +1689,7 @@ fn arg_int(args: &[Value], i: usize, who: &str) -> Result<i64, Flow> {
     match arg(args, i, who)? {
         Value::Int(n) => Ok(*n),
         other => Err(Flow::err(format!(
-            "{}: {}-argument int bo'lishi kerak, {} berildi",
+            "{}: argument {} must be int, got {}",
             who,
             i + 1,
             other.type_name()
@@ -1709,10 +1701,10 @@ fn arg_int(args: &[Value], i: usize, who: &str) -> Result<i64, Flow> {
 fn arg_ts(args: &[Value], i: usize, who: &str) -> Result<i64, Flow> {
     match arg(args, i, who)? {
         Value::Str(s) => parse_iso(s)
-            .ok_or_else(|| Flow::err(format!("{}: timestamp matnini o'qib bo'lmadi: {}", who, s))),
+            .ok_or_else(|| Flow::err(format!("{}: could not parse timestamp text: {}", who, s))),
         Value::Int(n) => Ok(*n),
         other => Err(Flow::err(format!(
-            "{}: {}-argument timestamp (str/int) bo'lishi kerak, {} berildi",
+            "{}: argument {} must be timestamp (str/int), got {}",
             who,
             i + 1,
             other.type_name()
@@ -1724,7 +1716,7 @@ fn arg_num(args: &[Value], i: usize, who: &str) -> Result<f64, Flow> {
         Value::Int(n) => Ok(*n as f64),
         Value::Flt(x) => Ok(*x),
         other => Err(Flow::err(format!(
-            "{}: {}-argument son bo'lishi kerak, {} berildi",
+            "{}: argument {} must be a number, got {}",
             who,
             i + 1,
             other.type_name()
@@ -1744,12 +1736,12 @@ mod log_tests {
     #[test]
     fn text_format_prefiks() {
         assert_eq!(
-            format_log("info", &[s("salom")], None, false),
-            Some("[INFO] salom".to_string())
+            format_log("info", &[s("hello")], None, false),
+            Some("[INFO] hello".to_string())
         );
         assert_eq!(
-            format_log("err", &[s("yiqildi")], None, false),
-            Some("[ERR] yiqildi".to_string())
+            format_log("err", &[s("failed")], None, false),
+            Some("[ERR] failed".to_string())
         );
     }
 
@@ -1789,27 +1781,35 @@ mod log_tests {
     // JSON rejim: strukturali qator, daraja va xabar to'g'ri, tirnoq escape qilinadi.
     #[test]
     fn json_format() {
-        let line = format_log("warn", &[s("buzildi")], None, true).unwrap();
+        let line = format_log("warn", &[s("failed")], None, true).unwrap();
         assert!(
             line.starts_with("{\"time\":\""),
-            "time maydoni yo'q: {}",
+            "time field missing: {}",
             line
         );
-        assert!(line.contains("\"level\":\"warn\""), "daraja yo'q: {}", line);
-        assert!(line.contains("\"msg\":\"buzildi\""), "xabar yo'q: {}", line);
-        // Dekoder bilan qaytarib o'qiladi — yaroqli JSON ekanini tasdiqlaydi.
+        assert!(
+            line.contains("\"level\":\"warn\""),
+            "level missing: {}",
+            line
+        );
+        assert!(
+            line.contains("\"msg\":\"failed\""),
+            "message missing: {}",
+            line
+        );
+        // Read back via the decoder — confirms it is valid JSON.
         let Ok(Value::Map(m)) = json_decode(&line) else {
-            panic!("yaroqsiz JSON: {}", line);
+            panic!("invalid JSON: {}", line);
         };
         assert!(matches!(m.get("level"), Some(Value::Str(s)) if s == "warn"));
-        assert!(matches!(m.get("msg"), Some(Value::Str(s)) if s == "buzildi"));
+        assert!(matches!(m.get("msg"), Some(Value::Str(s)) if s == "failed"));
     }
 
     // JSON xabar ichidagi tirnoq/yangi qator JSON'ni buzmaydi (escape).
     #[test]
     fn json_escapes_message() {
         let line = format_log("info", &[s("a\"b\nc")], None, true).unwrap();
-        assert!(json_decode(&line).is_ok(), "escape buzildi: {}", line);
+        assert!(json_decode(&line).is_ok(), "escape broken: {}", line);
     }
 
     // JSON rejimda ham filtr ishlaydi.
@@ -1828,12 +1828,12 @@ mod rand_tests {
     fn int_in_range() {
         for _ in 0..1000 {
             let Ok(Value::Int(v)) = rand_module("int", vec![Value::Int(10), Value::Int(20)]) else {
-                panic!("rand.int int qaytarishi kerak");
+                panic!("rand.int must return an int");
             };
-            assert!((10..=20).contains(&v), "diapazondan tashqari: {}", v);
+            assert!((10..=20).contains(&v), "out of range: {}", v);
         }
         let Ok(Value::Int(v)) = rand_module("int", vec![Value::Int(7), Value::Int(7)]) else {
-            panic!("rand.int int qaytarishi kerak");
+            panic!("rand.int must return an int");
         };
         assert_eq!(v, 7); // span=1 -> doim a
     }
@@ -1842,7 +1842,7 @@ mod rand_tests {
     #[test]
     fn str_len_and_alphabet() {
         let Ok(Value::Str(s)) = rand_module("str", vec![Value::Int(32)]) else {
-            panic!("rand.str matn qaytarishi kerak");
+            panic!("rand.str must return a string");
         };
         assert_eq!(s.chars().count(), 32);
         assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
@@ -1861,9 +1861,9 @@ mod rand_tests {
             for _ in 0..50 {
                 let Ok(Value::Int(v)) = rand_module("int", vec![Value::Int(a), Value::Int(b)])
                 else {
-                    panic!("rand.int int qaytarishi kerak ({}..{})", a, b);
+                    panic!("rand.int must return an int ({}..{})", a, b);
                 };
-                assert!((a..=b).contains(&v), "diapazondan tashqari: {}", v);
+                assert!((a..=b).contains(&v), "out of range: {}", v);
             }
         }
     }
@@ -1876,9 +1876,9 @@ mod rand_tests {
         let mut seen = HashSet::new();
         for _ in 0..100 {
             let Ok(Value::Str(s)) = rand_module("str", vec![Value::Int(24)]) else {
-                panic!("rand.str matn qaytarishi kerak");
+                panic!("rand.str must return a string");
             };
-            assert!(seen.insert(s), "takror token chiqdi — CSPRNG buzildi");
+            assert!(seen.insert(s), "duplicate token produced — CSPRNG broken");
         }
     }
 }
@@ -1893,9 +1893,9 @@ mod math_tests {
     fn abs_min_is_error_not_panic() {
         let r = math_module("abs", vec![Value::Int(i64::MIN)]);
         let Err(Flow::Error(msg)) = r else {
-            panic!("math.abs i64::MIN xato berishi kerak");
+            panic!("math.abs i64::MIN must return an error");
         };
-        assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        assert!(msg.contains("number out of range"), "error text: {}", msg);
         assert!(matches!(
             math_module("abs", vec![Value::Int(-7)]),
             Ok(Value::Int(7))
@@ -1989,9 +1989,9 @@ mod math_tests {
         // 2^63 i64 ga sig'maydi — overflow xatosi.
         let r = math_module("pow", vec![Value::Int(2), Value::Int(63)]);
         let Err(Flow::Error(msg)) = r else {
-            panic!("math.pow overflow xato berishi kerak");
+            panic!("math.pow overflow must return an error");
         };
-        assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+        assert!(msg.contains("number out of range"), "error text: {}", msg);
         // u32 ga sig'maydigan daraja ham overflow (panic emas).
         assert!(math_module("pow", vec![Value::Int(2), Value::Int(u32::MAX as i64 + 1)]).is_err());
     }
@@ -2009,9 +2009,9 @@ mod math_tests {
         ));
         let r = math_module("sqrt", vec![Value::Int(-4)]);
         let Err(Flow::Error(msg)) = r else {
-            panic!("math.sqrt manfiy son xato berishi kerak");
+            panic!("math.sqrt of a negative number must return an error");
         };
-        assert!(msg.contains("manfiy"), "xato matni: {}", msg);
+        assert!(msg.contains("negative"), "error text: {}", msg);
     }
 }
 
@@ -2032,7 +2032,7 @@ mod time_tests {
     fn parse_then_fmt_roundtrip() {
         for &u in &[0i64, 1_700_000_000, 1_709_208_000, 4_102_444_800] {
             let s = fmt_unix(u);
-            assert_eq!(parse_ts(&s), Some(u), "round-trip buzildi: {}", s);
+            assert_eq!(parse_ts(&s), Some(u), "round-trip broken: {}", s);
         }
         // 'T' ajratuvchi ham qo'llab-quvvatlanadi (ISO).
         assert_eq!(parse_ts("2023-11-14T22:13:20"), Some(1_700_000_000));
@@ -2047,8 +2047,8 @@ mod time_tests {
 
     #[test]
     fn parse_rejects_garbage() {
-        assert_eq!(parse_ts("salom"), None);
-        assert_eq!(parse_ts("2023-11-14"), None); // juda qisqa (vaqt yo'q)
+        assert_eq!(parse_ts("hello"), None);
+        assert_eq!(parse_ts("2023-11-14"), None); // too short (no time)
     }
 
     #[test]
@@ -2057,24 +2057,24 @@ mod time_tests {
         let now = now_unix();
         let Ok(Value::Str(f)) = time_module("in", vec![Value::Int(1), Value::Str("hr".into())])
         else {
-            panic!("time.in matn qaytarishi kerak");
+            panic!("time.in must return a string");
         };
         let Ok(Value::Str(p)) = time_module("ago", vec![Value::Int(1), Value::Str("hr".into())])
         else {
-            panic!("time.ago matn qaytarishi kerak");
+            panic!("time.ago must return a string");
         };
         let (Some(fu), Some(pu)) = (parse_ts(&f), parse_ts(&p)) else {
-            panic!("timestamp'larni o'qib bo'lmadi");
+            panic!("could not parse timestamps");
         };
         // 1 soat keyin > hozir > 1 soat oldin (sekundlik yumaloqlash chetga surilmaydi).
         assert!(
             fu >= now + 3600 - 1 && fu <= now + 3600 + 1,
-            "time.in noto'g'ri: {}",
+            "time.in incorrect: {}",
             f
         );
         assert!(
             pu >= now - 3600 - 1 && pu <= now - 3600 + 1,
-            "time.ago noto'g'ri: {}",
+            "time.ago incorrect: {}",
             p
         );
     }
@@ -2082,7 +2082,7 @@ mod time_tests {
     #[test]
     fn in_rejects_bad_unit() {
         let r = time_module("in", vec![Value::Int(1), Value::Str("year".into())]);
-        assert!(r.is_err(), "noma'lum birlik xato berishi kerak");
+        assert!(r.is_err(), "unknown unit must return an error");
     }
 
     #[test]
@@ -2092,13 +2092,10 @@ mod time_tests {
         let t0 = Instant::now();
         let r = time_module("sleep", vec![Value::Flt(0.05)]);
         let elapsed = t0.elapsed();
-        assert!(
-            matches!(r, Ok(Value::Nil)),
-            "time.sleep nil qaytarishi kerak"
-        );
+        assert!(matches!(r, Ok(Value::Nil)), "time.sleep must return nil");
         assert!(
             elapsed.as_millis() >= 45,
-            "time.sleep kamida kutilgan vaqtni kutishi kerak: {:?}",
+            "time.sleep must wait at least the expected duration: {:?}",
             elapsed
         );
     }
@@ -2107,14 +2104,17 @@ mod time_tests {
     fn sleep_negative_clamps_to_zero() {
         // Manfiy qiymat panic bermasligi kerak — 0 ga klamp qilinadi.
         let r = time_module("sleep", vec![Value::Int(-5)]);
-        assert!(matches!(r, Ok(Value::Nil)), "manfiy sleep nil qaytarsin");
+        assert!(
+            matches!(r, Ok(Value::Nil)),
+            "negative sleep must return nil"
+        );
     }
 
     #[test]
     fn parse_iso_handles_z_and_offsets() {
         // "Z" -> UTC; "+HH:MM"/"-HH:MM" mintaqa UTC ga keltiriladi.
-        let z = parse_iso("2026-06-10T10:00:00Z").expect("Z o'qilsin");
-        assert_eq!(parse_iso("2026-06-10 10:00:00"), Some(z)); // mintaqasiz = UTC
+        let z = parse_iso("2026-06-10T10:00:00Z").expect("Z must parse");
+        assert_eq!(parse_iso("2026-06-10 10:00:00"), Some(z)); // no zone = UTC
         // +05:00: matndagi vaqt mahalliy, UTC 5 soat oldin.
         assert_eq!(parse_iso("2026-06-10T15:00:00+05:00"), Some(z));
         // -05:00: UTC 5 soat keyin.
@@ -2129,15 +2129,15 @@ mod time_tests {
         let Ok(Value::Str(s)) =
             time_module("parse", vec![Value::Str("2026-06-10T10:00:00Z".into())])
         else {
-            panic!("time.parse matn qaytarishi kerak");
+            panic!("time.parse must return a string");
         };
         assert_eq!(s, "2026-06-10 10:00:00");
     }
 
     #[test]
     fn time_parse_rejects_garbage() {
-        let r = time_module("parse", vec![Value::Str("salom".into())]);
-        assert!(r.is_err(), "noto'g'ri matn xato berishi kerak");
+        let r = time_module("parse", vec![Value::Str("hello".into())]);
+        assert!(r.is_err(), "invalid text must return an error");
     }
 
     #[test]
@@ -2159,7 +2159,7 @@ mod time_tests {
     #[test]
     fn time_parse_rejects_impossible_date() {
         let r = time_module("parse", vec![Value::Str("2026-02-31T10:00:00Z".into())]);
-        assert!(r.is_err(), "02-31 mavjud emas — xato berishi kerak");
+        assert!(r.is_err(), "02-31 does not exist — must return an error");
     }
 
     #[test]
@@ -2173,7 +2173,7 @@ mod time_tests {
                 Value::Str("min".into()),
             ],
         ) else {
-            panic!("time.add matn qaytarishi kerak");
+            panic!("time.add must return a string");
         };
         assert_eq!(end, "2026-06-10 10:30:00");
         // Manfiy N orqaga siljitadi.
@@ -2185,7 +2185,7 @@ mod time_tests {
                 Value::Str("hr".into()),
             ],
         ) else {
-            panic!("time.add matn qaytarishi kerak");
+            panic!("time.add must return a string");
         };
         assert_eq!(before, "2026-06-10 08:00:00");
     }
@@ -2200,7 +2200,7 @@ mod time_tests {
                 Value::Str("year".into()),
             ],
         );
-        assert!(r.is_err(), "noma'lum birlik xato berishi kerak");
+        assert!(r.is_err(), "unknown unit must return an error");
     }
 
     // Issue #89: n * secs ko'paytmasi (yoki yakuniy yig'indi) i64 dan toshsa
@@ -2212,17 +2212,17 @@ mod time_tests {
         for func in ["ago", "in"] {
             let r = time_module(func, vec![big.clone(), day.clone()]);
             let Err(Flow::Error(msg)) = r else {
-                panic!("time.{} overflow'da xato berishi kerak", func);
+                panic!("time.{} must return an error on overflow", func);
             };
-            assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+            assert!(msg.contains("number out of range"), "error text: {}", msg);
         }
         let base = Value::Str("2026-06-10 10:00:00".into());
         for func in ["add", "sub"] {
             let r = time_module(func, vec![base.clone(), big.clone(), day.clone()]);
             let Err(Flow::Error(msg)) = r else {
-                panic!("time.{} overflow'da xato berishi kerak", func);
+                panic!("time.{} must return an error on overflow", func);
             };
-            assert!(msg.contains("son chegaradan oshdi"), "xato matni: {}", msg);
+            assert!(msg.contains("number out of range"), "error text: {}", msg);
         }
     }
 
@@ -2237,7 +2237,7 @@ mod time_tests {
                 Value::Str("min".into()),
             ],
         ) else {
-            panic!("time.sub matn qaytarishi kerak");
+            panic!("time.sub must return a string");
         };
         assert_eq!(s, "2026-06-10 09:55:00");
     }
@@ -2252,7 +2252,7 @@ mod time_tests {
                 Value::Str("2026-06-10 10:00:00".into()),
             ],
         );
-        assert!(matches!(r, Ok(Value::Int(1800))), "30 daqiqa = 1800 sek");
+        assert!(matches!(r, Ok(Value::Int(1800))), "30 minutes = 1800 sec");
         // Teskari tartib manfiy beradi.
         let r = time_module(
             "diff",
@@ -2325,7 +2325,7 @@ mod time_tests {
                 Value::Str("America/New_York".into()),
             ],
         ) else {
-            panic!("time.parse zona bilan matn qaytarishi kerak");
+            panic!("time.parse with zone must return a string");
         };
         assert_eq!(s, "2026-07-15 13:00:00"); // EDT (+4) -> UTC
     }
@@ -2341,7 +2341,7 @@ mod time_tests {
                 Value::Str("America/New_York".into()),
             ],
         ) else {
-            panic!("time.fmt zona bilan matn qaytarishi kerak");
+            panic!("time.fmt with zone must return a string");
         };
         assert_eq!(s, "09:00"); // 13:00 UTC -> EDT 09:00
     }
@@ -2358,7 +2358,7 @@ mod io_tests {
     fn print_returns_nil() {
         match io_module("print", vec![Value::Str(String::new())]) {
             Ok(Value::Nil) => {}
-            _ => panic!("io.print nil qaytarishi kerak"),
+            _ => panic!("io.print must return nil"),
         }
     }
 
@@ -2373,9 +2373,9 @@ mod io_tests {
     // xato matniga Flow::Error ichidan kiramiz.)
     #[test]
     fn unknown_func_errors() {
-        match io_module("yoq", vec![]) {
-            Err(Flow::Error(msg)) => assert!(msg.contains("io modulida")),
-            _ => panic!("Flow::Error kutilgan edi"),
+        match io_module("nope", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("io module")),
+            _ => panic!("expected Flow::Error"),
         }
     }
 
@@ -2396,7 +2396,7 @@ mod fs_tests {
         let mut p = std::env::temp_dir();
         p.push(format!("fluxon_fs_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&p); // oldingi qoldiqni tozalash
-        std::fs::create_dir_all(&p).expect("tmp dir yaratilmadi");
+        std::fs::create_dir_all(&p).expect("tmp dir not created");
         p
     }
 
@@ -2411,14 +2411,14 @@ mod fs_tests {
         let f = path_str(&dir, "a.txt");
         match fs_module(
             "write",
-            vec![Value::Str(f.clone()), Value::Str("salom".into())],
+            vec![Value::Str(f.clone()), Value::Str("hello".into())],
         ) {
             Ok(Value::Sym(s)) if s == "ok" => {}
-            _ => panic!("fs.write :ok qaytarishi kerak"),
+            _ => panic!("fs.write must return :ok"),
         }
         match fs_module("read", vec![Value::Str(f)]) {
-            Ok(Value::Str(s)) => assert_eq!(s, "salom"),
-            _ => panic!("fs.read yozilgan matnni qaytarishi kerak"),
+            Ok(Value::Str(s)) => assert_eq!(s, "hello"),
+            _ => panic!("fs.read must return the written text"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2427,10 +2427,10 @@ mod fs_tests {
     #[test]
     fn read_missing_is_nil() {
         let dir = tmp_dir("read_missing");
-        let f = path_str(&dir, "yoq.txt");
+        let f = path_str(&dir, "missing.txt");
         match fs_module("read", vec![Value::Str(f)]) {
             Ok(Value::Nil) => {}
-            _ => panic!("yo'q fayl nil qaytarishi kerak"),
+            _ => panic!("missing file must return nil"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2450,7 +2450,7 @@ mod fs_tests {
         );
         match fs_module("read", vec![Value::Str(f)]) {
             Ok(Value::Str(s)) => assert_eq!(s, "ab"),
-            _ => panic!("append matnni to'plashi kerak"),
+            _ => panic!("append must accumulate text"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2459,15 +2459,15 @@ mod fs_tests {
     #[test]
     fn exists_reflects_reality() {
         let dir = tmp_dir("exists");
-        let f = path_str(&dir, "bor.txt");
+        let f = path_str(&dir, "present.txt");
         let _ = fs_module("write", vec![Value::Str(f.clone()), Value::Str("x".into())]);
         match fs_module("exists", vec![Value::Str(f)]) {
             Ok(Value::Bool(true)) => {}
-            _ => panic!("mavjud fayl true bo'lishi kerak"),
+            _ => panic!("existing file must be true"),
         }
-        match fs_module("exists", vec![Value::Str(path_str(&dir, "yoq.txt"))]) {
+        match fs_module("exists", vec![Value::Str(path_str(&dir, "missing.txt"))]) {
             Ok(Value::Bool(false)) => {}
-            _ => panic!("yo'q fayl false bo'lishi kerak"),
+            _ => panic!("missing file must be false"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2490,12 +2490,12 @@ mod fs_tests {
                     .iter()
                     .map(|v| match v {
                         Value::Str(s) => s.clone(),
-                        _ => panic!("ls str ro'yxati qaytarishi kerak"),
+                        _ => panic!("ls must return a list of str"),
                     })
                     .collect();
                 assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
             }
-            _ => panic!("ls ro'yxat qaytarishi kerak"),
+            _ => panic!("ls must return a list"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2508,11 +2508,11 @@ mod fs_tests {
         let _ = fs_module("write", vec![Value::Str(f.clone()), Value::Str("x".into())]);
         match fs_module("del", vec![Value::Str(f.clone())]) {
             Ok(Value::Sym(s)) if s == "ok" => {}
-            _ => panic!("fs.del :ok qaytarishi kerak"),
+            _ => panic!("fs.del must return :ok"),
         }
         match fs_module("exists", vec![Value::Str(f)]) {
             Ok(Value::Bool(false)) => {}
-            _ => panic!("o'chirilgan fayl mavjud bo'lmasligi kerak"),
+            _ => panic!("deleted file must not exist"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2524,13 +2524,13 @@ mod fs_tests {
         let nested = path_str(&dir, "a/b/c");
         match fs_module("mkdirp", vec![Value::Str(nested.clone())]) {
             Ok(Value::Sym(s)) if s == "ok" => {}
-            _ => panic!("fs.mkdirp :ok qaytarishi kerak"),
+            _ => panic!("fs.mkdirp must return :ok"),
         }
         assert!(std::path::Path::new(&nested).is_dir());
         // ikkinchi chaqiruv xato bermasligi kerak (idempotent)
         match fs_module("mkdirp", vec![Value::Str(nested)]) {
             Ok(Value::Sym(s)) if s == "ok" => {}
-            _ => panic!("mkdirp idempotent bo'lishi kerak"),
+            _ => panic!("mkdirp must be idempotent"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2538,9 +2538,9 @@ mod fs_tests {
     // Noma'lum fs funksiyasi aniq xato beradi.
     #[test]
     fn unknown_func_errors() {
-        match fs_module("yoq", vec![]) {
-            Err(Flow::Error(msg)) => assert!(msg.contains("fs modulida")),
-            _ => panic!("Flow::Error kutilgan edi"),
+        match fs_module("nope", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("fs module")),
+            _ => panic!("expected Flow::Error"),
         }
     }
 
@@ -2562,16 +2562,16 @@ mod fs_tests {
             vec![Value::Str(f.clone()), Value::Bytes(Arc::new(data.clone()))],
         ) {
             Ok(Value::Sym(s)) if s == "ok" => {}
-            _ => panic!("fs.write bytes bilan :ok qaytarishi kerak"),
+            _ => panic!("fs.write with bytes must return :ok"),
         }
         match fs_module("readb", vec![Value::Str(f.clone())]) {
             Ok(Value::Bytes(b)) => assert_eq!(*b, data),
-            _ => panic!("fs.readb bytes qaytarishi kerak"),
+            _ => panic!("fs.readb must return bytes"),
         }
         // Matnli fayl ham readb bilan o'qiladi (baytlari).
         match fs_module("read", vec![Value::Str(f)]) {
             Err(Flow::Error(_)) => {} // UTF-8 emas — fs.read aniq xato beradi
-            _ => panic!("fs.read UTF-8 bo'lmagan faylda xato berishi kerak"),
+            _ => panic!("fs.read must error on a non-UTF-8 file"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2580,9 +2580,9 @@ mod fs_tests {
     #[test]
     fn readb_missing_is_nil() {
         let dir = tmp_dir("readb_missing");
-        match fs_module("readb", vec![Value::Str(path_str(&dir, "yoq.bin"))]) {
+        match fs_module("readb", vec![Value::Str(path_str(&dir, "missing.bin"))]) {
             Ok(Value::Nil) => {}
-            _ => panic!("yo'q fayl nil qaytarishi kerak"),
+            _ => panic!("missing file must return nil"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2602,7 +2602,7 @@ mod fs_tests {
         );
         match fs_module("readb", vec![Value::Str(f)]) {
             Ok(Value::Bytes(b)) => assert_eq!(*b, vec![b'a', b'b', 0xff]),
-            _ => panic!("fs.readb bytes qaytarishi kerak"),
+            _ => panic!("fs.readb must return bytes"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2619,16 +2619,16 @@ mod bytes_tests {
     // of/str aylanasi: matn -> baytlar -> matn (diakritikali ham — UTF-8).
     #[test]
     fn of_str_roundtrip() {
-        let src = "salom o'zbek";
+        let src = "hello \u{1F600} world";
         match bytes_module("of", vec![Value::Str(src.into())]) {
             Ok(Value::Bytes(by)) => {
                 assert_eq!(by.as_slice(), src.as_bytes());
                 match bytes_module("str", vec![Value::Bytes(by)]) {
                     Ok(Value::Str(s)) => assert_eq!(s, src),
-                    _ => panic!("bytes.str matn qaytarishi kerak"),
+                    _ => panic!("bytes.str must return a string"),
                 }
             }
-            _ => panic!("bytes.of bytes qaytarishi kerak"),
+            _ => panic!("bytes.of must return bytes"),
         }
     }
 
@@ -2637,7 +2637,7 @@ mod bytes_tests {
     fn of_idempotent() {
         match bytes_module("of", vec![b(&[1, 2, 3])]) {
             Ok(Value::Bytes(by)) => assert_eq!(*by, vec![1, 2, 3]),
-            _ => panic!("bytes.of bytes'ni o'zicha qaytarishi kerak"),
+            _ => panic!("bytes.of must return the bytes as-is"),
         }
     }
 
@@ -2646,7 +2646,7 @@ mod bytes_tests {
     fn str_invalid_utf8_errors() {
         match bytes_module("str", vec![b(&[0xff, 0xfe])]) {
             Err(Flow::Error(msg)) => assert!(msg.contains("UTF-8")),
-            _ => panic!("bytes.str yaroqsiz UTF-8'da xato berishi kerak"),
+            _ => panic!("bytes.str must error on invalid UTF-8"),
         }
     }
 
@@ -2656,11 +2656,11 @@ mod bytes_tests {
     fn len_counts_bytes() {
         match bytes_module("len", vec![b(&[1, 2, 3, 4])]) {
             Ok(Value::Int(4)) => {}
-            _ => panic!("bytes.len 4 qaytarishi kerak"),
+            _ => panic!("bytes.len must return 4"),
         }
-        match bytes_module("len", vec![Value::Str("o'".into())]) {
-            Ok(Value::Int(n)) => assert_eq!(n, "o'".len() as i64),
-            _ => panic!("bytes.len str'da bayt sonini qaytarishi kerak"),
+        match bytes_module("len", vec![Value::Str("\u{1F600}".into())]) {
+            Ok(Value::Int(n)) => assert_eq!(n, "\u{1F600}".len() as i64),
+            _ => panic!("bytes.len must return the byte count of a str"),
         }
     }
 
@@ -2672,15 +2672,15 @@ mod bytes_tests {
             vec![b(&[1, 2, 3, 4]), Value::Int(1), Value::Int(3)],
         ) {
             Ok(Value::Bytes(by)) => assert_eq!(*by, vec![2, 3]),
-            _ => panic!("bytes.slice bytes qaytarishi kerak"),
+            _ => panic!("bytes.slice must return bytes"),
         }
         match bytes_module("slice", vec![b(&[1, 2, 3]), Value::Int(2), Value::Int(100)]) {
             Ok(Value::Bytes(by)) => assert_eq!(*by, vec![3]),
-            _ => panic!("bytes.slice chegarani clamp qilishi kerak"),
+            _ => panic!("bytes.slice must clamp the bound"),
         }
         match bytes_module("slice", vec![b(&[1, 2, 3]), Value::Int(2), Value::Int(1)]) {
             Ok(Value::Bytes(by)) => assert!(by.is_empty()),
-            _ => panic!("a >= b bo'sh bytes qaytarishi kerak"),
+            _ => panic!("a >= b must return empty bytes"),
         }
     }
 
@@ -2709,9 +2709,9 @@ mod bytes_tests {
 
     #[test]
     fn unknown_func_errors() {
-        match bytes_module("yoq", vec![]) {
-            Err(Flow::Error(msg)) => assert!(msg.contains("bytes modulida")),
-            _ => panic!("Flow::Error kutilgan edi"),
+        match bytes_module("nope", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("bytes module")),
+            _ => panic!("expected Flow::Error"),
         }
     }
 }
@@ -2724,22 +2724,22 @@ mod sh_tests {
     fn run(cmd: &str) -> BTreeMap<String, Value> {
         match sh_module("run", vec![Value::Str(cmd.into())]) {
             Ok(Value::Map(m)) => m,
-            other => panic!("sh.run map qaytarishi kerak, {:?} keldi", other.is_ok()),
+            other => panic!("sh.run must return a map, got {:?}", other.is_ok()),
         }
     }
 
     // Oddiy echo: stdout to'g'ri, code 0, stderr bo'sh.
     #[test]
     fn echo_stdout_and_code() {
-        let m = run("echo salom");
+        let m = run("echo hello");
         match m.get("stdout") {
-            Some(Value::Str(s)) => assert_eq!(s.trim_end(), "salom"),
-            _ => panic!("stdout str bo'lishi kerak"),
+            Some(Value::Str(s)) => assert_eq!(s.trim_end(), "hello"),
+            _ => panic!("stdout must be str"),
         }
         assert!(matches!(m.get("code"), Some(Value::Int(0))));
         match m.get("stderr") {
             Some(Value::Str(s)) => assert!(s.is_empty()),
-            _ => panic!("stderr str bo'lishi kerak"),
+            _ => panic!("stderr must be str"),
         }
     }
 
@@ -2753,26 +2753,26 @@ mod sh_tests {
     // stderr alohida tutiladi (stdout bilan aralashmaydi).
     #[test]
     fn stderr_captured_separately() {
-        let m = run("echo xato 1>&2");
+        let m = run("echo error 1>&2");
         match m.get("stderr") {
-            Some(Value::Str(s)) => assert_eq!(s.trim_end(), "xato"),
-            _ => panic!("stderr str bo'lishi kerak"),
+            Some(Value::Str(s)) => assert_eq!(s.trim_end(), "error"),
+            _ => panic!("stderr must be str"),
         }
         match m.get("stdout") {
             Some(Value::Str(s)) => assert!(s.is_empty()),
-            _ => panic!("stdout str bo'lishi kerak"),
+            _ => panic!("stdout must be str"),
         }
     }
 
     // Shell xususiyatlari (`&&`, quvur) ishlaydi — buyruq shell orqali boradi.
     #[test]
     fn shell_features_work() {
-        let m = run("echo bir && echo ikki");
+        let m = run("echo one && echo two");
         match m.get("stdout") {
             Some(Value::Str(s)) => {
-                assert!(s.contains("bir") && s.contains("ikki"));
+                assert!(s.contains("one") && s.contains("two"));
             }
-            _ => panic!("stdout str bo'lishi kerak"),
+            _ => panic!("stdout must be str"),
         }
         assert!(matches!(m.get("code"), Some(Value::Int(0))));
     }
@@ -2780,9 +2780,9 @@ mod sh_tests {
     // Noma'lum sh funksiyasi aniq xato beradi.
     #[test]
     fn unknown_func_errors() {
-        match sh_module("yoq", vec![]) {
-            Err(Flow::Error(msg)) => assert!(msg.contains("sh modulida")),
-            _ => panic!("Flow::Error kutilgan edi"),
+        match sh_module("nope", vec![]) {
+            Err(Flow::Error(msg)) => assert!(msg.contains("sh module")),
+            _ => panic!("expected Flow::Error"),
         }
     }
 
@@ -2814,7 +2814,7 @@ mod json_tests {
         assert_eq!(enc, "\"x\\fy\\bz\"");
         match json_decode(&enc) {
             Ok(Value::Str(out)) => assert_eq!(out, "x\u{0C}y\u{08}z"),
-            other => panic!("round-trip buzildi: {:?}", other.is_ok()),
+            other => panic!("round-trip broken: {:?}", other.is_ok()),
         }
     }
 

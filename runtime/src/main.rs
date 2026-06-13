@@ -71,7 +71,7 @@ fn main() -> ExitCode {
             match run_source_at(&src, std::path::Path::new(&path)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("Fluxon xato: {}", e);
+                    eprintln!("Fluxon error: {}", e);
                     ExitCode::from(1)
                 }
             }
@@ -87,7 +87,7 @@ fn main() -> ExitCode {
             match check_source(&src) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("Fluxon xato: {}", e);
+                    eprintln!("Fluxon error: {}", e);
                     ExitCode::from(2)
                 }
             }
@@ -108,13 +108,13 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>  |  fluxon test [yo'l]  |  fluxon repl  |  fluxon --version  |  fluxon --help"
+    "Usage: fluxon run <file.fx>  |  fluxon check <file.fx>  |  fluxon test [path]  |  fluxon repl  |  fluxon --version  |  fluxon --help"
 }
 
 // Faylni o'qiydi; xatoda xabarni chiqarib, chiqish kodini (1) qaytaradi.
 fn read_source(path: &str) -> Result<String, ExitCode> {
     std::fs::read_to_string(path).map_err(|e| {
-        eprintln!("Faylni o'qib bo'lmadi '{}': {}", path, e);
+        eprintln!("Could not read file '{}': {}", path, e);
         ExitCode::from(1)
     })
 }
@@ -152,7 +152,7 @@ fn run_tests(path: Option<&str>) -> ExitCode {
 
     let (passed, failed) = run_test_files(&files);
     println!(
-        "YAKUN: {} PASS, {} FAIL ({} fayl)",
+        "SUMMARY: {} PASS, {} FAIL ({} files)",
         passed,
         failed,
         files.len()
@@ -171,7 +171,7 @@ fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf
         // .fx bo'lmagan fayl (codex P2): Fluxon sifatida parse qilib FAIL/exit 1
         // berish chalg'ituvchi — bu discovery xatosi (exit 2), test natijasi emas.
         if target.extension().is_none_or(|e| e != "fx") {
-            return Err(format!("'{}' .fx fayl emas", target.display()));
+            return Err(format!("'{}' is not a .fx file", target.display()));
         }
         vec![target.to_path_buf()]
     } else if target.is_dir() {
@@ -180,13 +180,10 @@ fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf
         v.sort();
         v
     } else {
-        return Err(format!("Test yo'li topilmadi: '{}'", target.display()));
+        return Err(format!("Test path not found: '{}'", target.display()));
     };
     if files.is_empty() {
-        return Err(format!(
-            "'{}' ichida .fx test fayli topilmadi",
-            target.display()
-        ));
+        return Err(format!("no .fx test file found in '{}'", target.display()));
     }
     Ok(files)
 }
@@ -198,17 +195,17 @@ fn collect_fx_files(
     out: &mut Vec<std::path::PathBuf>,
 ) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("'{}' katalogini o'qib bo'lmadi: {}", dir.display(), e))?;
+        .map_err(|e| format!("could not read directory '{}': {}", dir.display(), e))?;
     for entry in entries {
         let entry =
-            entry.map_err(|e| format!("'{}' ichini o'qib bo'lmadi: {}", dir.display(), e))?;
+            entry.map_err(|e| format!("could not read inside '{}': {}", dir.display(), e))?;
         let p = entry.path();
         // file_type() symlink'ni KUZATMAYDI — halqali symlink (tests/x -> tests/)
         // cheksiz rekursiyaga olib bormasin. Symlink'langan .fx fayl baribir
         // kiradi (pastdagi is_file symlink'ni kuzatadi), symlink-katalog esa yo'q.
         let ft = entry
             .file_type()
-            .map_err(|e| format!("'{}' turini aniqlab bo'lmadi: {}", p.display(), e))?;
+            .map_err(|e| format!("could not determine type of '{}': {}", p.display(), e))?;
         if ft.is_dir() {
             collect_fx_files(&p, out)?;
         } else if p.extension().is_some_and(|e| e == "fx") && p.is_file() {
@@ -227,7 +224,7 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     for f in files {
         builtins::assert_passed_reset();
         let result = std::fs::read_to_string(f)
-            .map_err(|e| format!("faylni o'qib bo'lmadi: {}", e))
+            .map_err(|e| format!("could not read file: {}", e))
             .and_then(|src| run_source_at(&src, f));
         match result {
             Ok(()) => {
@@ -297,7 +294,7 @@ fn run_repl() -> ExitCode {
     interp.set_base(std::path::Path::new("."));
 
     println!(
-        "Fluxon {} REPL — chiqish: :q yoki Ctrl-D, yordam: :help",
+        "Fluxon {} REPL — exit: :q or Ctrl-D, help: :help",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -325,7 +322,7 @@ fn run_repl() -> ExitCode {
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("REPL o'qish xatosi: {}", e);
+                eprintln!("REPL read error: {}", e);
                 return ExitCode::from(1);
             }
         }
@@ -390,7 +387,7 @@ fn repl_eval(interp: &interp::Interp, src: &str) {
     match interp.run_repl_chunk(&match lex_parse(src) {
         Ok(prog) => prog,
         Err(e) => {
-            eprintln!("Fluxon xato: {}", e);
+            eprintln!("Fluxon error: {}", e);
             return;
         }
     }) {
@@ -398,7 +395,7 @@ fn repl_eval(interp: &interp::Interp, src: &str) {
         // Boshqa qiymatni `repr` bilan (string'lar tirnoqli) ko'rsatamiz.
         Ok(value::Value::Nil) => {}
         Ok(v) => println!("{}", v.repr()),
-        Err(e) => eprintln!("Fluxon xato: {}", e),
+        Err(e) => eprintln!("Fluxon error: {}", e),
     }
 }
 
@@ -411,12 +408,12 @@ fn lex_parse(src: &str) -> Result<ast::Program, String> {
 
 fn print_repl_help() {
     println!(
-        "REPL buyruqlari:\n  \
-         :help, :h    — bu yordam\n  \
-         :q, :quit    — chiqish (Ctrl-D ham)\n\
-         Bir qator kod yozing va Enter bosing. if/each/fn kabi bloklar bir necha\n\
-         qatorga cho'zilsa, blok tugaguncha kiritishda davom eting; bo'sh qator\n\
-         blokni yopadi. Natija (nil bo'lmasa) avtomatik chop etiladi."
+        "REPL commands:\n  \
+         :help, :h    — this help\n  \
+         :q, :quit    — exit (also Ctrl-D)\n\
+         Type one line of code and press Enter. If blocks like if/each/fn span\n\
+         multiple lines, keep typing until the block is complete; an empty line\n\
+         closes the block. The result (unless nil) is printed automatically."
     );
 }
 
@@ -426,7 +423,7 @@ mod tests {
 
     // Kichik yordamchi: manbani bajaradi, xato bo'lsa panic.
     fn run(src: &str) {
-        run_source(src).unwrap_or_else(|e| panic!("xato: {}", e));
+        run_source(src).unwrap_or_else(|e| panic!("error: {}", e));
     }
 
     // Issue #139: darajali log — `log.debug/info/warn/err` va bare `log` (=info)
@@ -438,9 +435,9 @@ mod tests {
         run(r#"
 log "bare = info"
 log.debug "tafsilot"
-log.info "ma'lumot"
+log.info "info"
 log.warn "ogohlantirish"
-log.err "xato"
+log.err "error"
 log.info "interpolatsiya ${1 + 1}"
 "#);
     }
@@ -450,11 +447,11 @@ log.info "interpolatsiya ${1 + 1}"
     #[test]
     fn log_qiymat_sifatida_callback() {
         run(r#"
-fn call f -> f "qiymat orqali"
+fn call f -> f "by value"
 call log
 [1, 2, 3].map log
 g = log
-g "saqlangan funksiya"
+g "saved function"
 "#);
     }
 
@@ -474,10 +471,10 @@ r = par [
   (\-> str.up "hi")
   (\-> [1 2 3].len)
 ]
-((r.len) == 3) | (fail "par 3 natija qaytarishi kerak")
-((r.0.ok) == 2) | (fail "1-natija {ok:2} bo'lishi kerak")
-((r.1.ok) == "HI") | (fail "2-natija {ok:HI} bo'lishi kerak")
-((r.2.ok) == 3) | (fail "3-natija {ok:3} bo'lishi kerak")
+((r.len) == 3) | (fail "par 3 results should be returned")
+((r.0.ok) == 2) | (fail "1-natija {ok:2} should be")
+((r.1.ok) == "HI") | (fail "2-natija {ok:HI} should be")
+((r.2.ok) == 3) | (fail "3-natija {ok:3} should be")
 "#);
     }
 
@@ -488,12 +485,12 @@ r = par [
         run(r#"
 r = par [
   (\-> 42)
-  (\-> fail "qasddan")
+  (\-> fail "on purpose")
   (\-> "uchinchi")
 ]
-((r.0.ok) == 42) | (fail "1-natija ok bo'lishi kerak")
-((r.1.err) == "qasddan") | (fail "2-natija err bo'lishi kerak")
-((r.2.ok) == "uchinchi") | (fail "3-natija ok bo'lishi kerak")
+((r.0.ok) == 42) | (fail "1-natija ok should be")
+((r.1.err) == "on purpose") | (fail "2nd result should be err")
+((r.2.ok) == "uchinchi") | (fail "3-natija ok should be")
 "#);
     }
 
@@ -503,8 +500,8 @@ r = par [
         run(r#"
 base = 100
 r = par [(\-> base + 1) (\-> base + 2)]
-((r.0.ok) == 101) | (fail "closure capture 1 buzildi")
-((r.1.ok) == 102) | (fail "closure capture 2 buzildi")
+((r.0.ok) == 101) | (fail "closure capture 1 broke")
+((r.1.ok) == 102) | (fail "closure capture 2 broke")
 "#);
     }
 
@@ -514,8 +511,8 @@ r = par [(\-> base + 1) (\-> base + 2)]
     fn par_nested_hof() {
         run(r#"
 r = par [(\-> [1 2 3].map \x -> x + 1)]
-((r.0.ok.0) == 2) | (fail "nested HOF 1-element buzildi")
-((r.0.ok.2) == 4) | (fail "nested HOF 3-element buzildi")
+((r.0.ok.0) == 2) | (fail "nested HOF 1-element broke")
+((r.0.ok.2) == 4) | (fail "nested HOF 3-element broke")
 "#);
     }
 
@@ -524,7 +521,7 @@ r = par [(\-> [1 2 3].map \x -> x + 1)]
     fn par_bosh_royxat() {
         run(r#"
 r = par []
-((r.len) == 0) | (fail "par [] bo'sh ro'yxat qaytarishi kerak")
+((r.len) == 0) | (fail "par [] should return an empty list")
 "#);
     }
 
@@ -533,8 +530,8 @@ r = par []
     fn par_lambda_bolmagan_element_xato() {
         let e = run_source("par [42]").unwrap_err();
         assert!(
-            e.contains("funksiya bo'lishi kerak"),
-            "par lambda bo'lmagan elementda aniq xato kutiladi, keldi: {}",
+            e.contains("must be a function"),
+            "a clear error is expected for a non-lambda par element, got: {}",
             e
         );
     }
@@ -547,7 +544,7 @@ r = par []
     fn par_parallel_modul_import_soxta_sikl_yoq() {
         let dir = std::env::temp_dir().join(format!("fluxon_par_mod_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join("m.fx"), "exp fn greet n -> \"salom ${n}\"\n").unwrap();
+        std::fs::write(dir.join("m.fx"), "exp fn greet n -> \"hello ${n}\"\n").unwrap();
         let main = dir.join("main.fx");
         // Har lambda alohida thread'da MODULNI BIRINCHI MARTA import qiladi
         // (cache bo'sh) — Codex reproduksiyasi.
@@ -561,15 +558,15 @@ r = par [
   (\-> load 1)
   (\-> load 2)
 ]
-((r.0.ok) == "salom 1") | (fail "par modul import 1 buzildi: ${r.0}")
-((r.1.ok) == "salom 2") | (fail "par modul import 2 buzildi: ${r.1}")
+((r.0.ok) == "hello 1") | (fail "par module import 1 broke: ${r.0}")
+((r.1.ok) == "hello 2") | (fail "par module import 2 broke: ${r.1}")
 "#,
         )
         .unwrap();
         let src = std::fs::read_to_string(&main).unwrap();
         let res = run_source_at(&src, &main);
         let _ = std::fs::remove_dir_all(&dir);
-        res.unwrap_or_else(|e| panic!("par parallel modul import xatosi: {}", e));
+        res.unwrap_or_else(|e| panic!("par parallel module import error: {}", e));
     }
 
     // Issue #137: foydalanuvchi `par` nomli o'zgaruvchi e'lon qilsa u ustun
@@ -579,7 +576,7 @@ r = par [
         run(r#"
 fn id v -> v
 par = (id 7)
-(par == 7) | (fail "par o'zgaruvchi sifatida shadow bo'lmadi")
+(par == 7) | (fail "par did not shadow as a variable")
 "#);
     }
 
@@ -600,8 +597,8 @@ db.tx \->
             )
             .unwrap_err();
             assert!(
-                e.contains("db.tx ichida ishlatib bo'lmaydi"),
-                "par db.tx ichida aniq xato kutiladi, keldi: {}",
+                e.contains("cannot be used inside db.tx"),
+                "a clear error is expected for par inside db.tx, got: {}",
                 e
             );
         });
@@ -614,7 +611,7 @@ db.tx \->
         run(r#"
 fn log_id v -> v
 log = (log_id 42)
-(log == 42) | (fail "log o'zgaruvchi sifatida shadow bo'lmadi")
+(log == 42) | (fail "log did not shadow as a variable")
 "#);
     }
 
@@ -625,13 +622,13 @@ log = (log_id 42)
     fn chaqiruv_argumentida_prefiks_not() {
         run(r#"
 x = false
-(!x) | (fail "qavsli prefiks not buzildi")
+(!x) | (fail "parenthesized prefix not broke")
 fn id v -> v
-((id !x) == true) | (fail "chaqiruv argumentidagi !x inkor qilinmadi")
+((id !x) == true) | (fail "in call argument !x was not negated")
 y = true
-((id !y) == false) | (fail "chaqiruv argumentidagi !y inkor qilinmadi")
+((id !y) == false) | (fail "in call argument !y was not negated")
 fn second a b -> b
-((second x !y) == false) | (fail "ikkinchi argumentdagi prefiks not buzildi")
+((second x !y) == false) | (fail "prefix not in the second argument broke")
 "#);
     }
 
@@ -642,7 +639,7 @@ fn second a b -> b
         run(r#"
 fn safe v -> v
 a = (safe 5)!
-(a == 5) | (fail "postfix try o'tkazgichi buzildi")
+(a == 5) | (fail "postfix try passthrough broke")
 "#);
     }
 
@@ -652,12 +649,12 @@ a = (safe 5)!
     fn try_catch_fail_statusli_ushlaydi() {
         run(r#"
 r = try
-  fail 422 "noto'g'ri ma'lumot"
+  fail 422 "invalid data"
 catch e
-  (e.message == "noto'g'ri ma'lumot") | (fail "catch message buzildi")
-  (e.status == 422) | (fail "catch status buzildi")
+  (e.message == "invalid data") | (fail "catch message broke")
+  (e.status == 422) | (fail "catch status broke")
   "fallback"
-(r == "fallback") | (fail "catch tanasining qiymati qaytmadi")
+(r == "fallback") | (fail "catch body value did not return")
 "#);
     }
 
@@ -669,17 +666,17 @@ catch e
 r = try
   fail "boom"
 catch e
-  (e.status == nil) | (fail "statussiz fail'da status nil bo'lishi kerak")
+  (e.status == nil) | (fail "status should be nil for fail without status should be")
   e.message
-(r == "boom") | (fail "statussiz fail message ushlanmadi")
+(r == "boom") | (fail "fail message without status was not caught")
 
 # runtime xato (nolga bo'lish) ham ushlanadi
 r2 = try
   1 / 0
 catch e
-  (e.status == nil) | (fail "runtime xato status nil bo'lishi kerak")
+  (e.status == nil) | (fail "runtime error status should be nil should be")
   "ushlandi"
-(r2 == "ushlandi") | (fail "runtime xato ushlanmadi")
+(r2 == "ushlandi") | (fail "runtime error was not caught")
 "#);
     }
 
@@ -691,7 +688,7 @@ r = try
   40 + 2
 catch
   0
-(r == 42) | (fail "muvaffaqiyatda body qiymati qaytmadi")
+(r == 42) | (fail "body value on success did not return")
 "#);
     }
 
@@ -704,7 +701,7 @@ fn f
     ret "early"
   catch
     ret "caught"
-((f()) == "early") | (fail "ret try ichidan ushlandi (noto'g'ri)")
+((f()) == "early") | (fail "ret from inside try was caught (wrong)")
 
 total <- 0
 each i in 1..5
@@ -715,8 +712,8 @@ each i in 1..5
       stop
     total <- total + i
   catch
-    fail "skip/stop ushlanmasligi kerak"
-(total == 7) | (fail "skip/stop try ichida buzildi: ${total}")
+    fail "skip/stop should not be caught"
+(total == 7) | (fail "skip/stop try ichida broke: ${total}")
 "#);
     }
 
@@ -731,7 +728,7 @@ r = try
     fail "outer: ${e.message}"
 catch e
   e.message
-(r == "outer: inner") | (fail "ichma-ich try yoki qayta fail buzildi")
+(r == "outer: inner") | (fail "nested try or re-fail broke")
 "#);
     }
 
@@ -740,11 +737,7 @@ catch e
     #[test]
     fn cheksiz_rekursiya_graceful_xato() {
         let e = run_source("fn f n -> f (n + 1)\nf 0").unwrap_err();
-        assert!(
-            e.contains("rekursiya juda chuqur"),
-            "kutilmagan xato: {}",
-            e
-        );
+        assert!(e.contains("recursion too deep"), "unexpected error: {}", e);
     }
 
     // Issue #90: limit xatosidan keyin chuqurlik hisoblagichi to'liq qaytadi —
@@ -754,7 +747,7 @@ catch e
         assert!(run_source("fn f n -> f (n + 1)\nf 0").is_err());
         run(r#"
 fn g x -> x + 1
-((g 1) == 2) | (fail "limitdan keyin chaqiriq buzildi")
+((g 1) == 2) | (fail "call after the limit broke")
 "#);
     }
 
@@ -764,10 +757,10 @@ fn g x -> x + 1
     fn chuqur_qavs_parse_limiti() {
         let deep = format!("x = {}1{}", "(".repeat(300), ")".repeat(300));
         let e = check_source(&deep).unwrap_err();
-        assert!(e.contains("chuqur"), "kutilmagan xato: {}", e);
+        assert!(e.contains("too deep"), "unexpected error: {}", e);
 
         let ok = format!("x = {}1{}", "(".repeat(200), ")".repeat(200));
-        check_source(&ok).unwrap_or_else(|e| panic!("200 daraja o'tishi kerak: {}", e));
+        check_source(&ok).unwrap_or_else(|e| panic!("200 levels should pass: {}", e));
     }
 
     // Issue #89: int arifmetika overflow'da panic (debug) / jim wrap (release)
@@ -776,7 +769,7 @@ fn g x -> x + 1
     fn int_overflow_xato_panic_emas() {
         // + overflow (debug'da panic berardi)
         let e = run_source("log (9223372036854775806 + 2)").unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
         // i64::MIN / -1 — Rust'da release'da ham panic berardi
         let e = run_source(
             r#"
@@ -785,7 +778,7 @@ log (a / (0 - 1))
 "#,
         )
         .unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
         // i64::MIN % -1 — xuddi shu oila
         let e = run_source(
             r#"
@@ -794,7 +787,7 @@ log (a % (0 - 1))
 "#,
         )
         .unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
         // unar minus ham: -(i64::MIN) sig'maydi
         let e = run_source(
             r#"
@@ -803,16 +796,16 @@ log (-a)
 "#,
         )
         .unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
         // * va - ham checked
         assert!(run_source("log (4611686018427387904 * 2)").is_err());
         assert!(run_source("log (0 - 9223372036854775807 - 2)").is_err());
         // Oddiy arifmetika avvalgidek ishlaydi
         run(r#"
-((2 + 3) == 5) | (fail "yig'indi buzildi")
-((7 / 2) == 3) | (fail "bo'lish buzildi")
-((7 % 2) == 1) | (fail "mod buzildi")
-((-(5)) == (0 - 5)) | (fail "unar minus buzildi")
+((2 + 3) == 5) | (fail "sum broke")
+((7 / 2) == 3) | (fail "division broke")
+((7 % 2) == 1) | (fail "mod broke")
+((-(5)) == (0 - 5)) | (fail "unary minus broke")
 "#);
     }
 
@@ -823,7 +816,7 @@ log (-a)
         run(r#"
 m = 9223372036854775806
 r = m..(m + 1)
-(r.len == 2) | (fail "range uzunligi noto'g'ri: ${r.len}")
+(r.len == 2) | (fail "range length wrong: ${r.len}")
 "#);
     }
 
@@ -848,16 +841,16 @@ each i in 0..10
         run(r#"
 n = 3
 # end tomon: +1 butun range'ga emas, faqat n'ga qo'llanadi
-(1..n+1 == [1 2 3 4]) | (fail "1..n+1 noto'g'ri")
+(1..n+1 == [1 2 3 4]) | (fail "1..n+1 wrong")
 # end tomon: -1
-(0..n-1 == [0 1 2]) | (fail "0..n-1 noto'g'ri")
+(0..n-1 == [0 1 2]) | (fail "0..n-1 wrong")
 # har ikki tomon arifmetika bilan
-(2*1..2+1 == [2 3]) | (fail "2*1..2+1 noto'g'ri")
+(2*1..2+1 == [2 3]) | (fail "2*1..2+1 wrong")
 # each loop ichida ham xatosiz ishlaydi
 sum <- 0
 each i in 1..n+1
   sum <- sum + i
-(sum == 10) | (fail "each 1..n+1 yig'indisi noto'g'ri: ${sum}")
+(sum == 10) | (fail "each 1..n+1 sum wrong: ${sum}")
 "#);
     }
 
@@ -869,7 +862,7 @@ each i in 1..n+1
 fn total xs
   xs.reduce 0 \acc x -> acc + x
 # pipe butun range'ga (1..3 = [1 2 3]) qo'llanadi, end tomonga emas
-(1..3 |> total == 6) | (fail "pipe range noto'g'ri")
+(1..3 |> total == 6) | (fail "pipe range wrong")
 "#);
     }
 
@@ -881,30 +874,30 @@ fn total xs
 # Issue'dagi asosiy misol: leading-zero formatlash
 h = 5
 pad = if h < 10 ("0" + str.str h) else (str.str h)
-(pad == "05") | (fail "inline if qiymat bermadi: ${pad}")
+(pad == "05") | (fail "inline if value did not give: ${pad}")
 
 # shart yolg'on bo'lganda else tarmog'i
 x = 20
 pad2 = if x < 10 ("0" + str.str x) else (str.str x)
-(pad2 == "20") | (fail "else tarmog'i ishlamadi: ${pad2}")
+(pad2 == "20") | (fail "else branch did not work: ${pad2}")
 
 # qavssiz oddiy tarmoqlar
-y = if h > 3 "katta" else "kichik"
-(y == "katta") | (fail "qavssiz tarmoq ishlamadi: ${y}")
+y = if h > 3 "big" else "small"
+(y == "big") | (fail "branch without parens did not work: ${y}")
 
 # else-if zanjiri (ichma-ich inline if)
-g = if h == 0 "nol" else if h < 0 "manfiy" else "musbat"
-(g == "musbat") | (fail "else-if zanjiri ishlamadi: ${g}")
+g = if h == 0 "zero" else if h < 0 "negative" else "positive"
+(g == "positive") | (fail "else-if chain did not work: ${g}")
 
 # chaqiruvli shart qavs ichida
 s = "hi"
-r = if (str.len s) > 0 "to'la" else "bo'sh"
-(r == "to'la") | (fail "qavsli shart ishlamadi: ${r}")
+r = if (str.len s) > 0 "full" else "empty"
+(r == "full") | (fail "parenthesized condition did not work: ${r}")
 
 # katta ifoda ichida ishlatish
 n = 7
 msg = "son " + (if n % 2 == 0 "juft" else "toq")
-(msg == "son toq") | (fail "ichki inline if ishlamadi: ${msg}")
+(msg == "son toq") | (fail "inner inline if did not work: ${msg}")
 "#);
     }
 
@@ -916,18 +909,18 @@ msg = "son " + (if n % 2 == 0 "juft" else "toq")
         run(r#"
 # 2-argument (eski shakl) — headers kaliti yo'q
 r = rep 200 {ok:true}
-(r.status == 200) | (fail "rep status buzildi: ${r.status}")
-(r.headers == nil) | (fail "headers'siz rep'da headers kaliti paydo bo'ldi")
+(r.status == 200) | (fail "rep status broke: ${r.status}")
+(r.headers == nil) | (fail "headers key appeared in rep without headers")
 
 # 3-argument — headers map qo'shiladi. Defis o'rniga `_` (map kalitida defis
 # bo'lolmaydi; runtime yozishda `_` → `-` qiladi). O'qish ham `_` bilan.
 r2 = rep 200 "<h1>Salom</h1>" {content_type:"text/html"}
-(r2.headers.content_type == "text/html") | (fail "headers o'qilmadi")
+(r2.headers.content_type == "text/html") | (fail "headers could not be read")
 
 # body map + alohida headers — to'qnashmaydi
 r3 = rep 200 {data:1} {set_cookie:"s=abc"}
-(r3.body.data == 1) | (fail "body map buzildi")
-(r3.headers.set_cookie == "s=abc") | (fail "set-cookie o'qilmadi")
+(r3.body.data == 1) | (fail "body map broke")
+(r3.headers.set_cookie == "s=abc") | (fail "set-cookie could not be read")
 "#);
     }
 
@@ -935,7 +928,11 @@ r3 = rep 200 {data:1} {set_cookie:"s=abc"}
     #[test]
     fn rep_headers_nomap_xato() {
         let e = run_source(r#"x = rep 200 "body" "notmap""#).unwrap_err();
-        assert!(e.contains("3-argument headers"), "kutilmagan xato: {}", e);
+        assert!(
+            e.contains("3rd argument must be headers"),
+            "unexpected error: {}",
+            e
+        );
     }
 
     // Inline shakl qo'shilgach ham blok shakli (chaqiruvli shart bilan) ishlashi
@@ -944,12 +941,12 @@ r3 = rep 200 {data:1} {set_cookie:"s=abc"}
     fn blok_if_inline_qoshilgach_ishlaydi() {
         run(r#"
 s = "hi"
-out <- "yo'q"
+out <- "none"
 if str.len s > 0
-  out <- "to'la"
+  out <- "full"
 else
-  out <- "bo'sh"
-(out == "to'la") | (fail "blok if buzildi: ${out}")
+  out <- "empty"
+(out == "full") | (fail "block if broke: ${out}")
 "#);
     }
 
@@ -964,17 +961,17 @@ fn new_id
 
 a = new_id()
 b = new_id()
-(str.len a == 8) | (fail "new_id() chaqirilmadi: ${a}")
-(a != b) | (fail "har chaqiruv yangi qiymat bermadi")
+(str.len a == 8) | (fail "new_id() was not called: ${a}")
+(a != b) | (fail "each call did not give a new value")
 
 # qavssiz: funksiya qiymati (chaqirilmaydi) — boolean truthy
 f = new_id
-(f != nil) | (fail "qavssiz nom funksiya qiymati bo'lishi kerak")
+(f != nil) | (fail "bare name should be a function value")
 
 # lambda nullary
 g = \->
   ret 42
-(g() == 42) | (fail "lambda nullary chaqiruv ishlamadi: ${g()}")
+(g() == 42) | (fail "lambda nullary call did not work: ${g()}")
 "#);
     }
 
@@ -989,7 +986,7 @@ fn tick
   if n < 3
     tick()
   ret n
-(tick() == 3) | (fail "nullary rekursiya ishlamadi: ${n}")
+(tick() == 3) | (fail "nullary recursion did not work: ${n}")
 "#);
     }
 
@@ -1004,8 +1001,8 @@ fn g x
 g(5)
 "#,
         )
-        .expect_err("f(x) qavsli argument xato berishi kerak");
-        assert!(err.contains("argumentsiz"), "kutilmagan xato: {}", err);
+        .expect_err("f(x) with parenthesized argument should error");
+        assert!(err.contains("argument-less"), "unexpected error: {}", err);
     }
 
     #[test]
@@ -1025,22 +1022,22 @@ log "evens=${evens} doubled=${doubled} total=${total}"
     fn list_index_and_find() {
         run(r#"
 names = ["catalog_manager" "order_extractor" "billing"]
-(names.index "order_extractor" == 1) | (fail "index topmadi: ${names.index "order_extractor"}")
-(names.index "yoq" == -1) | (fail "yo'q element -1 bermadi")
+(names.index "order_extractor" == 1) | (fail "index did not find: ${names.index "order_extractor"}")
+(names.index "yoq" == -1) | (fail "none element -1 did not give")
 
 nums = [3 1 4 1 5 9]
 (nums.index 4 == 2) | (fail "int index: ${nums.index 4}")
 
 # find: predikatga mos birinchi element
 big = nums.find \x -> x > 4
-(big == 5) | (fail "find mos elementni bermadi: ${big}")
+(big == 5) | (fail "find did not return the matching element: ${big}")
 none = nums.find \x -> x > 99
-(none == nil) | (fail "find topmaganda nil bermadi: ${none}")
+(none == nil) | (fail "find topmaganda nil did not give: ${none}")
 
 # index'ni solishtirish uchun ishlatish (issue manbasi: blok tartibi)
 a = names.index "catalog_manager"
 b = names.index "billing"
-(a < b) | (fail "indeks solishtirish ishlamadi: ${a} ${b}")
+(a < b) | (fail "index comparison did not work: ${a} ${b}")
 "#);
     }
 
@@ -1051,12 +1048,12 @@ b = names.index "billing"
         run(r#"
 nums = [3 1 4 1 5]
 s = nums.sort
-(s == [1 1 3 4 5]) | (fail "tabiiy sort: ${s}")
-(nums == [3 1 4 1 5]) | (fail "sort asl list'ni o'zgartirdi: ${nums}")
+(s == [1 1 3 4 5]) | (fail "natural sort: ${s}")
+(nums == [3 1 4 1 5]) | (fail "sort modified the original list: ${nums}")
 
 # komparator: son qaytaradi (manfiy: a oldin) — kamayish tartibi
 d = nums.sort \a b -> b - a
-(d == [5 4 3 1 1]) | (fail "komparator sort: ${d}")
+(d == [5 4 3 1 1]) | (fail "comparator sort: ${d}")
 
 # matnlar leksikografik
 names = ["banan" "olma" "anor"].sort
@@ -1064,11 +1061,11 @@ names = ["banan" "olma" "anor"].sort
 
 # int/flt aralash son tartibi
 mixed = [2 1.5 1].sort
-(mixed == [1 1.5 2]) | (fail "aralash son sort: ${mixed}")
+(mixed == [1 1.5 2]) | (fail "mixed number sort: ${mixed}")
 
 # chekka holatlar
-([].sort == []) | (fail "bo'sh list sort")
-([7].sort == [7]) | (fail "bitta element sort")
+([].sort == []) | (fail "empty list sort")
+([7].sort == [7]) | (fail "single element sort")
 "#);
     }
 
@@ -1089,28 +1086,32 @@ ns = sorted.map \x -> x.n
     #[test]
     fn list_sort_zip_xatolari() {
         let e = run_source(r#"x = [1 "a"].sort"#).unwrap_err();
-        assert!(e.contains("taqqoslab bo'lmaydi"), "kutilmagan xato: {}", e);
+        assert!(e.contains("cannot compare"), "unexpected error: {}", e);
 
         let e = run_source(r#"x = [1 2].sort \a b -> "x""#).unwrap_err();
-        assert!(e.contains("son qaytarishi kerak"), "kutilmagan xato: {}", e);
+        assert!(
+            e.contains("must return a number"),
+            "unexpected error: {}",
+            e
+        );
 
         let e = run_source("x = [1 2].zip 5").unwrap_err();
-        assert!(e.contains("list bo'lishi kerak"), "kutilmagan xato: {}", e);
+        assert!(e.contains("must be a list"), "unexpected error: {}", e);
     }
 
     // Issue #127: reverse/uniq/flat/zip — sof list metodlari.
     #[test]
     fn list_reverse_uniq_flat_zip() {
         run(r#"
-([1 2 3].reverse == [3 2 1]) | (fail "reverse ishlamadi")
-([1 2 1 3 2].uniq == [1 2 3]) | (fail "uniq ishlamadi")
+([1 2 3].reverse == [3 2 1]) | (fail "reverse did not work")
+([1 2 1 3 2].uniq == [1 2 3]) | (fail "uniq did not work")
 
 # flat bir daraja tekislaydi; list bo'lmagan element o'z holicha qoladi
-([[1 2] [3] 4].flat == [1 2 3 4]) | (fail "flat ishlamadi")
+([[1 2] [3] 4].flat == [1 2 3 4]) | (fail "flat did not work")
 
 # zip qisqasi tugaganda to'xtaydi
 z = [1 2 3].zip ["a" "b"]
-(z == [[1 "a"] [2 "b"]]) | (fail "zip ishlamadi: ${z}")
+(z == [[1 "a"] [2 "b"]]) | (fail "zip did not work: ${z}")
 "#);
     }
 
@@ -1120,20 +1121,20 @@ z = [1 2 3].zip ["a" "b"]
         run(r#"
 nums = [1 2 3]
 a1 = nums.any \x -> x > 2
-a1 | (fail "any mos elementda true bermadi")
+a1 | (fail "any did not return true on a match")
 a2 = nums.any \x -> x > 9
-(a2 == false) | (fail "any mos kelmasa false bermadi")
+(a2 == false) | (fail "any did not return false without a match")
 
 b1 = nums.all \x -> x > 0
-b1 | (fail "all hammasi mosda true bermadi")
+b1 | (fail "all did not return true when all match")
 b2 = nums.all \x -> x > 1
-(b2 == false) | (fail "all nomos elementda false bermadi")
+(b2 == false) | (fail "all did not return false on a mismatch")
 
 # bo'sh list: any false, all true (vacuous)
 e1 = [].any \x -> x
-(e1 == false) | (fail "bo'sh any false emas")
+(e1 == false) | (fail "empty any false not")
 e2 = [].all \x -> x
-e2 | (fail "bo'sh all true emas")
+e2 | (fail "empty all true not")
 "#);
     }
 
@@ -1147,21 +1148,21 @@ i = xs.len - 1
 
 # .(ifoda) shakli — oxirgi elementni hisoblangan indeks bilan ol
 last = xs.(i)
-(last == "c") | (fail ".(i) oxirgi elementni bermadi: ${last}")
+(last == "c") | (fail ".(i) oxirgi elementni did not give: ${last}")
 
 # ichida to'liq ifoda
-(xs.(xs.len - 1) == "c") | (fail "xs.(xs.len - 1) ishlamadi")
+(xs.(xs.len - 1) == "c") | (fail "xs.(xs.len - 1) did not work")
 
 # bracket shakli ham bir xil natija beradi
-(xs[i] == "c") | (fail "xs[i] ishlamadi")
+(xs[i] == "c") | (fail "xs[i] did not work")
 
 # map'ni hisoblangan kalit (str) bilan indekslash
 m = {name: "Ali" age: 30}
 k = "name"
-(m.(k) == "Ali") | (fail "m.(k) ishlamadi: ${m.(k)}")
+(m.(k) == "Ali") | (fail "m.(k) did not work: ${m.(k)}")
 
 # chegaradan tashqari -> nil (mavjud get_index xulqi)
-(xs.(99) == nil) | (fail "chegaradan tashqari indeks nil bermadi")
+(xs.(99) == nil) | (fail "chegaradan tashqari indeks nil did not give")
 "#);
     }
 
@@ -1184,19 +1185,19 @@ user = {port:3000 debug:true}
 cfg = defaults.merge user
 
 # other'dagi kalitlar ustun keladi
-(cfg.port == 3000) | (fail "merge: other kaliti ustun kelmadi: ${cfg.port}")
-(cfg.debug == true) | (fail "merge: debug override bo'lmadi")
+(cfg.port == 3000) | (fail "merge: other key did not win: ${cfg.port}")
+(cfg.debug == true) | (fail "merge: debug override did not happen")
 # other'da yo'q kalit asl qiymatda qoladi
-(cfg.host == "localhost") | (fail "merge: host yo'qoldi: ${cfg.host}")
-(cfg.len == 3) | (fail "merge: kalitlar soni noto'g'ri: ${cfg.len}")
+(cfg.host == "localhost") | (fail "merge: host lost: ${cfg.host}")
+(cfg.len == 3) | (fail "merge: key count wrong: ${cfg.len}")
 
 # asl map'lar o'zgarmaydi (set/del bilan izchil — yangi map qaytadi)
-(defaults.port == 8080) | (fail "merge: asl map o'zgarib ketdi")
-((user.has "host") == false) | (fail "merge: other map o'zgarib ketdi")
+(defaults.port == 8080) | (fail "merge: original map changed")
+((user.has "host") == false) | (fail "merge: other map changed")
 
 # bo'sh map bilan merge — o'zini qaytaradi
-((defaults.merge {}).len == 3) | (fail "merge: bo'sh map bilan buzildi")
-(({}.merge defaults).port == 8080) | (fail "merge: bo'sh map'dan merge buzildi")
+((defaults.merge {}).len == 3) | (fail "merge: with empty map broke")
+(({}.merge defaults).port == 8080) | (fail "merge: merge from empty map broke")
 "#);
     }
 
@@ -1204,7 +1205,7 @@ cfg = defaults.merge user
     #[test]
     fn map_merge_notogri_argument() {
         let e = run_source(r#"({a:1}).merge 42"#).unwrap_err();
-        assert!(e.contains("map.merge"), "kutilmagan xato matni: {}", e);
+        assert!(e.contains("map.merge"), "unexpected error text: {}", e);
     }
 
     // Schema map qiymat pozitsiyasidagi bare tip nomi (`{a:str b:int}`) sym'ga
@@ -1214,27 +1215,27 @@ cfg = defaults.merge user
     fn schema_bare_type_names() {
         run(r#"
 schema = {product:str qty:int price:flt active:bool data:json tag:sym}
-(schema.product == :str) | (fail "product :str emas: ${schema.product}")
-(schema.qty == :int) | (fail "qty :int emas: ${schema.qty}")
-(schema.price == :flt) | (fail "price :flt emas")
-(schema.active == :bool) | (fail "active :bool emas")
-(schema.data == :json) | (fail "data :json emas")
-(schema.tag == :sym) | (fail "tag :sym emas")
+(schema.product == :str) | (fail "product :str not: ${schema.product}")
+(schema.qty == :int) | (fail "qty :int not: ${schema.qty}")
+(schema.price == :flt) | (fail "price :flt not")
+(schema.active == :bool) | (fail "active :bool not")
+(schema.data == :json) | (fail "data :json not")
+(schema.tag == :sym) | (fail "tag :sym not")
 
 # nested list ichidagi map ham ishlasin (`{items:[{product:str qty:int}]}`)
 nested = {items:[{product:str qty:int}]}
 row = nested.items.0
-(row.product == :str) | (fail "nested product :str emas")
-(row.qty == :int) | (fail "nested qty :int emas")
+(row.product == :str) | (fail "nested product :str not")
+(row.qty == :int) | (fail "nested qty :int not")
 
 # regressiya: tip nomi BO'LMAGAN ident hamon o'zgaruvchi sifatida qidiriladi
 x = 5
 m = {n:x}
-(m.n == 5) | (fail "oddiy o'zgaruvchi qiymat buzildi: ${m.n}")
+(m.n == 5) | (fail "oddiy variable value broke: ${m.n}")
 
 # regressiya: str modul-chaqiruvi qiymat sifatida buzilmadi
-up = str.up "salom"
-(up == "SALOM") | (fail "str.up buzildi: ${up}")
+up = str.up "hello"
+(up == "HELLO") | (fail "str.up broke: ${up}")
 "#);
     }
 
@@ -1254,9 +1255,9 @@ deep = [[[7 8]]]
 (deep.0.0.1 == 8) | (fail "deep.0.0.1 != 8: ${deep.0.0.1}")
 
 # regressiya: oddiy float literallar buzilmadi
-(0.5 + 0.5 == 1.0) | (fail "float literal buzildi")
+(0.5 + 0.5 == 1.0) | (fail "float literal broke")
 fs = [0.5 1.5]
-(fs.1 == 1.5) | (fail "float element buzildi: ${fs.1}")
+(fs.1 == 1.5) | (fail "float element broke: ${fs.1}")
 "#);
     }
 
@@ -1283,8 +1284,8 @@ each e in [{n:"a" v:3} {n:"b" v:7} {n:"c" v:2}]
   if e.v > top
     top = e.v
     best = e
-(top == 7) | (fail "top noto'g'ri: ${top}")
-(best.n == "b") | (fail "best noto'g'ri: ${best.n}")
+(top == 7) | (fail "top wrong: ${top}")
+(best.n == "b") | (fail "best wrong: ${best.n}")
 "#);
     }
 
@@ -1299,8 +1300,8 @@ if true
   x = 20
 "#,
         )
-        .expect_err("immutable'ni blok ichida = bilan yangilash xato berishi kerak");
-        assert!(err.contains("o'zgarmas"), "kutilmagan xato: {}", err);
+        .expect_err("updating an immutable with = inside a block should error");
+        assert!(err.contains("is immutable"), "unexpected error: {}", err);
     }
 
     // fn/lambda CHEGARA: ichidagi `=` tashqi o'zgaruvchini emas, yangi LOCAL
@@ -1312,8 +1313,8 @@ x = 100
 f = \n ->
   x = 5
   x + n
-(f 1 == 6) | (fail "fn local x ishlamadi")
-(x == 100) | (fail "fn ichidagi = tashqi x ni o'zgartirdi: ${x}")
+(f 1 == 6) | (fail "fn local x did not work")
+(x == 100) | (fail "= inside fn changed outer x: ${x}")
 "#);
     }
 
@@ -1327,7 +1328,7 @@ inc = \n ->
   counter <- counter + n
 inc 5
 inc 3
-(counter == 8) | (fail "closure capture ishlamadi: ${counter}")
+(counter == 8) | (fail "closure capture did not work: ${counter}")
 "#);
     }
 
@@ -1336,9 +1337,9 @@ inc 3
         run(r#"
 fn label s
   match s
-    :new -> "yangi"
-    :done -> "tugadi"
-    _ -> "boshqa"
+    :new -> "new"
+    :done -> "done"
+    _ -> "other"
 
 log (label :new)
 log (label :x)
@@ -1361,20 +1362,20 @@ log "parts=${parts} joined=${parts.join "-"}"
     #[test]
     fn str_trim_replace_starts_ends_pad_repeat() {
         run(r#"
-(str.trim "  salom  " == "salom") | (fail "str.trim")
-(str.trim "salom" == "salom") | (fail "str.trim o'zgarmas")
+(str.trim "  hello  " == "hello") | (fail "str.trim")
+(str.trim "hello" == "hello") | (fail "str.trim unchanged")
 (str.replace "a-b-c" "-" "+" == "a+b+c") | (fail "str.replace")
-(str.replace "abc" "x" "y" == "abc") | (fail "str.replace topilmadi")
-(str.replace "abc" "" "y" == "abc") | (fail "str.replace bo'sh pattern")
+(str.replace "abc" "x" "y" == "abc") | (fail "str.replace not found")
+(str.replace "abc" "" "y" == "abc") | (fail "str.replace empty pattern")
 (str.starts "/api/users" "/api") | (fail "str.starts true")
 ((str.starts "/api" "/web") == false) | (fail "str.starts false")
 (str.ends "file.fx" ".fx") | (fail "str.ends true")
 ((str.ends "file.fx" ".rs") == false) | (fail "str.ends false")
 (str.pad "7" 3 "0" == "007") | (fail "str.pad")
-(str.pad "1234" 3 "0" == "1234") | (fail "str.pad uzun o'zgarmas")
-(str.pad "ab" 4 " " == "  ab") | (fail "str.pad bo'shliq")
+(str.pad "1234" 3 "0" == "1234") | (fail "str.pad long unchanged")
+(str.pad "ab" 4 " " == "  ab") | (fail "str.pad whitespace")
 (str.repeat "ab" 3 == "ababab") | (fail "str.repeat")
-(str.repeat "ab" 0 == "") | (fail "str.repeat nol")
+(str.repeat "ab" 0 == "") | (fail "str.repeat zero")
 "#);
     }
 
@@ -1397,13 +1398,13 @@ log "parts=${parts} joined=${parts.join "-"}"
         // fmt orqali round-trip qilamiz.
         run(r#"
 d = time.fmt 1700000000 "YYYY-MM-DD"
-(d == "2023-11-14") | (fail "fmt sana noto'g'ri: ${d}")
+(d == "2023-11-14") | (fail "fmt sana wrong: ${d}")
 t = time.fmt 1700000000 "HH:mm:ss"
-(t == "22:13:20") | (fail "fmt vaqt noto'g'ri: ${t}")
+(t == "22:13:20") | (fail "fmt vaqt wrong: ${t}")
 n = time.now
-(str.len n == 19) | (fail "time.now uzunligi 19 emas: ${n}")
+(str.len n == 19) | (fail "time.now uzunligi 19 not: ${n}")
 back = time.fmt n "YYYY"
-(str.len back == 4) | (fail "time.now -> fmt yil 4 raqam emas")
+(str.len back == 4) | (fail "time.now -> fmt yil 4 raqam not")
 "#);
     }
 
@@ -1431,7 +1432,7 @@ now = time.now
 soon = time.in 1 :hr
 ny = str.int (time.fmt now "YYYYMMDDHHmmss")
 sy = str.int (time.fmt soon "YYYYMMDDHHmmss")
-(sy > ny) | (fail "time.in o'tmishda: soon=${soon} now=${now}")
+(sy > ny) | (fail "time.in in the past: soon=${soon} now=${now}")
 "#);
     }
 
@@ -1441,14 +1442,14 @@ sy = str.int (time.fmt soon "YYYYMMDDHHmmss")
         // server `end_at` ni hisoblaydi. Booking yadrosining e2e ssenariysi.
         run(r#"
 start_at = time.parse "2026-06-10T10:00:00Z"
-(start_at == "2026-06-10 10:00:00") | (fail "parse noto'g'ri: ${start_at}")
+(start_at == "2026-06-10 10:00:00") | (fail "parse wrong: ${start_at}")
 end_at = time.add start_at 30 :min
-(end_at == "2026-06-10 10:30:00") | (fail "add noto'g'ri: ${end_at}")
+(end_at == "2026-06-10 10:30:00") | (fail "add wrong: ${end_at}")
 mins = (time.diff end_at start_at) / 60
-(mins == 30) | (fail "diff noto'g'ri: ${mins}")
+(mins == 30) | (fail "diff wrong: ${mins}")
 # buffer-inclusive interval: start - 5min (time.sub — add ning ko'zgusi)
 buf_start = time.sub start_at 5 :min
-(buf_start == "2026-06-10 09:55:00") | (fail "time.sub noto'g'ri: ${buf_start}")
+(buf_start == "2026-06-10 09:55:00") | (fail "time.sub wrong: ${buf_start}")
 "#);
     }
 
@@ -1468,13 +1469,13 @@ t = time.parse "2026-06-10T15:00:00+05:00"
         run(r#"
 # Qish (EST = UTC-5): 09:00 local -> 14:00 UTC
 w = time.parse "2026-01-15 09:00:00" "America/New_York"
-(w == "2026-01-15 14:00:00") | (fail "qish DST noto'g'ri: ${w}")
+(w == "2026-01-15 14:00:00") | (fail "winter DST wrong: ${w}")
 # Yoz (EDT = UTC-4): aynan shu wall-clock -> 13:00 UTC
 s = time.parse "2026-07-15 09:00:00" "America/New_York"
-(s == "2026-07-15 13:00:00") | (fail "yoz DST noto'g'ri: ${s}")
+(s == "2026-07-15 13:00:00") | (fail "summer DST wrong: ${s}")
 # Teskari yo'l: UTC instant -> zona wall-clock'i (ko'rsatish uchun)
 back = time.fmt s "HH:mm" "America/New_York"
-(back == "09:00") | (fail "fmt zona noto'g'ri: ${back}")
+(back == "09:00") | (fail "fmt zone wrong: ${back}")
 "#);
     }
 
@@ -1495,12 +1496,12 @@ m = {in: 1 match: 2 each: 3}
     fn env_member_access() {
         // env.NOM -> std::env. Yo'q bo'lsa nil -> `??` default. Bor bo'lsa qiymat.
         // FLUXON_TEST_VAR'ni o'rnatib o'qiymiz (DB_TEST_LOCK kerak emas — boshqa env).
-        unsafe { std::env::set_var("FLUXON_TEST_VAR", "salom") };
+        unsafe { std::env::set_var("FLUXON_TEST_VAR", "hello") };
         run(r#"
 v = env.FLUXON_TEST_VAR
-(v == "salom") | (fail "env o'qish: ${v}")
+(v == "hello") | (fail "env read: ${v}")
 miss = env.FLUXON_NONEXISTENT_XYZ ?? "default"
-(miss == "default") | (fail "yo'q env nil -> default emas: ${miss}")
+(miss == "default") | (fail "missing env nil -> default not: ${miss}")
 "#);
         unsafe { std::env::remove_var("FLUXON_TEST_VAR") };
     }
@@ -1512,7 +1513,7 @@ miss = env.FLUXON_NONEXISTENT_XYZ ?? "default"
         run(r#"
 env = {PORT:"9999"}
 p = env.PORT
-(p == "9999") | (fail "local env shadow ishlamadi: ${p}")
+(p == "9999") | (fail "local env shadow did not work: ${p}")
 "#);
     }
 
@@ -1524,16 +1525,16 @@ p = env.PORT
         run(r#"
 # Xom UTF-8 baytlar (escape'siz): emoji + o'zbekcha — bayt-bayt as char BUZARDI
 r = json.dec "{\"s\":\"o'zbek 🙂 g'ayrat\"}"
-(r.s == "o'zbek 🙂 g'ayrat") | (fail "xom UTF-8 buzildi: ${r.s}")
+(r.s == "o'zbek 🙂 g'ayrat") | (fail "raw UTF-8 broke: ${r.s}")
 # \u escape: BMP belgisi (ü = ü). \\u -> manbada literal \u bo'ladi.
 u = json.dec "{\"c\":\"\\u00fc\"}"
-(u.c == "ü") | (fail "\\u00fc dekod buzildi: ${u.c}")
+(u.c == "ü") | (fail "\\u00fc dekod broke: ${u.c}")
 # \u surrogate juftligi (🙂 = 🙂)
 e = json.dec "{\"c\":\"\\ud83d\\ude42\"}"
-(e.c == "🙂") | (fail "\\u surrogate juftligi buzildi: ${e.c}")
+(e.c == "🙂") | (fail "\\u surrogate evenligi broke: ${e.c}")
 # enc -> dec round-trip
-back = json.dec (json.enc {x:"salom 🙂 dünyo"})
-(back.x == "salom 🙂 dünyo") | (fail "round-trip buzildi: ${back.x}")
+back = json.dec (json.enc {x:"hello 🙂 dünyo"})
+(back.x == "hello 🙂 dünyo") | (fail "round-trip broke: ${back.x}")
 "#);
     }
 
@@ -1543,10 +1544,10 @@ back = json.dec (json.enc {x:"salom 🙂 dünyo"})
         run(r#"
 # 1/0 = Infinity -> JSON'da "inf" emas, null bo'lishi kerak
 enc = json.enc (1.0 / 0.0)
-(enc == "null") | (fail "Infinity null bo'lmadi: ${enc}")
+(enc == "null") | (fail "Infinity was not null: ${enc}")
 # tab (control belgi) \t qisqa shaklda escape bo'lib round-trip qilinsin
 back = json.dec (json.enc "a\tb")
-(back == "a\tb") | (fail "control belgi round-trip buzildi: ${back}")
+(back == "a\tb") | (fail "control char round-trip broke: ${back}")
 "#);
         // "1 garbage" -> dekoder xato berishi kerak (avval jim 1 qaytarardi)
         assert!(run_source(r#"log (json.dec "1 garbage")"#).is_err());
@@ -1562,21 +1563,21 @@ back = json.dec (json.enc "a\tb")
         // closure args map oladi (agent tool naqshi); reg.has bool, reg.names list.
         run(r#"
 reg.add "calc" \args -> args.a + args.b
-reg.add "greet" \args -> "salom ${args.nom}"
+reg.add "greet" \args -> "hello ${args.name}"
 
 out = reg.call "calc" {a:2 b:3}
-(out == 5) | (fail "reg.call calc noto'g'ri: ${out}")
+(out == 5) | (fail "reg.call calc wrong: ${out}")
 
-g = reg.call "greet" {nom:"Aziza"}
-(g == "salom Aziza") | (fail "reg.call greet noto'g'ri: ${g}")
+g = reg.call "greet" {name:"Aziza"}
+(g == "hello Aziza") | (fail "reg.call greet wrong: ${g}")
 
-(reg.has "calc") | (fail "reg.has calc false bo'lmasligi kerak")
-((reg.has "yoq") == false) | (fail "reg.has yoq true bo'lmasligi kerak")
+(reg.has "calc") | (fail "reg.has calc should not be false")
+((reg.has "none") == false) | (fail "reg.has none should not be true")
 
 # reg.names argumentsiz (Field) — alifbo tartibida barqaror chiqish
 ns = reg.names
-(ns.len == 2) | (fail "reg.names uzunligi 2 emas: ${ns}")
-(ns.0 == "calc") | (fail "reg.names[0] calc emas: ${ns}")
+(ns.len == 2) | (fail "reg.names uzunligi 2 not: ${ns}")
+(ns.0 == "calc") | (fail "reg.names[0] calc not: ${ns}")
 "#);
     }
 
@@ -1591,8 +1592,8 @@ log out
         )
         .unwrap_err();
         assert!(
-            err.contains("ro'yxatda yo'q"),
-            "kutilgan 'ro'yxatda yo'q', topildi: {}",
+            err.contains("not registered"),
+            "expected 'not registered', got: {}",
             err
         );
     }
@@ -1614,14 +1615,14 @@ out = reg.call "f" {}
         let err = run_source(
             r#"
 fn check x
-  x > 0 | (fail 422 "musbat bo'lishi kerak")
+  x > 0 | (fail 422 "must be positive")
   "ok"
 log (check 5)
 log (check 0)
 "#,
         )
         .unwrap_err();
-        assert!(err.contains("422"), "kutilgan 422, topildi: {}", err);
+        assert!(err.contains("422"), "expected 422, got: {}", err);
     }
 
     #[test]
@@ -1632,7 +1633,7 @@ fn sq x -> x * x
 r = 3 |> inc |> sq
 log "r=${r}"
 m = {a:1}
-log "missing=${m.b ?? "yo'q"}"
+log "missing=${m.b ?? "none"}"
 "#);
     }
 
@@ -1648,14 +1649,14 @@ r = 5
   |> inc
   |> dbl
   |> inc
-(r == 13) | (fail "ko'p-qatorli pipe noto'g'ri: ${r}")
+(r == 13) | (fail "multi-line pipe wrong: ${r}")
 # izoh va bo'sh qator orasida ham davom etadi
 r2 = 10
   |> inc
 
   # bu yerda izoh
   |> dbl
-(r2 == 22) | (fail "izoh/bo'sh qator orqali pipe davomi buzildi: ${r2}")
+(r2 == 22) | (fail "pipe continuation through comment/empty line broke: ${r2}")
 "#);
     }
 
@@ -1667,13 +1668,13 @@ r2 = 10
         run(r#"
 fn addto base n -> base + n
 # argumentli chaqiruv: lhs oxirgi argument bo'lib qo'shiladi
-(5 |> addto 100) == 105 | (fail "pipe argumentli chaqiruv ishlamadi")
+(5 |> addto 100) == 105 | (fail "pipe argumentli chaqiruv did not work")
 # zanjir
-(3 |> addto 10 |> addto 100) == 113 | (fail "pipe zanjir ishlamadi")
+(3 |> addto 10 |> addto 100) == 113 | (fail "pipe zanjir did not work")
 # argumentsiz modul chaqiruvi (eski xulq saqlanishi kerak)
-("hello" |> str.up) == "HELLO" | (fail "pipe argumentsiz modul chaqiruvi buzildi")
+("hello" |> str.up) == "HELLO" | (fail "pipe argumentsiz modul chaqiruvi broke")
 # lambda (eski xulq)
-(5 |> \n -> n * 2) == 10 | (fail "pipe lambda buzildi")
+(5 |> \n -> n * 2) == 10 | (fail "pipe lambda broke")
 "#);
     }
 
@@ -1705,11 +1706,11 @@ tbl tickets
   category sym
   meta     json
 t = db.ins "tickets" {category::billing meta:{tries:3}}
-(t.id == 1) | (fail "id 1 bo'lishi kerak")
+(t.id == 1) | (fail "id 1 should be")
 match t.category
   :billing -> log "ok sym"
-  _ -> fail "sym :billing bo'lishi kerak"
-(t.meta.tries == 3) | (fail "json meta.tries 3 bo'lishi kerak")
+  _ -> fail "sym :billing should be"
+(t.meta.tries == 3) | (fail "json meta.tries 3 should be")
 "#);
         });
     }
@@ -1726,9 +1727,9 @@ tbl items
 db.ins "items" {kind::a}
 db.ins "items" {kind::b}
 all = db.q "select * from items"
-(all.len == 2) | (fail "param'siz q 2 qator")
+(all.len == 2) | (fail "q without param 2 row")
 only = db.q "select * from items where kind=$1" [:a]
-(only.len == 1) | (fail "$1 sym param 1 qator")
+(only.len == 1) | (fail "$1 sym param 1 row")
 "#);
         });
     }
@@ -1753,34 +1754,34 @@ db.ins "bookings" {tenant_id:2 resource_id:9 status::done start_at:"2026-06-04"}
 
 # IN-filtr (list qiymat) + order
 in_rows = db.from "bookings" |> db.eq {tenant_id:1 status:[:pending :confirmed]} |> db.order :start_at |> db.all
-(in_rows.len == 2) | (fail "IN-filtr 2 qator kutilgan, ${in_rows.len}")
+(in_rows.len == 2) | (fail "IN-filter 2 row expected, ${in_rows.len}")
 match in_rows.0.status
   :confirmed -> log "ok IN order"
-  _ -> fail "order start_at noto'g'ri"
+  _ -> fail "order start_at wrong"
 
 # cmp range + limit
 rng = db.from "bookings" |> db.eq {tenant_id:1} |> db.cmp :start_at :ge "2026-06-02" |> db.limit 10 |> db.all
-(rng.len == 2) | (fail "cmp >= 2 qator kutilgan, ${rng.len}")
+(rng.len == 2) | (fail "cmp >= 2 row expected, ${rng.len}")
 
 # first — bitta yoki nil
 one = db.from "bookings" |> db.eq {tenant_id:1 resource_id:7} |> db.first
-(one != nil) | (fail "first nil qaytardi")
+(one != nil) | (fail "first returned nil")
 match one.status
   :pending -> log "ok first"
-  _ -> fail "first noto'g'ri qator"
+  _ -> fail "first wrong row"
 
 # first — mos qator yo'q → nil
 none = db.from "bookings" |> db.eq {tenant_id:99} |> db.first
-(none == nil) | (fail "first mos yo'qda nil kutilgan")
+(none == nil) | (fail "first with no match expected nil")
 
 # bo'sh IN list → hech narsa
 empty = db.from "bookings" |> db.eq {status:[]} |> db.all
-(empty.len == 0) | (fail "bo'sh IN 0 qator kutilgan")
+(empty.len == 0) | (fail "empty IN 0 row expected")
 
 # nil qiymat → IS NULL ( = NULL hech qachon mos kelmaydi). resource_id null qator.
 db.ins "bookings" {tenant_id:1 resource_id:nil status::pending start_at:"2026-06-09"}
 nulls = db.from "bookings" |> db.eq {tenant_id:1 resource_id:nil} |> db.all
-(nulls.len == 1) | (fail "nil → IS NULL 1 qator kutilgan, ${nulls.len}")
+(nulls.len == 1) | (fail "nil → IS NULL 1 row expected, ${nulls.len}")
 "#);
         });
     }
@@ -1795,8 +1796,8 @@ nulls = db.from "bookings" |> db.eq {tenant_id:1 resource_id:nil} |> db.all
             let setup = "use db\ntbl t\n  id serial pk\n  n int\ndb.ins \"t\" {n:1}\n";
             let e = run_source(&format!("{setup}db.up \"t\" {{n:5}} {{}}\n")).unwrap_err();
             assert!(
-                e.contains("db.up: shart map'i bo'sh"),
-                "kutilmagan xato: {e}"
+                e.contains("db.up: condition map is empty"),
+                "unexpected error: {e}"
             );
         });
     }
@@ -1816,8 +1817,8 @@ db.ins "t" {n:2}
 db.ins "t" {n:3}
 # offset 1, limit yo'q → birinchisini o'tkazib, qolgan 2 ta qaytadi.
 rows = db.from "t" |> db.order :n |> db.offset 1 |> db.all
-(rows.len == 2) | (fail "offset LIMIT'siz 2 qator kutilgan, ${rows.len}")
-(rows.0.n == 2) | (fail "offset birinchini o'tkazishi kerak, ${rows.0.n}")
+(rows.len == 2) | (fail "offset without LIMIT 2 row expected, ${rows.len}")
+(rows.0.n == 2) | (fail "offset should skip the first needed, ${rows.0.n}")
 "#);
         });
     }
@@ -1832,12 +1833,12 @@ rows = db.from "t" |> db.order :n |> db.offset 1 |> db.all
                 "{setup}db.from \"t\" |> db.limit (0 - 1) |> db.all\n"
             ))
             .unwrap_err();
-            assert!(e1.contains("db.limit: manfiy"), "limit xatosi: {e1}");
+            assert!(e1.contains("db.limit: negative"), "limit error: {e1}");
             let e2 = run_source(&format!(
                 "{setup}db.from \"t\" |> db.offset (0 - 3) |> db.all\n"
             ))
             .unwrap_err();
-            assert!(e2.contains("db.offset: manfiy"), "offset xatosi: {e2}");
+            assert!(e2.contains("db.offset: negative"), "offset error: {e2}");
         });
     }
 
@@ -1859,7 +1860,7 @@ db.ins "bookings" {tenant_id:1 resource_id:7 status::pending total_cents:1000}
 
 # group + count + sum, order desc
 ag = db.from "bookings" |> db.eq {tenant_id:1 status:[:done :confirmed]} |> db.group :resource_id |> db.count :n |> db.sum :total_cents :rev |> db.order :rev :desc |> db.agg
-(ag.len == 1) | (fail "agg 1 guruh kutilgan, ${ag.len}")
+(ag.len == 1) | (fail "agg 1 guruh expected, ${ag.len}")
 (ag.0.resource_id == 5) | (fail "agg resource_id 5")
 (ag.0.n == 2) | (fail "agg count 2, ${ag.0.n}")
 (ag.0.rev == 8000) | (fail "agg sum 8000, ${ag.0.rev}")
@@ -1872,7 +1873,7 @@ ov = db.from "bookings" |> db.eq {tenant_id:1} |> db.count_if {status::confirmed
 
 # bo'sh tenant: count_if 0 qaytarishi kerak (nil emas — COUNT semantikasi)
 empty_ov = db.from "bookings" |> db.eq {tenant_id:99} |> db.count_if {status::done} :done |> db.agg_row
-(empty_ov.done == 0) | (fail "bo'sh count_if 0 kutilgan (nil emas), ${empty_ov.done}")
+(empty_ov.done == 0) | (fail "empty count_if 0 expected (nil not), ${empty_ov.done}")
 "#);
         });
     }
@@ -1935,10 +1936,10 @@ tbl t
   a  int
   b  str
 old = db.one "select * from t where a=1"
-(old != nil) | (fail "eski qator saqlanishi kerak")
-(old.b == nil) | (fail "yangi ustun b NULL bo'lishi kerak")
+(old != nil) | (fail "old row should be preserved needed")
+(old.b == nil) | (fail "new column b NULL should be")
 db.ins "t" {a:2 b:"hi"}
-(db.one "select b from t where a=2").b == "hi" | (fail "yangi ustunga yozish")
+(db.one "select b from t where a=2").b == "hi" | (fail "write to new column")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 add column: {}", e));
@@ -1972,7 +1973,7 @@ tbl t
   a  int
 # b ustuni endi yo'q -> DROP COLUMN
 baks = db.q "select name from sqlite_master where type='table' and name like '_fluxon_bak_t_%'"
-(baks.len >= 1) | (fail "backup jadval yaratilishi kerak")
+(baks.len >= 1) | (fail "backup table should be created needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop column: {}", e));
@@ -2014,12 +2015,12 @@ use db
 tbl b
   id serial pk
 gone = db.q "select name from sqlite_master where type='table' and name='a'"
-(gone.len == 0) | (fail "a jadvali DROP bo'lishi kerak")
+(gone.len == 0) | (fail "a tablei DROP should be")
 kept = db.q "select name from sqlite_master where type='table' and name='manual'"
-(kept.len == 1) | (fail "manual jadval saqlanishi kerak (Fluxon yaratmagan)")
-(db.one "select x from manual").x == 42 | (fail "manual ma'lumot saqlanishi kerak")
+(kept.len == 1) | (fail "manual table should be preserved needed (not created by Fluxon)")
+(db.one "select x from manual").x == 42 | (fail "manual data should be preserved needed")
 baks = db.q "select name from sqlite_master where type='table' and name like '_fluxon_bak_a_%'"
-(baks.len >= 1) | (fail "a uchun backup yaratilishi kerak")
+(baks.len >= 1) | (fail "backup for a should be created needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop table: {}", e));
@@ -2045,9 +2046,9 @@ tbl bookings
   start_at    str
   uniq(resource_id start_at)
 idx = db.q "select name from sqlite_master where type='index' and name='idx_bookings_status'"
-(idx.len == 1) | (fail "idx_bookings_status yaratilishi kerak")
+(idx.len == 1) | (fail "idx_bookings_status yaratilishi needed")
 uniq = db.q "select name from sqlite_master where type='index' and name='uniq_bookings_resource_id_start_at'"
-(uniq.len == 1) | (fail "uniq index yaratilishi kerak")
+(uniq.len == 1) | (fail "uniq index should be created needed")
 db.ins "bookings" {resource_id:5 status::done start_at:"2026-06-01"}
 "#,
         )
@@ -2068,7 +2069,7 @@ db.ins "bookings" {resource_id:5 status::pending start_at:"2026-06-01"}
         );
         assert!(
             dup.is_err(),
-            "uniq(resource_id start_at) duplicate insert xato berishi kerak"
+            "uniq(resource_id start_at) duplicate insert should error"
         );
 
         // Deploy 2: status index olib tashlangan -> DROP INDEX. uniq qoladi.
@@ -2082,9 +2083,9 @@ tbl bookings
   start_at    str
   uniq(resource_id start_at)
 dropped = db.q "select name from sqlite_master where type='index' and name='idx_bookings_status'"
-(dropped.len == 0) | (fail "idx_bookings_status DROP bo'lishi kerak")
+(dropped.len == 0) | (fail "idx_bookings_status DROP should be")
 kept = db.q "select name from sqlite_master where type='index' and name='uniq_bookings_resource_id_start_at'"
-(kept.len == 1) | (fail "uniq index saqlanishi kerak")
+(kept.len == 1) | (fail "uniq index should be preserved needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop index: {}", e));
@@ -2125,12 +2126,12 @@ tbl t
   id serial pk
   a  int
 gone = db.q "select name from sqlite_master where type='index' and name='idx_t_status'"
-(gone.len == 0) | (fail "idx_t_status DROP bo'lishi kerak")
+(gone.len == 0) | (fail "idx_t_status DROP should be")
 comp = db.q "select name from sqlite_master where type='index' and name='idx_t_a_status'"
-(comp.len == 0) | (fail "idx_t_a_status (status'ga bog'liq) DROP bo'lishi kerak")
+(comp.len == 0) | (fail "idx_t_a_status (depending on status) DROP should be")
 # status ustuni haqiqatan yo'qolgan
 cols = db.q "select name from pragma_table_info('t') where name='status'"
-(cols.len == 0) | (fail "status ustuni DROP bo'lishi kerak")
+(cols.len == 0) | (fail "status columni DROP should be")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop indexed column: {}", e));
@@ -2152,7 +2153,7 @@ tbl users
   id    serial pk
   email str index|uniq
 ui = db.q "select name from sqlite_master where type='index' and name='uniq_users_email'"
-(ui.len == 1) | (fail "uniq_users_email yaratilishi kerak")
+(ui.len == 1) | (fail "uniq_users_email should be created needed")
 db.ins "users" {email:"a@x.uz"}
 "#,
         )
@@ -2167,10 +2168,7 @@ tbl users
 db.ins "users" {email:"a@x.uz"}
 "#,
         );
-        assert!(
-            dup.is_err(),
-            "index|uniq duplicate email xato berishi kerak"
-        );
+        assert!(dup.is_err(), "index|uniq duplicate email should error");
 
         cleanup_db(&path);
     }
@@ -2188,9 +2186,9 @@ tbl t
   b str
   uniq(a, b)
 n = (db.q "select count(*) c from pragma_table_info('t')").0.c
-(n == 2) | (fail "jadvalda faqat 2 ustun (a, b) bo'lishi kerak — soxta uniq yo'q")
+(n == 2) | (fail "tableda faqat 2 column (a, b) should be — soxta uniq none")
 ui = db.q "select name from sqlite_master where type='index' and name='uniq_t_a_b'"
-(ui.len == 1) | (fail "uniq_t_a_b unikal index yaratilishi kerak")
+(ui.len == 1) | (fail "uniq_t_a_b unique index should be created needed")
 db.ins "t" {a:"x" b:"y"}
 "#);
 
@@ -2207,7 +2205,7 @@ db.ins "t" {a:"x" b:"y"}
 db.ins "t" {a:"x" b:"y"}
 "#,
             );
-            assert!(dup.is_err(), "dublikat (a, b) uniq xato berishi kerak");
+            assert!(dup.is_err(), "duplicate (a, b) should violate uniq");
         });
     }
 
@@ -2227,8 +2225,8 @@ tbl posts
   owner int ref:users.id
   title str
 db.ins "users" {name:"ali"}
-p = db.ins "posts" {owner:1 title:"salom"}
-(p.id == 1) | (fail "yaroqli FK insert o'tishi kerak")
+p = db.ins "posts" {owner:1 title:"hello"}
+(p.id == 1) | (fail "valid FK insert should pass needed")
 "#);
 
             // Yetim FK: owner=999 mavjud emas -> FOREIGN KEY constraint failed.
@@ -2242,10 +2240,10 @@ tbl posts
   id    serial pk
   owner int ref:users.id
   title str
-db.ins "posts" {owner:999 title:"yetim"}
+db.ins "posts" {owner:999 title:"orphan"}
 "#,
             );
-            assert!(orphan.is_err(), "yetim FK insert xato berishi kerak");
+            assert!(orphan.is_err(), "orphan FK insert should error");
         });
     }
 
@@ -2288,11 +2286,11 @@ tbl posts
   owner int ref:users.id
   title str
 rows = db.q "select count(*) c from posts"
-(rows.0.c == 2) | (fail "rebuild ma'lumotni saqlashi kerak (2 qator)")
+(rows.0.c == 2) | (fail "rebuild should preserve data needed (2 row)")
 fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
-(fk.0.c == 1) | (fail "rebuild keyin posts'da FK bo'lishi kerak")
+(fk.0.c == 1) | (fail "posts should have FK after rebuild")
 n = db.ins "posts" {owner:1 title:"c"}
-(n.id == 3) | (fail "autoincrement davom etishi kerak (id=3)")
+(n.id == 3) | (fail "autoincrement should continue needed (id=3)")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 rebuild: {}", e));
@@ -2308,12 +2306,12 @@ tbl posts
   id    serial pk
   owner int ref:users.id
   title str
-db.ins "posts" {owner:404 title:"yetim"}
+db.ins "posts" {owner:404 title:"orphan"}
 "#,
         );
         assert!(
             orphan.is_err(),
-            "rebuild keyin yetim FK insert xato berishi kerak"
+            "orphan FK insert should error after rebuild"
         );
 
         cleanup_db(&path);
@@ -2340,7 +2338,7 @@ tbl posts
   title str
   old   str
 db.ins "users" {name:"a"}
-db.ins "posts" {owner:1 title:"x" old:"eski"}
+db.ins "posts" {owner:1 title:"x" old:"old"}
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy1 drop+fk: {}", e));
@@ -2357,14 +2355,14 @@ tbl posts
   owner int ref:users.id
   title str
 n = db.q "select count(*) c from posts"
-(n.0.c == 1) | (fail "ma'lumot saqlanishi kerak (1 qator)")
+(n.0.c == 1) | (fail "data should be preserved needed (1 row)")
 fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
-(fk.0.c == 1) | (fail "FK qo'shilishi kerak")
+(fk.0.c == 1) | (fail "FK should be added needed")
 cols = db.q "select count(*) c from pragma_table_info('posts')"
-(cols.0.c == 3) | (fail "old ustun DROP bo'lib 3 ustun qolishi kerak")
+(cols.0.c == 3) | (fail "old column DROPped, 3 columns should remain needed")
 "#,
         )
-        .unwrap_or_else(|e| panic!("deploy2 drop+fk (backup to'qnashuvi?): {}", e));
+        .unwrap_or_else(|e| panic!("deploy2 drop+fk (backup collision?): {}", e));
 
         cleanup_db(&path);
     }
@@ -2388,7 +2386,7 @@ tbl posts
   title str
 db.ins "users" {name:"a"}
 db.ins "posts" {owner:1 title:"ok"}
-db.ins "posts" {owner:777 title:"yetim"}
+db.ins "posts" {owner:777 title:"orphan"}
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy1 orphan: {}", e));
@@ -2407,19 +2405,16 @@ tbl posts
 db.q "select 1 x"
 "#,
         );
-        assert!(
-            res.is_err(),
-            "yetim ma'lumotda FK rebuild abort bo'lishi kerak"
-        );
+        assert!(res.is_err(), "FK rebuild should abort on orphan data");
 
         // Ma'lumot va eski (FK'siz) sxema saqlangan bo'lishi kerak.
         run_source(
             r#"
 use db
 n = db.q "select count(*) c from posts"
-(n.0.c == 2) | (fail "rollback ma'lumotni saqlashi kerak (2 qator)")
+(n.0.c == 2) | (fail "rollback should preserve data needed (2 row)")
 fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
-(fk.0.c == 0) | (fail "abort keyin FK qo'shilmasligi kerak")
+(fk.0.c == 0) | (fail "FK should not be added after abort needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("verify orphan: {}", e));
@@ -2438,8 +2433,8 @@ tbl t
 r = db.tx \->
   x = db.ins "t" {n:7}
   ret x
-(r.n == 7) | (fail "tx ret qiymati n=7")
-(db.one "select count(*) c from t").c == 1 | (fail "1 qator commit bo'lishi kerak")
+(r.n == 7) | (fail "tx ret valuei n=7")
+(db.one "select count(*) c from t").c == 1 | (fail "1 row commit should be")
 "#);
         });
     }
@@ -2469,13 +2464,13 @@ tbl t
 db.ins "t" {n:1}
 db.tx \->
   db.ins "t" {n:2}
-  fail "ataylab"
+  fail "on purpose"
 "#,
         )
         .unwrap_err();
         assert!(
-            err.contains("ataylab"),
-            "kutilgan fail xabari, topildi: {}",
+            err.contains("on purpose"),
+            "expected fail message, got: {}",
             err
         );
 
@@ -2487,7 +2482,7 @@ use db
 tbl t
   id serial pk
   n  int
-(db.one "select count(*) c from t").c == 1 | (fail "rollback'dan keyin 1 qator qolishi kerak")
+(db.one "select count(*) c from t").c == 1 | (fail "1 row should remain after rollback needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("rollback tekshiruvi: {}", e));
@@ -2530,11 +2525,11 @@ db.ins "t" {k::a body:{x:1 y:[1 2 3]}}
             r#"
 use db
 row = db.one "select * from t where k=$1" [:a]
-(row.body.x == 1) | (fail "json ustun map bo'lib dekod bo'lishi kerak (x)")
-(row.body.y.len == 3) | (fail "json ichki list ham tiklanishi kerak (y)")
+(row.body.x == 1) | (fail "json column should decode as a map (x)")
+(row.body.y.len == 3) | (fail "inner json list should also be restored needed (y)")
 "#,
         )
-        .unwrap_or_else(|e| panic!("o'qish: {}", e));
+        .unwrap_or_else(|e| panic!("read: {}", e));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
@@ -2578,7 +2573,7 @@ db.ins "t3" {body:"init"}
 use db
 db.ins "t3" {body:{x:42 y:[1 2]}}
 row = db.one "select body from t3 limit 1"
-row.body | (fail "body bo'sh bo'lmasligi kerak")
+row.body | (fail "body should not be empty needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("schema-less yozish: {}", e));
@@ -2603,8 +2598,8 @@ r = db.tx \->
     x = db.ins "t" {n:2}
     ret x
   ret inner
-(r.n == 2) | (fail "nested tx ret qiymati n=2")
-(db.one "select count(*) c from t").c == 2 | (fail "ikkala ins commit bo'lishi kerak")
+(r.n == 2) | (fail "nested tx ret valuei n=2")
+(db.one "select count(*) c from t").c == 2 | (fail "ikkala ins commit should be")
 "#);
         });
     }
@@ -2620,9 +2615,9 @@ tbl counters
 db.put "counters" {hits:1} {name:"x"}
 db.put "counters" {hits:9} {name:"x"}
 c = db.one "select * from counters where name=$1" ["x"]
-(c.hits == 9) | (fail "upsert hits=9 bo'lishi kerak")
+(c.hits == 9) | (fail "upsert hits=9 should be")
 n = (db.q "select * from counters").len
-(n == 1) | (fail "upsert dublikat yaratmasligi kerak")
+(n == 1) | (fail "upsert should not create a duplicate needed")
 "#);
         });
     }
@@ -2645,8 +2640,8 @@ db.tx \->
             .unwrap_err();
             // uniq buzilishi db xato sifatida ko'tariladi.
             assert!(
-                err.to_lowercase().contains("unique") || err.contains("db xato"),
-                "kutilgan uniq buzilish xatosi, topildi: {}",
+                err.to_lowercase().contains("unique") || err.contains("db error"),
+                "expected uniq violation error, got: {}",
                 err
             );
         });
@@ -2659,7 +2654,7 @@ db.tx \->
         // Tirnoqsiz 5-maydon (nomli funksiya). cron.on bloklamaydi, dastur tugaydi.
         run(r#"
 fn check
-  log "tekshiruv"
+  log "check"
 cron.on 0 * * * * check
 "#);
     }
@@ -2678,7 +2673,7 @@ cron.on */15 9 1,15 * 1-5 \->
         // Tirnoqli str ham ishlaydi (inson uchun; AI docs'da yo'q).
         run(r#"
 fn report
-  log "hisobot"
+  log "report"
 cron.on "30 9 * * *" report
 "#);
     }
@@ -2693,10 +2688,10 @@ fn f
 cron.on 99 * * * * f
 "#,
         )
-        .expect_err("noto'g'ri cron ifoda xato berishi kerak");
+        .expect_err("an invalid cron expression should error");
         assert!(
-            err.contains("cron") && err.to_lowercase().contains("ifoda"),
-            "kutilgan cron ifoda xatosi, topildi: {}",
+            err.contains("cron") && err.to_lowercase().contains("expression"),
+            "expected cron expression error, got: {}",
             err
         );
     }
@@ -2710,8 +2705,8 @@ cron.on 99 * * * * f
         // `job` map argumenti oladi.
         run(r#"
 queue.on "send" \job ->
-  log "yuborilmoqda: ${job.ph}"
-queue.push "send" {ph:"+99890" body:"salom"}
+  log "sending: ${job.ph}"
+queue.push "send" {ph:"+99890" body:"hello"}
 "#);
     }
 
@@ -2720,7 +2715,7 @@ queue.push "send" {ph:"+99890" body:"salom"}
         // Payload ixtiyoriy — berilmasa job Nil bo'ladi.
         run(r#"
 queue.on "tozala" \job ->
-  log "tozalandi"
+  log "cleaned"
 queue.push "tozala"
 "#);
     }
@@ -2730,7 +2725,7 @@ queue.push "tozala"
         // Issue #105: handler'i hech qachon ro'yxatga olinmagan ish dastur
         // chiqishini bloklamasligi kerak — run() ogohlantirish bilan normal
         // tugaydi (eski busy-loop'da ish abadiy aylanardi).
-        run(r#"queue.push "yetim" {x:1}"#);
+        run(r#"queue.push "orphan" {x:1}"#);
     }
 
     #[test]
@@ -2755,7 +2750,7 @@ queue.push "yoz" {nom:"b"}
         // Birinchi run() drain bilan tugadi — ikkala ish DB'da bo'lishi SHART.
         run(r#"
 use db
-((db.q "select * from jobs").len == 2) | (fail "queue ishlari bajarilmagan")
+((db.q "select * from jobs").len == 2) | (fail "queue jobs were not executed")
 "#);
 
         cleanup_db(&path);
@@ -2764,10 +2759,10 @@ use db
     #[test]
     fn queue_push_nom_str_bolmasa_xato() {
         // 1-argument ish nomi str bo'lishi shart.
-        let err = run_source(r#"queue.push 5"#).expect_err("nom str bo'lmasa xato kutiladi");
+        let err = run_source(r#"queue.push 5"#).expect_err("a non-str name should error");
         assert!(
             err.contains("queue.push"),
-            "kutilgan queue.push xatosi, topildi: {}",
+            "expected queue.push error, got: {}",
             err
         );
     }
@@ -2778,10 +2773,10 @@ use db
         // yetishi kerak — `queue` ident o'zgaruvchi deb qidirilib "noma'lum nom"
         // bermasin. Noma'lum funksiya bilan sinaymiz: dispatch'ga yetsa "queue
         // modulida ... yo'q" xatosi keladi (noma'lum nom EMAS). [cron.run regressiyasi]
-        let err = run_source(r#"queue.yoq"#).expect_err("argumentsiz queue.yoq xato berishi kerak");
+        let err = run_source(r#"queue.yoq"#).expect_err("argument-less queue.yoq should error");
         assert!(
-            err.contains("queue modulida") && !err.contains("noma'lum nom"),
-            "argumentsiz queue dispatch'ga yetishi kerak, topildi: {}",
+            err.contains("queue module") && !err.contains("unknown name"),
+            "argument-less queue should reach dispatch, got: {}",
             err
         );
     }
@@ -2791,10 +2786,10 @@ use db
         // `cron.run` argumentsiz — Field bo'lib keladi va dispatch'ga yetishi kerak
         // (aks holda "noma'lum nom: cron"). cron.run bloklaydi, shuning uchun mavjud
         // funksiya o'rniga noma'lum funksiya bilan dispatch'ga yetganini tekshiramiz.
-        let err = run_source(r#"cron.yoq"#).expect_err("argumentsiz cron.yoq xato berishi kerak");
+        let err = run_source(r#"cron.yoq"#).expect_err("argument-less cron.yoq should error");
         assert!(
-            err.contains("cron modulida") && !err.contains("noma'lum nom"),
-            "argumentsiz cron dispatch'ga yetishi kerak, topildi: {}",
+            err.contains("cron module") && !err.contains("unknown name"),
+            "argument-less cron should reach dispatch, got: {}",
             err
         );
     }
@@ -2802,11 +2797,10 @@ use db
     #[test]
     fn queue_on_handler_fn_bolmasa_xato() {
         // 2-argument handler fn bo'lishi shart.
-        let err =
-            run_source(r#"queue.on "send" 5"#).expect_err("handler fn bo'lmasa xato kutiladi");
+        let err = run_source(r#"queue.on "send" 5"#).expect_err("a non-fn handler should error");
         assert!(
             err.contains("queue.on"),
-            "kutilgan queue.on xatosi, topildi: {}",
+            "expected queue.on error, got: {}",
             err
         );
     }
@@ -2830,7 +2824,7 @@ use db
         for (k, _) in &saved {
             unsafe { std::env::remove_var(k) };
         }
-        let err = run_source(r#"x = ai.ask "salom""#).expect_err("kalit yo'qligida xato kutiladi");
+        let err = run_source(r#"x = ai.ask "hello""#).expect_err("a missing key should error");
         // env'ni tiklaymiz (boshqa testlarga ta'sir qilmasin).
         for (k, v) in &saved {
             if let Some(val) = v {
@@ -2838,8 +2832,8 @@ use db
             }
         }
         assert!(
-            err.contains("kaliti topilmadi") || err.contains("kalit"),
-            "kutilgan kalit-topilmadi xatosi, topildi: {}",
+            err.contains("key not found") || err.contains("key"),
+            "expected key-not-found error, got: {}",
             err
         );
     }
@@ -2849,11 +2843,10 @@ use db
         let _guard = AI_ENV_LOCK.lock().unwrap();
         // ai.foo -> dispatch'ga yetib "ai.foo yo'q" beradi (noma'lum nom EMAS).
         // Kalit bo'lsa ham bo'lmasa ham bu funksiya nomini tekshirishdan oldin keladi.
-        let err =
-            run_source(r#"ai.foo "x""#).expect_err("noma'lum ai funksiyasi xato berishi kerak");
+        let err = run_source(r#"ai.foo "x""#).expect_err("an unknown ai function should error");
         assert!(
-            err.contains("ai.foo") && !err.contains("noma'lum nom"),
-            "ai dispatch'ga yetib funksiya xatosi berishi kerak, topildi: {}",
+            err.contains("ai.foo") && !err.contains("unknown name"),
+            "ai should reach dispatch and give a function error, got: {}",
             err
         );
     }
@@ -2873,10 +2866,10 @@ log "ai.ask = ${ai.ask}"
     #[test]
     fn sh_run_echo_natija_va_kod() {
         run(r#"
-r = sh.run "printf salom"
-(r.code == 0) | (fail "code 0 bo'lishi kerak: ${r.code}")
-(r.stdout == "salom") | (fail "stdout noto'g'ri: ${r.stdout}")
-(r.stderr == "") | (fail "stderr bo'sh bo'lishi kerak: ${r.stderr}")
+r = sh.run "printf hello"
+(r.code == 0) | (fail "code should be 0: ${r.code}")
+(r.stdout == "hello") | (fail "stdout wrong: ${r.stdout}")
+(r.stderr == "") | (fail "stderr empty should be: ${r.stderr}")
 "#);
     }
 
@@ -2885,7 +2878,7 @@ r = sh.run "printf salom"
     fn sh_run_nolik_bolmagan_kod_xato_emas() {
         run(r#"
 r = sh.run "exit 7"
-(r.code == 7) | (fail "code 7 bo'lishi kerak: ${r.code}")
+(r.code == 7) | (fail "code 7 should be: ${r.code}")
 "#);
     }
 
@@ -2934,13 +2927,13 @@ r = sh.run "exit 7"
                 "main.fx",
                 r#"
 use ./greet
-(greet.greeting == "salom") | (fail "greeting: ${greet.greeting}")
-(greet.hello "Aziza" == "salom, Aziza") | (fail "hello: ${greet.hello "Aziza"}")
+(greet.greeting == "hello") | (fail "greeting: ${greet.greeting}")
+(greet.hello "Aziza" == "hello, Aziza") | (fail "hello: ${greet.hello "Aziza"}")
 "#,
             ),
             (
                 "greet.fx",
-                "exp greeting = \"salom\"\nexp fn hello nom -> \"${greeting}, ${nom}\"\n",
+                "exp greeting = \"hello\"\nexp fn hello name -> \"${greeting}, ${name}\"\n",
             ),
         ])
         .unwrap();
@@ -2954,10 +2947,10 @@ use ./greet
                 "main.fx",
                 r#"
 use ./tools as t
-(t.classify "x" == "turi: x") | (fail "classify: ${t.classify "x"}")
+(t.classify "x" == "type: x") | (fail "classify: ${t.classify "x"}")
 "#,
             ),
-            ("tools.fx", "exp fn classify v -> \"turi: ${v}\"\n"),
+            ("tools.fx", "exp fn classify v -> \"type: ${v}\"\n"),
         ])
         .unwrap();
     }
@@ -2971,7 +2964,7 @@ use ./tools as t
                 r#"
 use ./m
 (m.pub_v == 1) | (fail "pub_v: ${m.pub_v}")
-(m.priv_v == nil) | (fail "priv_v eksport qilinmasligi kerak: ${m.priv_v}")
+(m.priv_v == nil) | (fail "priv_v should not be exported needed: ${m.priv_v}")
 "#,
             ),
             ("m.fx", "exp pub_v = 1\npriv_v = 2\n"),
@@ -3007,10 +3000,10 @@ use ./a
                 "sub/test.fx",
                 r#"
 use ../greet
-(greet.greeting == "salom") | (fail "greeting: ${greet.greeting}")
+(greet.greeting == "hello") | (fail "greeting: ${greet.greeting}")
 "#,
             ),
-            ("greet.fx", "exp greeting = \"salom\"\n"),
+            ("greet.fx", "exp greeting = \"hello\"\n"),
         ])
         .unwrap();
     }
@@ -3044,8 +3037,8 @@ use ./c as c2
         ])
         .unwrap_err();
         assert!(
-            err.contains("sikllik import"),
-            "sikllik import xatosi kutilgan edi, kelgan: {}",
+            err.contains("circular import"),
+            "circular import error expected, got: {}",
             err
         );
     }
@@ -3055,8 +3048,8 @@ use ./c as c2
     fn use_module_topilmadi_xato() {
         let err = run_modules(&[("main.fx", "use ./yoq\n")]).unwrap_err();
         assert!(
-            err.contains("modul topilmadi"),
-            "topilmadi xatosi kutilgan edi, kelgan: {}",
+            err.contains("module not found"),
+            "not-found error expected, got: {}",
             err
         );
     }
@@ -3081,7 +3074,7 @@ use ./c as c2
         // `use math` fayl izlamaydi (xato bermaydi), math.* dispatch ishlaydi.
         run(r#"
 use math
-(math.floor 3.7 == 3) | (fail "floor noto'g'ri")
+(math.floor 3.7 == 3) | (fail "floor wrong")
 "#);
     }
 
@@ -3089,11 +3082,11 @@ use math
     #[test]
     fn math_min_max_pow_sqrt() {
         run(r#"
-(math.min 3 7 == 3) | (fail "min noto'g'ri")
-(math.max 3 7 == 7) | (fail "max noto'g'ri")
-(math.min 3 2.5 == 2.5) | (fail "aralash min noto'g'ri")
-(math.pow 2 10 == 1024) | (fail "pow noto'g'ri")
-(math.sqrt 9 == 3.0) | (fail "sqrt noto'g'ri")
+(math.min 3 7 == 3) | (fail "min wrong")
+(math.max 3 7 == 7) | (fail "max wrong")
+(math.min 3 2.5 == 2.5) | (fail "aralash min wrong")
+(math.pow 2 10 == 1024) | (fail "pow wrong")
+(math.sqrt 9 == 3.0) | (fail "sqrt wrong")
 "#);
     }
 
@@ -3108,7 +3101,7 @@ each i in inf
   if i == 5
     stop
   sum <- sum + i
-(sum == 10) | (fail "0+1+2+3+4 = 10 bo'lishi kerak: ${sum}")
+(sum == 10) | (fail "0+1+2+3+4 = 10 should be: ${sum}")
 "#);
     }
 
@@ -3123,25 +3116,25 @@ each i in inf
   if i % 2 == 0
     skip
   cnt <- cnt + 1
-(cnt == 5) | (fail "toq sonlar 1,3,5,7,9 = 5 ta: ${cnt}")
+(cnt == 5) | (fail "odd sonlar 1,3,5,7,9 = 5 ta: ${cnt}")
 "#);
     }
 
     // inf qiymat sifatida ishlatib bo'lmaydi — faqat `each i in inf` da.
     #[test]
     fn inf_qiymat_sifatida_xato() {
-        let err = run_source("x = inf\n").expect_err("inf qiymat bo'lishi xato berishi kerak");
-        assert!(err.contains("inf"), "kutilmagan xato: {}", err);
+        let err = run_source("x = inf\n").expect_err("inf as a value should error");
+        assert!(err.contains("inf"), "unexpected error: {}", err);
     }
 
     // `each k, v in inf` — ikki o'zgaruvchi ma'nosiz (cheksiz oddiy hisoblagich).
     #[test]
     fn each_inf_ikki_ozgaruvchi_xato() {
         let err = run_source("each k, v in inf\n  stop\n")
-            .expect_err("inf bilan ikki o'zgaruvchi xato berishi kerak");
+            .expect_err("two variables with inf should error");
         assert!(
-            err.contains("bitta o'zgaruvchi"),
-            "kutilmagan xato: {}",
+            err.contains("a single variable"),
+            "unexpected error: {}",
             err
         );
     }
@@ -3160,14 +3153,14 @@ fn fib n
 log "${fib 10}"
 "#,
         )
-        .expect("to'g'ri kod check'dan o'tishi kerak");
+        .expect("valid code should pass check");
     }
 
     // Parse/lex xato -> check Err qaytaradi (main bu Err'ni exit 2 ga aylantiradi).
     #[test]
     fn check_parse_xato_err() {
-        let err = check_source("fn g x\n  ret (\n").expect_err("parse xato Err berishi kerak");
-        assert!(!err.is_empty(), "xato matni bo'sh bo'lmasligi kerak");
+        let err = check_source("fn g x\n  ret (\n").expect_err("a parse error should return Err");
+        assert!(!err.is_empty(), "error text should not be empty");
     }
 
     // ENG MUHIM: check kodni BAJARMAYDI — runtime side-effect/xato bo'lmaydi.
@@ -3178,11 +3171,11 @@ log "${fib 10}"
     fn check_kodni_bajarmaydi() {
         // `nomalum_funksiya` runtime'da "noma'lum nom" beradi, lekin sintaksis joyida.
         check_source("x = nomalum_funksiya 5\n")
-            .expect("sintaktik to'g'ri kod check'dan o'tishi kerak (bajarilmaydi)");
+            .expect("syntactically valid code should pass check (not executed)");
         // Tasdiq: xuddi shu kod run'da xato beradi (bajariladi).
         assert!(
             run_source("x = nomalum_funksiya 5\n").is_err(),
-            "run bu kodni bajarib xato berishi kerak (check bilan farq)"
+            "run should execute this code and error (unlike check)"
         );
     }
 
@@ -3195,7 +3188,7 @@ log "${fib 10}"
             .collect();
         match parse_args(&args) {
             Some(Command::Check(p)) => assert_eq!(p, "test.fx"),
-            _ => panic!("Command::Check kutilgan edi, topildi boshqa variant"),
+            _ => panic!("expected Command::Check, found another variant"),
         }
     }
 
@@ -3205,11 +3198,11 @@ log "${fib 10}"
         let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
         match parse_args(&to_args(&["fluxon", "test"])) {
             Some(Command::Test(None)) => {}
-            _ => panic!("Command::Test(None) kutilgan edi"),
+            _ => panic!("expected Command::Test(None)"),
         }
         match parse_args(&to_args(&["fluxon", "test", "smoke.fx"])) {
             Some(Command::Test(Some(p))) => assert_eq!(p, "smoke.fx"),
-            _ => panic!("Command::Test(Some) kutilgan edi"),
+            _ => panic!("expected Command::Test(Some)"),
         }
     }
 
@@ -3220,11 +3213,11 @@ log "${fib 10}"
         let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
         match parse_args(&to_args(&["fluxon", "--version"])) {
             Some(Command::Version) => {}
-            _ => panic!("Command::Version kutilgan edi"),
+            _ => panic!("expected Command::Version"),
         }
         match parse_args(&to_args(&["fluxon", "-V"])) {
             Some(Command::Version) => {}
-            _ => panic!("Command::Version kutilgan edi"),
+            _ => panic!("expected Command::Version"),
         }
     }
 
@@ -3234,11 +3227,11 @@ log "${fib 10}"
         let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
         match parse_args(&to_args(&["fluxon", "--help"])) {
             Some(Command::Help) => {}
-            _ => panic!("Command::Help kutilgan edi"),
+            _ => panic!("expected Command::Help"),
         }
         match parse_args(&to_args(&["fluxon", "-h"])) {
             Some(Command::Help) => {}
-            _ => panic!("Command::Help kutilgan edi"),
+            _ => panic!("expected Command::Help"),
         }
     }
 
@@ -3248,18 +3241,18 @@ log "${fib 10}"
     fn assert_primitivi() {
         run(r#"
 assert true
-assert (1 + 1 == 2) "matematika ishlaydi"
-assert "bo'sh bo'lmagan str ham truthy"
+assert (1 + 1 == 2) "math works"
+assert "a non-empty str is also truthy"
 "#);
-        let err = run_source(r#"assert (1 == 2) "bir ikki emas""#).unwrap_err();
+        let err = run_source(r#"assert (1 == 2) "one is not two""#).unwrap_err();
         assert!(
-            err.contains("assert yiqildi: bir ikki emas"),
-            "xabar kutilgandek emas: {}",
+            err.contains("assert failed: one is not two"),
+            "message not as expected: {}",
             err
         );
-        // xabarsiz variant ham yiqiladi
+        // the variant without a message fails too
         let err = run_source("assert false").unwrap_err();
-        assert!(err.contains("assert yiqildi"), "xabar: {}", err);
+        assert!(err.contains("assert failed"), "message: {}", err);
         // nil ham falsy
         assert!(run_source("assert nil").is_err());
     }
@@ -3274,7 +3267,7 @@ assert "bo'sh bo'lmagan str ham truthy"
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(dir.join("b.fx"), "assert true").unwrap();
         std::fs::write(dir.join("a.fx"), "assert true").unwrap();
-        std::fs::write(dir.join("eslatma.txt"), "fx emas").unwrap();
+        std::fs::write(dir.join("eslatma.txt"), "not fx").unwrap();
         std::fs::write(sub.join("c.fx"), "assert true").unwrap();
 
         let files = collect_test_files(&dir).unwrap();
@@ -3290,7 +3283,7 @@ assert "bo'sh bo'lmagan str ham truthy"
 
         // .fx bo'lmagan aniq fayl — discovery xatosi (Fluxon sifatida bajarilmaydi)
         let err = collect_test_files(&dir.join("eslatma.txt")).unwrap_err();
-        assert!(err.contains(".fx fayl emas"), "xabar: {}", err);
+        assert!(err.contains("is not a .fx file"), "message: {}", err);
 
         // mavjud bo'lmagan yo'l — xato
         assert!(collect_test_files(&dir.join("yoq")).is_err());
@@ -3306,7 +3299,7 @@ assert "bo'sh bo'lmagan str ham truthy"
         {
             std::os::unix::fs::symlink(&dir, dir.join("halqa")).unwrap();
             let with_loop = collect_test_files(&dir).unwrap();
-            assert_eq!(with_loop.len(), 3, "halqa fayl ro'yxatini o'zgartirmasin");
+            assert_eq!(with_loop.len(), 3, "a loop should not change the file list");
         }
 
         // o'qib bo'lmaydigan ichki katalog jim o'tkazilmasin — xato ko'tarilsin
@@ -3321,7 +3314,7 @@ assert "bo'sh bo'lmagan str ham truthy"
             std::fs::set_permissions(&yopiq, std::fs::Permissions::from_mode(0o000)).unwrap();
             if std::fs::read_dir(&yopiq).is_err() {
                 let err = collect_test_files(&dir).unwrap_err();
-                assert!(err.contains("o'qib bo'lmadi"), "xabar: {}", err);
+                assert!(err.contains("could not read"), "message: {}", err);
             }
             // cleanup uchun ruxsatni qaytaramiz
             std::fs::set_permissions(&yopiq, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3337,7 +3330,7 @@ assert "bo'sh bo'lmagan str ham truthy"
         let dir = std::env::temp_dir().join(format!("fluxon_test_run_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir); // oldingi muvaffaqiyatsiz run qoldig'i
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("01_yiqiladi.fx"), r#"assert false "ataylab""#).unwrap();
+        std::fs::write(dir.join("01_yiqiladi.fx"), r#"assert false "on purpose""#).unwrap();
         std::fs::write(dir.join("02_otadi.fx"), "assert (2 > 1)").unwrap();
 
         let files = collect_test_files(&dir).unwrap();
@@ -3355,14 +3348,14 @@ assert "bo'sh bo'lmagan str ham truthy"
         run(r#"
 s = :florist
 # interpolatsiya
-(("v/${s}") == "v/florist") | (fail "interpolatsiya: ${"v/${s}"}")
+(("v/${s}") == "v/florist") | (fail "interpolation: ${"v/${s}"}")
 # str.str
 ((str.str s) == "florist") | (fail "str.str: ${str.str s}")
 # `+` birlashtirish (ikkala tomon)
-(("p/" + s) == "p/florist") | (fail "chap + : ${"p/" + s}")
-((s + "/q") == "florist/q") | (fail "o'ng + : ${s + "/q"}")
+(("p/" + s) == "p/florist") | (fail "left + : ${"p/" + s}")
+((s + "/q") == "florist/q") | (fail "right + : ${s + "/q"}")
 # symbol literal va taqqoslash O'ZGARMAYDI
-(s == :florist) | (fail "symbol taqqoslash buzildi")
+(s == :florist) | (fail "symbol comparison broke")
 "#);
     }
 
@@ -3391,14 +3384,14 @@ use auth
 token = auth.jwt {sub:"u1" tenant:"t1" role:"admin"}
 # imzolangan JWT — 3 segment (header.payload.imzo)
 parts = str.split token "."
-(parts.len == 3) | (fail "JWT 3 segment emas: ${parts.len}")
+(parts.len == 3) | (fail "JWT 3 segment not: ${parts.len}")
 # verify -> payload map qaytaradi, da'volar saqlanadi
 claims = auth.verify token
-(claims.sub == "u1") | (fail "sub noto'g'ri: ${claims.sub}")
-(claims.tenant == "t1") | (fail "tenant noto'g'ri: ${claims.tenant}")
-(claims.role == "admin") | (fail "role noto'g'ri: ${claims.role}")
+(claims.sub == "u1") | (fail "sub wrong: ${claims.sub}")
+(claims.tenant == "t1") | (fail "tenant wrong: ${claims.tenant}")
+(claims.role == "admin") | (fail "role wrong: ${claims.role}")
 # iat/exp avtomatik qo'shilgan
-(claims.exp > claims.iat) | (fail "exp iat'dan katta bo'lishi kerak")
+(claims.exp > claims.iat) | (fail "exp should be greater than iat")
 "#);
     }
 
@@ -3414,10 +3407,10 @@ claims = auth.verify token
 token = auth.jwt {sub:"u1"}
 auth.verify (token + "x")"#,
         )
-        .expect_err("buzilgan token xato berishi kerak");
+        .expect_err("a tampered token should error");
         assert!(
-            err.contains("imzo"),
-            "kutilgan imzo xatosi, topildi: {}",
+            err.contains("signature"),
+            "expected signature error, got: {}",
             err
         );
     }
@@ -3431,10 +3424,10 @@ auth.verify (token + "x")"#,
             r#"use auth
 auth.verify "faqat.ikki""#,
         )
-        .expect_err("yaroqsiz shakl xato berishi kerak");
+        .expect_err("an invalid format should error");
         assert!(
-            err.contains("shakl") || err.contains("segment"),
-            "kutilgan shakl xatosi, topildi: {}",
+            err.contains("format") || err.contains("segment"),
+            "expected format error, got: {}",
             err
         );
     }
@@ -3452,10 +3445,10 @@ auth.verify "faqat.ikki""#,
 token = auth.jwt {sub:"u1" exp:nil}
 auth.verify token"#,
         )
-        .expect_err("exp'siz token rad etilishi kerak");
+        .expect_err("a token without exp should be rejected");
         assert!(
-            err.contains("exp") || err.contains("muddat"),
-            "kutilgan exp-yo'q xatosi, topildi: {}",
+            err.contains("exp") || err.contains("expir"),
+            "expected exp-missing error, got: {}",
             err
         );
     }
@@ -3469,13 +3462,13 @@ auth.verify token"#,
             r#"use auth
 token = auth.jwt {sub:"u1"}"#,
         )
-        .expect_err("$AUTH_SECRET yo'qligida xato kutiladi");
+        .expect_err("a missing $AUTH_SECRET should error");
         if let Some(v) = saved {
             unsafe { std::env::set_var("AUTH_SECRET", v) };
         }
         assert!(
             err.contains("AUTH_SECRET"),
-            "kutilgan AUTH_SECRET xatosi, topildi: {}",
+            "expected AUTH_SECRET error, got: {}",
             err
         );
     }
@@ -3487,22 +3480,21 @@ token = auth.jwt {sub:"u1"}"#,
 use auth
 h = auth.hash "user-parol"
 # argon2id PHC string
-(str.has h "argon2id") | (fail "argon2id hash emas: ${h}")
+(str.has h "argon2id") | (fail "argon2id hash not: ${h}")
 # to'g'ri parol -> true
-(auth.check "user-parol" h) | (fail "to'g'ri parol check false berdi")
+(auth.check "user-parol" h) | (fail "check returned false for correct password")
 # noto'g'ri parol -> false
-((auth.check "xato-parol" h) == false) | (fail "noto'g'ri parol check true berdi")
+((auth.check "wrong-password" h) == false) | (fail "check returned true for wrong password")
 "#);
     }
 
     #[test]
     fn auth_noma_lum_funksiya_xato() {
         // auth.foo -> dispatch'ga yetib "auth.foo yo'q" beradi (noma'lum nom EMAS).
-        let err =
-            run_source(r#"auth.foo "x""#).expect_err("noma'lum auth funksiyasi xato berishi kerak");
+        let err = run_source(r#"auth.foo "x""#).expect_err("an unknown auth function should error");
         assert!(
-            err.contains("auth.foo") && !err.contains("noma'lum nom"),
-            "auth dispatch'ga yetib funksiya xatosi berishi kerak, topildi: {}",
+            err.contains("auth.foo") && !err.contains("unknown name"),
+            "auth should reach dispatch and give a function error, got: {}",
             err
         );
     }
@@ -3522,15 +3514,15 @@ log "auth.jwt = ${auth.jwt}"
     #[test]
     fn interp_parse_xatosi_asl_qatorni_korsatadi() {
         let err = run_source("log \"a\"\nlog \"b\"\nlog \"c\"\nlog \"d\"\nlog \"${x +}\"\n")
-            .expect_err("buzuq interpolatsiya ifodasi xato berishi kerak");
+            .expect_err("a broken interpolation expression should error");
         assert!(
-            err.contains("5-qatorda"),
-            "xato asl qatorni (5) ko'rsatishi kerak, topildi: {}",
+            err.contains("on line 5"),
+            "error should point to the original line (5), got: {}",
             err
         );
         assert!(
-            err.contains("interpolatsiya ichida"),
-            "parse xatosi ham 'interpolatsiya ichida' prefiksini olishi kerak, topildi: {}",
+            err.contains("inside interpolation"),
+            "the parse error should also carry the 'inside interpolation' prefix, got: {}",
             err
         );
     }
@@ -3540,10 +3532,10 @@ log "auth.jwt = ${auth.jwt}"
     #[test]
     fn interp_lex_xatosi_asl_qatorni_korsatadi() {
         let err = run_source("log \"a\"\nlog \"b\"\nlog \"v=${\"x\ny\"}\"\n")
-            .expect_err("ko'p qatorli inner string xato berishi kerak");
+            .expect_err("a multi-line inner string should error");
         assert!(
-            err.contains("interpolatsiya ichida") && err.contains("3-qatorda"),
-            "lex xatosi asl qatorni (3) ko'rsatishi kerak, topildi: {}",
+            err.contains("inside interpolation") && err.contains("on line 3"),
+            "the lex error should point to the original line (3), got: {}",
             err
         );
     }
@@ -3554,7 +3546,7 @@ log "auth.jwt = ${auth.jwt}"
     fn interp_ichki_string_qavsni_yopmaydi() {
         run(r#"
 x = "v: ${"inner } brace"}"
-(x == "v: inner } brace") | (fail "ichki string qavs noto'g'ri ishlandi: ${x}")
+(x == "v: inner } brace") | (fail "inner string brace wrong ishlandi: ${x}")
 "#);
     }
 
@@ -3564,7 +3556,7 @@ x = "v: ${"inner } brace"}"
     fn interp_ichki_string_escape_tirnoq() {
         run(r#"
 x = "x=${"a\"}b"}"
-(x == "x=a\"}b") | (fail "escape qilingan tirnoq noto'g'ri ishlandi: ${x}")
+(x == "x=a\"}b") | (fail "escaped quote wrong ishlandi: ${x}")
 "#);
     }
 
@@ -3574,10 +3566,10 @@ x = "x=${"a\"}b"}"
     fn blok_satr_dedent_va_trailing_yoq() {
         run(r#"
 s = """
-  salom
-  dunyo
+  hello
+  world
   """
-(s == "salom\ndunyo") | (fail "blok satr dedent xato: ${s}")
+(s == "hello\nworld") | (fail "block string dedent error: ${s}")
 "#);
     }
 
@@ -3588,11 +3580,11 @@ s = """
 name = "fluxon"
 n = 2
 s = """
-  salom ${name}!
+  hello ${name}!
   n+1 = ${n + 1}
-  qisqa: $name
+  short: $name
   """
-(s == "salom fluxon!\nn+1 = 3\nqisqa: fluxon") | (fail "blok satr interpolatsiya xato: ${s}")
+(s == "hello fluxon!\nn+1 = 3\nshort: fluxon") | (fail "block string interpolation error: ${s}")
 "#);
     }
 
@@ -3606,7 +3598,7 @@ s = """
 
   {"json": true}
   """
-(s == "a \"quoted\"\n\n{\"json\": true}") | (fail "blok satr tirnoq/bo'sh qator xato: ${s}")
+(s == "a \"quoted\"\n\n{\"json\": true}") | (fail "block string quote/empty line error: ${s}")
 "#);
     }
 
@@ -3619,7 +3611,7 @@ s = """
   SELECT *
     FROM t
   """
-(s == "SELECT *\n  FROM t") | (fail "nisbiy chekinish saqlanishi kerak: ${s}")
+(s == "SELECT *\n  FROM t") | (fail "relative indentation should be preserved needed: ${s}")
 "#);
     }
 
@@ -3628,8 +3620,8 @@ s = """
     fn blok_satr_kontent_qatorida_yopilish() {
         run(r#"
 s = """
-  bitta qator"""
-(s == "bitta qator") | (fail "kontent qatorida yopilish xato: ${s}")
+  one line"""
+(s == "one line") | (fail "closing on a content line error: ${s}")
 "#);
     }
 
@@ -3640,10 +3632,10 @@ s = """
         run(r#"
 fn f x ->
   s = """
-    ichki ${x}
+    inner ${x}
     """
   ret s
-((f "a") == "ichki a") | (fail "blok satr fn ichida xato")
+((f "a") == "inner a") | (fail "block string inside fn error")
 "#);
     }
 
@@ -3652,9 +3644,9 @@ fn f x ->
     fn blok_satr_escape_uchta_tirnoq() {
         run(r#"
 s = """
-  uchta: \"""
+  three: \"""
   """
-(s == "uchta: \"\"\"") | (fail "escape tirnoq xato: ${s}")
+(s == "three: \"\"\"") | (fail "escape quote error: ${s}")
 "#);
     }
 
@@ -3663,18 +3655,18 @@ s = """
     #[test]
     fn blok_satr_ochilishda_matn_xato() {
         let err = run_source("s = \"\"\"matn\nx\"\"\"\n")
-            .expect_err("ochuvchi qatordagi matn xato berishi kerak");
-        assert!(err.contains("yangi qatordan"), "kutilmagan xato: {}", err);
+            .expect_err("text on the opening line should error");
+        assert!(err.contains("a new line"), "unexpected error: {}", err);
     }
 
     // Issue #130: yopilmagan blok satr aniq xato beradi (ochilgan qator bilan).
     #[test]
     fn blok_satr_yopilmagan_xato() {
-        let err =
-            run_source("s = \"\"\"\n  abc\n").expect_err("yopilmagan blok satr xato berishi kerak");
+        let err = run_source("s = \"\"\"\n  abc\n")
+            .expect_err("an unterminated block string should error");
         assert!(
-            err.contains("yopilmagan blok satr") && err.contains("1-qatorda"),
-            "kutilmagan xato: {}",
+            err.contains("unterminated block string") && err.contains("on line 1"),
+            "unexpected error: {}",
             err
         );
     }
@@ -3685,13 +3677,13 @@ s = """
     fn crypto_battery_fluxon_kodidan() {
         run(r#"
 h = crypto.sha256 "abc"
-(h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") | (fail "sha256 buzildi: ${h}")
+(h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") | (fail "sha256 broke: ${h}")
 sig = crypto.hmac "Jefe" "what do ya want for nothing?"
-(sig == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") | (fail "hmac buzildi: ${sig}")
-((crypto.b64d (crypto.b64 "salom dunyo")) == "salom dunyo") | (fail "b64 roundtrip buzildi")
-((crypto.hex "abz") == "61627a") | (fail "hex buzildi")
+(sig == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") | (fail "hmac broke: ${sig}")
+((crypto.b64d (crypto.b64 "hello world")) == "hello world") | (fail "b64 roundtrip broke")
+((crypto.hex "abz") == "61627a") | (fail "hex broke")
 u = crypto.uuid
-((str.len u) == 36) | (fail "uuid uzunligi buzildi: ${u}")
+((str.len u) == 36) | (fail "uuid uzunligi broke: ${u}")
 (u != crypto.uuid) | (fail "uuid takrorlandi")
 "#);
     }
@@ -3699,9 +3691,9 @@ u = crypto.uuid
     // Issue #131: crypto.b64d noto'g'ri kirishda aniq xato (panic emas).
     #[test]
     fn crypto_b64d_xato_beradi() {
-        let err = run_source("crypto.b64d \"bu base64 emas!!!\"")
-            .expect_err("yaroqsiz base64 xato berishi kerak");
-        assert!(err.contains("base64"), "kutilmagan xato: {}", err);
+        let err = run_source("crypto.b64d \"this is not base64!!!\"")
+            .expect_err("invalid base64 should error");
+        assert!(err.contains("base64"), "unexpected error: {}", err);
     }
 
     // Issue #131 (review): foydalanuvchi `crypto` nomini e'lon qilgan bo'lsa
@@ -3711,8 +3703,8 @@ u = crypto.uuid
     fn crypto_lokal_nom_battery_dan_ustun() {
         run(r#"
 crypto = {sha256: \s -> "meniki ${s}" uuid: 7}
-((crypto.sha256 "x") == "meniki x") | (fail "lokal crypto.sha256 ustun bo'lmadi")
-((crypto.uuid) == 7) | (fail "lokal crypto.uuid ustun bo'lmadi")
+((crypto.sha256 "x") == "meniki x") | (fail "lokal crypto.sha256 column did not happen")
+((crypto.uuid) == 7) | (fail "lokal crypto.uuid column did not happen")
 "#);
     }
 
@@ -3720,14 +3712,14 @@ crypto = {sha256: \s -> "meniki ${s}" uuid: 7}
     #[test]
     fn bytes_turi_asoslari() {
         run(r#"
-b = bytes.of "salom"
-((bytes.len b) == 5) | (fail "bytes.len buzildi")
-((bytes.str b) == "salom") | (fail "bytes.str buzildi")
-(b == (bytes.of "salom")) | (fail "bytes tenglik buzildi")
-(b != (bytes.of "boshqa")) | (fail "bytes notenglik buzildi")
-qism = bytes.slice b 0 2
-((bytes.str qism) == "sa") | (fail "bytes.slice buzildi")
-("${b}" == "<bytes 5>") | (fail "bytes interpolatsiya ko'rinishi buzildi: ${b}")
+b = bytes.of "hello"
+((bytes.len b) == 5) | (fail "bytes.len broke")
+((bytes.str b) == "hello") | (fail "bytes.str broke")
+(b == (bytes.of "hello")) | (fail "bytes equality broke")
+(b != (bytes.of "other")) | (fail "bytes inequality broke")
+part = bytes.slice b 0 2
+((bytes.str part) == "he") | (fail "bytes.slice broke")
+("${b}" == "<bytes 5>") | (fail "bytes interpolation representation broke: ${b}")
 "#);
     }
 
@@ -3737,8 +3729,8 @@ qism = bytes.slice b 0 2
     fn bytes_len_bayt_str_len_belgi() {
         run(r#"
 s = "o’zbek"
-((str.len s) == 6) | (fail "str.len belgi sanashi kerak")
-((bytes.len (bytes.of s)) == 8) | (fail "bytes.len bayt sanashi kerak")
+((str.len s) == 6) | (fail "str.len belgi sanashi needed")
+((bytes.len (bytes.of s)) == 8) | (fail "bytes.len bayt sanashi needed")
 "#);
     }
 
@@ -3748,8 +3740,8 @@ s = "o’zbek"
     fn bytes_crypto_integratsiya() {
         run(r#"
 data = crypto.b64db "AP/+iA=="
-((bytes.len data) == 4) | (fail "b64db uzunlik buzildi")
-((crypto.b64 data) == "AP/+iA==") | (fail "bytes b64 aylanasi buzildi")
+((bytes.len data) == 4) | (fail "b64db uzunlik broke")
+((crypto.b64 data) == "AP/+iA==") | (fail "bytes b64 aylanasi broke")
 ((crypto.sha256 (bytes.of "abc")) == (crypto.sha256 "abc")) | (fail "sha256 bytes/str farq qildi")
 "#);
     }
@@ -3758,8 +3750,8 @@ data = crypto.b64db "AP/+iA=="
     #[test]
     fn bytes_str_yaroqsiz_utf8_xato() {
         let err = run_source("bytes.str (crypto.b64db \"//4=\")")
-            .expect_err("yaroqsiz UTF-8 xato berishi kerak");
-        assert!(err.contains("UTF-8"), "kutilmagan xato: {}", err);
+            .expect_err("invalid UTF-8 should error");
+        assert!(err.contains("UTF-8"), "unexpected error: {}", err);
     }
 
     // Issue #132: fs bilan ikkilik aylana — bytes yoziladi, fs.readb aynan
@@ -3770,10 +3762,10 @@ data = crypto.b64db "AP/+iA=="
 yol = "/tmp/fluxon_bytes_it_" + (rand.str 10) + ".bin"
 fs.write yol (crypto.b64db "AP/+iA==")
 b = fs.readb yol
-((bytes.len b) == 4) | (fail "fs.readb uzunlik buzildi")
-((crypto.b64 b) == "AP/+iA==") | (fail "fs ikkilik aylanasi buzildi")
+((bytes.len b) == 4) | (fail "fs.readb uzunlik broke")
+((crypto.b64 b) == "AP/+iA==") | (fail "fs ikkilik aylanasi broke")
 fs.del yol
-((fs.readb yol) == nil) | (fail "o'chirilgan fayl nil bo'lishi kerak")
+((fs.readb yol) == nil) | (fail "deleted fayl nil should be")
 "#);
     }
 
@@ -3782,7 +3774,7 @@ fs.del yol
     fn bytes_json_enc_base64() {
         run(r#"
 b = crypto.b64db "AP/+iA=="
-((json.enc {fayl:b}) == "{\"fayl\":\"AP/+iA==\"}") | (fail "json.enc bytes buzildi")
+((json.enc {fayl:b}) == "{\"fayl\":\"AP/+iA==\"}") | (fail "json.enc bytes broke")
 "#);
     }
 
@@ -3809,8 +3801,8 @@ b = crypto.b64db "AP/+iA=="
         assert_eq!(repl_chunk(&interp, "x * 3").unwrap().repr(), "30");
         // String qiymat repr'da tirnoq bilan ko'rsatiladi
         assert_eq!(
-            repl_chunk(&interp, r#""salom""#).unwrap().repr(),
-            "\"salom\""
+            repl_chunk(&interp, r#""hello""#).unwrap().repr(),
+            "\"hello\""
         );
     }
 
@@ -3840,7 +3832,7 @@ b = crypto.b64db "AP/+iA=="
         // Bir qatorli ifoda — blok emas (parse o'tishi bilan darhol eval bo'ladi).
         assert!(!is_multiline_block("1 + 2"));
         // if + indentatsiyali body — blok (else/davom kelishi mumkin, kutiladi).
-        assert!(is_multiline_block("if x > 5\n  \"katta\""));
+        assert!(is_multiline_block("if x > 5\n  \"big\""));
         // tab bilan chekinish ham blok hisoblanadi.
         assert!(is_multiline_block("fn f\n\tret 1"));
         // Bo'sh bufer — blok emas.

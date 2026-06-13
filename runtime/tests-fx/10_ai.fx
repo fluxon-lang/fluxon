@@ -1,10 +1,10 @@
-# 10 — ai battery (LLM primitiv). TARMOQSIZ test: haqiqiy API chaqirmaymiz
-# (token sarflamaslik + CI'da kalit yo'q). Faqat shu narsalarni sinaymiz:
-#   - `ai` modul nomi o'zgaruvchi bilan SHADOW qilinsa, oddiy map sifatida o'qiladi
-#   - tool-loop'ning FLUXON TOMONI (reg.call bilan tool bajarish) ishlaydi
+# 10 - ai battery (LLM primitive). NETWORK-FREE test: we do not make real API calls
+# (saves tokens + no key in CI). We only test these:
+#   - if the `ai` module name is SHADOWED by a variable, it reads as a plain map
+#   - the FLUXON SIDE of the tool-loop (running a tool via reg.call) works
 #
-# ai.ask/ai.json/ai.run ning haqiqiy chaqiruvi $AI_KEY talab qiladi va tarmoqqa
-# chiqadi — uni examples/ai_demo.fx qo'lda sinaydi (kalit bilan).
+# A real call to ai.ask/ai.json/ai.run requires $AI_KEY and goes over the network -
+# that is tested manually by examples/ai_demo.fx (with a key).
 
 use reg
 
@@ -14,59 +14,59 @@ fn bad label
   log "FAIL ${label}"
   fails <- fails + 1
 
-# --- shadowing: `ai` o'zgaruvchi bo'lsa, modul emas ---
-# ai.ask "..." (argumentli) eval_call'da lookup tekshiradi: o'zgaruvchi bo'lsa
-# dispatch'ga ketmaydi. Argumentsiz ai.ask esa Field — to'g'ridan map'dan o'qiladi.
-ai = {ask:"shadowed" model:"yo'q"}
+# --- shadowing: if `ai` is a variable, it is not the module ---
+# ai.ask "..." (with args) checks lookup in eval_call: if it is a variable it does
+# not dispatch. ai.ask without args is a Field - read straight from the map.
+ai = {ask:"shadowed" model:"none"}
 if ai.ask == "shadowed"
-  ok "ai shadow: ai.ask map maydonidan o'qildi"
+  ok "ai shadow: ai.ask read from map field"
 else
-  bad "ai shadow buzildi got=${ai.ask}"
+  bad "ai shadow broke got=${ai.ask}"
 
-if ai.model == "yo'q"
+if ai.model == "none"
   ok "ai shadow: ai.model = ${ai.model}"
 else
   bad "ai.model got=${ai.model}"
 
-# --- tool-loop FLUXON tomoni: ai.run :call qadamini simulyatsiya ---
-# ai.run model bilan {kind::call tool args id} qaytaradi. Loop tool'ni reg.call
-# bilan bajarib, natijani msgs'ga qo'shadi. Bu yerda model javobini QO'LDA yasab,
-# reg.call + msgs.push mantig'ini sinaymiz (tarmoqsiz).
+# --- tool-loop FLUXON side: simulate the ai.run :call step ---
+# ai.run with a model returns {kind::call tool args id}. The loop runs the tool via
+# reg.call and appends the result to msgs. Here we craft the model response BY HAND
+# and test the reg.call + msgs.push logic (network-free).
 
-reg.add "ob_havo" \args -> "${args.shahar}da 25 daraja"
+reg.add "weather" \args -> "${args.city} is 25 degrees"
 
-# Model "tool chaqirdi" deb faraz qilamiz (ai.run shunday map qaytaradi):
-qadam = {kind::call tool:"ob_havo" args:{shahar:"Toshkent"} id:"toolu_1"}
+# Assume the model "called a tool" (ai.run returns this kind of map):
+step = {kind::call tool:"weather" args:{city:"Tashkent"} id:"toolu_1"}
 
-# natija'ni tashqarida e'lon qilamiz — `=` if blokida shaffof (tashqini yangilaydi),
-# lekin oldindan mavjud bo'lsa pastda ham ko'rinadi.
-natija <- ""
-if qadam.kind == :call
-  natija <- reg.call qadam.tool qadam.args
-  if natija == "Toshkentda 25 daraja"
-    ok "tool-loop: reg.call qadam natijasi = ${natija}"
+# we declare result outside - `=` is transparent in an if block (updates the outer),
+# but if it already exists it is also visible below.
+result <- ""
+if step.kind == :call
+  result <- reg.call step.tool step.args
+  if result == "Tashkent is 25 degrees"
+    ok "tool-loop: reg.call step result = ${result}"
   else
-    bad "tool-loop natija got=${natija}"
+    bad "tool-loop result got=${result}"
 else
-  bad "qadam.kind != :call"
+  bad "step.kind != :call"
 
-# msgs'ga tool natijasini qo'shish (suhbat tarixini o'stirish)
-msgs <- [{role::user content:"ob-havo?"}]
-msgs <- msgs.push {role::tool id:qadam.id content:natija}
+# append the tool result to msgs (grow the conversation history)
+msgs <- [{role::user content:"weather?"}]
+msgs <- msgs.push {role::tool id:step.id content:result}
 if msgs.len == 2 & msgs.1.role == :tool
-  ok "tool-loop: msgs tarixi o'sdi (${msgs.len} xabar)"
+  ok "tool-loop: msgs history grew (${msgs.len} messages)"
 else
-  bad "msgs tarix got len=${msgs.len}"
+  bad "msgs history got len=${msgs.len}"
 
-# --- final qadam shakli ---
-final = {kind::final text:"javob tayyor"}
-if final.kind == :final & final.text == "javob tayyor"
-  ok "ai.run :final shakli to'g'ri"
+# --- final step shape ---
+final = {kind::final text:"answer ready"}
+if final.kind == :final & final.text == "answer ready"
+  ok "ai.run :final shape is correct"
 else
-  bad ":final shakli buzildi"
+  bad ":final shape broke"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 10_ai: HAMMASI O'TDI ==="
+  log "=== 10_ai: ALL PASSED ==="
 else
-  log "=== 10_ai: ${fails} TEST YIQILDI ==="
+  log "=== 10_ai: ${fails} TESTS FAILED ==="

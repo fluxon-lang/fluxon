@@ -1,19 +1,19 @@
-// HTTP middleware + request-scoped context end-to-end testi (issue #67, #68).
+// HTTP middleware + request-scoped context end-to-end test (issue #67, #68).
 //
-// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP so'rovlar bilan
-// to'liq oqimni tekshiramiz:
-//   - http.use \req -> ...      global middleware (barcha route'larga)
-//   - http.before "/api/*" ...  yo'l prefiks bo'yicha middleware
-//   - middleware `fail` qaytarsa zanjir to'xtaydi, javob darrov qaytadi (401)
-//   - middleware `req.ctx <- {...}` yozadi, handler `req.ctx` orqali o'qiydi
+// We run the `fluxon` binary as a subprocess and check the full flow with real
+// HTTP requests:
+//   - http.use \req -> ...      global middleware (for all routes)
+//   - http.before "/api/*" ...  middleware by path prefix
+//   - if middleware returns `fail`, the chain stops and the response returns immediately (401)
+//   - middleware writes `req.ctx <- {...}`, the handler reads it via `req.ctx`
 //
-// Pattern ws_e2e.rs dan: vaqtinchalik .fx fayl + subprocess + raw HTTP/1.1.
+// Pattern from ws_e2e.rs: temporary .fx file + subprocess + raw HTTP/1.1.
 
 use std::io::Write;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-// Skriptni vaqtinchalik faylga yozib, fluxon serverini ishga tushiradi.
+// Writes the script to a temporary file and starts the fluxon server.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("fluxon_mw_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
@@ -29,7 +29,7 @@ fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     (child, path)
 }
 
-// Port LISTEN bo'lguncha kutadi (server boot). Maks ~3s.
+// Waits until the port is LISTENing (server boot). Max ~3s.
 async fn wait_port(port: u16) {
     for _ in 0..60 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -43,7 +43,7 @@ async fn wait_port(port: u16) {
     panic!("port {} ochilmadi", port);
 }
 
-// Child drop bo'lganda jarayonni o'ldirish guard'i.
+// Guard that kills the process when Child is dropped.
 struct Killer(Child);
 impl Drop for Killer {
     fn drop(&mut self) {
@@ -52,8 +52,8 @@ impl Drop for Killer {
     }
 }
 
-// Raw HTTP/1.1 so'rov. Auth header ixtiyoriy. To'liq javob matnini qaytaradi
-// (status qatori + header + body) — test status va body'ni undan qidiradi.
+// Raw HTTP/1.1 request. The Auth header is optional. Returns the full response
+// text (status line + headers + body) -- the test searches it for status and body.
 async fn http_request(
     port: u16,
     method: &str,
@@ -84,16 +84,16 @@ async fn http_request(
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// Auth middleware: Authorization header'ni tekshiradi. Yo'q bo'lsa `fail 401`
-// (zanjir to'xtaydi). Bor bo'lsa `req.ctx <- {tenant_id role}` yozadi — handler
-// shu kontekstni qayta hisoblamasdan o'qiydi (issue #68). http.before bilan
-// faqat /api/* yo'llariga ulanadi (issue #67). /health himoyalanmagan.
+// Auth middleware: checks the Authorization header. If absent, `fail 401`
+// (the chain stops). If present, writes `req.ctx <- {tenant_id role}` -- the
+// handler reads this context without recomputing it (issue #68). With http.before
+// it only attaches to /api/* paths (issue #67). /health is unprotected.
 const APP_SCRIPT: &str = r#"
 http.before "/api/*" \req ->
   token = req.headers.authorization
   if !token
-    fail 401 "auth kerak"
-  # token "Bearer t5-admin" ko'rinishida -> tenant/role ajratamiz (soddalashtirilgan)
+    fail 401 "auth required"
+  # token in the form "Bearer t5-admin" -> we extract tenant/role (simplified)
   req.ctx <- {tenant_id: 5 role: "admin" token: token}
 
 http.on :get "/health" \req ->
@@ -114,17 +114,17 @@ async fn middleware_auth_rad_etadi_401() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // /api/me ga auth'siz so'rov — http.before middleware fail 401 qaytaradi,
-    // handler umuman chaqirilmaydi.
+    // Request to /api/me without auth -- the http.before middleware returns fail 401,
+    // the handler is not called at all.
     let resp = http_request(port, "GET", "/api/me", None, "").await;
     assert!(
         resp.contains("401"),
-        "auth'siz /api/me 401 kutilgan: {}",
+        "/api/me without auth expected 401: {}",
         resp
     );
     assert!(
-        resp.contains("auth kerak"),
-        "fail xabari kutilgan: {}",
+        resp.contains("auth required"),
+        "expected fail message: {}",
         resp
     );
 
@@ -139,18 +139,18 @@ async fn middleware_ctx_handlerga_yetadi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Auth bilan so'rov — middleware req.ctx yozadi, handler o'qiydi.
+    // Request with auth -- middleware writes req.ctx, the handler reads it.
     let resp = http_request(port, "GET", "/api/me", Some("Bearer t5"), "").await;
-    assert!(resp.contains("200"), "auth bilan 200 kutilgan: {}", resp);
-    // Handler middleware qo'ygan ctx'dan tenant/role qaytaradi.
+    assert!(resp.contains("200"), "with auth expected 200: {}", resp);
+    // The handler returns tenant/role from the ctx set by the middleware.
     assert!(
         resp.contains("\"tenant\":5"),
-        "ctx.tenant_id handler'ga yetishi kerak: {}",
+        "ctx.tenant_id should reach the handler: {}",
         resp
     );
     assert!(
         resp.contains("\"role\":\"admin\""),
-        "ctx.role handler'ga yetishi kerak: {}",
+        "ctx.role should reach the handler: {}",
         resp
     );
 
@@ -165,11 +165,11 @@ async fn before_prefiks_himoyalanmagan_yulni_otkazadi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // /health "/api/*" ga mos EMAS — auth middleware ishlamaydi, auth'siz ham 200.
+    // /health does NOT match "/api/*" -- the auth middleware does not run, 200 even without auth.
     let resp = http_request(port, "GET", "/health", None, "").await;
     assert!(
         resp.contains("200"),
-        "/health auth'siz ham 200 kutilgan: {}",
+        "/health expected 200 even without auth: {}",
         resp
     );
     assert!(resp.contains("\"ok\":true"), "/health javobi: {}", resp);
@@ -177,14 +177,14 @@ async fn before_prefiks_himoyalanmagan_yulni_otkazadi() {
     let _ = std::fs::remove_file(&path);
 }
 
-// Middleware `fail` o'rniga `rep` bilan rad etsa ham zanjir to'xtashi kerak
-// (Codex P1). `rep` muvaffaqiyatli {__resp:...} map qaytaradi (Flow emas), shuning
-// uchun handle_request uni alohida aniqlaydi. Bu ishlamasa, handler baribir
-// ishlab o'z javobini yuborardi (auth chetlab o'tilardi).
+// Even if the middleware rejects with `rep` instead of `fail`, the chain must
+// stop (Codex P1). `rep` returns a successful {__resp:...} map (not a Flow), so
+// handle_request detects it specially. If this did not work, the handler would
+// still run and send its own response (auth would be bypassed).
 const REP_GUARD_SCRIPT: &str = r#"
 http.use \req ->
   if req.path == "/secret"
-    rep 403 {error: "taqiqlangan"}
+    rep 403 {error: "forbidden"}
 
 http.on :get "/secret" \req ->
   rep 200 {leaked: true}
@@ -200,31 +200,31 @@ async fn middleware_rep_zanjirni_toxtatadi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Middleware rep 403 qaytaradi — handler (rep 200 leaked) ISHLAMASLIGI kerak.
+    // The middleware returns rep 403 -- the handler (rep 200 leaked) must NOT run.
     let resp = http_request(port, "GET", "/secret", None, "").await;
     assert!(
         resp.contains("403"),
-        "middleware rep 403 kutilgan: {}",
+        "middleware expected rep 403: {}",
         resp
     );
     assert!(
-        resp.contains("taqiqlangan"),
-        "middleware javobi kutilgan: {}",
+        resp.contains("forbidden"),
+        "expected middleware response: {}",
         resp
     );
     assert!(
         !resp.contains("leaked"),
-        "handler ISHLAMASLIGI kerak edi (rep zanjirni to'xtatmadi): {}",
+        "handler should NOT have run (rep did not stop the chain): {}",
         resp
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// Middleware'lar DEKLARATSIYA TARTIBIDA ishlaydi — use va before aralashganda ham
-// (Codex P2). Bu yerda before AVVAL req.ctx ga yozadi, keyin e'lon qilingan use
-// uni o'qib /api/check javobiga qo'shadi. Agar barcha use'lar before'dan oldin
-// ketsa (tartib buzilsa), use bo'sh ctx ko'rardi.
+// Middleware runs in DECLARATION ORDER -- even when use and before are mixed
+// (Codex P2). Here before writes req.ctx FIRST, then the use declared afterward
+// reads it and adds it to the /api/check response. If all use's ran before the
+// before's (order broken), use would see an empty ctx.
 const ORDER_SCRIPT: &str = r#"
 http.before "/api/*" \req ->
   req.ctx <- {step: "before"}
@@ -248,17 +248,17 @@ async fn middleware_deklaratsiya_tartibi_saqlanadi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // before (avval) ctx yozadi -> use (keyin) uni o'qiydi -> handler ikkalasini ko'radi.
+    // before (first) writes ctx -> use (after) reads it -> the handler sees both.
     let resp = http_request(port, "GET", "/api/check", None, "").await;
-    assert!(resp.contains("200"), "200 kutilgan: {}", resp);
+    assert!(resp.contains("200"), "expected 200: {}", resp);
     assert!(
         resp.contains("\"step\":\"before\""),
-        "before ctx use'dan oldin yozishi kerak: {}",
+        "before should write ctx before use: {}",
         resp
     );
     assert!(
         resp.contains("\"seen\":true"),
-        "use before'dan keyin ishlab ctx'ni ko'rishi kerak: {}",
+        "use should run after before and see ctx: {}",
         resp
     );
 

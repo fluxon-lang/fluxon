@@ -1,15 +1,15 @@
-// Fluxon parser — tokenlardan AST quradi.
+// Fluxon parser — builds an AST from tokens.
 //
-// Ikki qatlam:
-//   1) Statement/blok darajasi (recursive descent): Indent/Dedent/Newline
-//      tokenlariga tayanadi.
-//   2) Expression darajasi (precedence climbing): operatorlar ustuvorligi.
+// Two layers:
+//   1) Statement/block level (recursive descent): relies on Indent/Dedent/Newline
+//      tokens.
+//   2) Expression level (precedence climbing): operator precedence.
 //
-// Eng nozik joy — QAVSSIZ CHAQIRISH. Fluxon'da `f a b` = chaqiruv, `a + b` =
-// operator. Yechim: eng yuqori ("application") darajada ketma-ket "atom"larni
-// yig'amiz; agar bittadan ortiq atom yonma-yon kelsa, birinchisi callee,
-// qolganlari argument. Atom — operator yoki blok-chegara tokeniga duch
-// kelguncha o'qiladigan eng kichik to'liq ifoda.
+// The trickiest part is PARENTHESIS-FREE CALLS. In Fluxon `f a b` = a call,
+// `a + b` = an operator. The solution: at the top ("application") level we
+// collect consecutive "atoms"; if more than one atom sits side by side, the
+// first is the callee and the rest are arguments. An atom is the smallest
+// complete expression read until an operator or a block-boundary token is hit.
 
 use crate::ast::*;
 use crate::token::{StrPart, Tok, Token};
@@ -17,26 +17,26 @@ use crate::token::{StrPart, Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
-    // List/map literal ichida qavssiz (juxtaposition) chaqiruv ishlatilmaydi —
-    // u yerda har element atom yoki qavsli chaqiruv. Bu bayroq shu kontekstda
-    // application bosqichini o'chiradi, shunda `{a:f b:g}` da `f` `b`ni argument
-    // sifatida yutmaydi. Chaqiruv kerak bo'lsa: `{a:(f x)}`.
+    // Inside a list/map literal parenthesis-free (juxtaposition) calls are not
+    // used — there each element is an atom or a parenthesized call. This flag
+    // disables the application stage in that context, so in `{a:f b:g}` `f` does
+    // not swallow `b` as an argument. For a call use: `{a:(f x)}`.
     no_app: bool,
-    // Rekursiv descent chuqurligi (ichma-ich ifoda/blok). Limitsiz chuqur
-    // nesting (~2000 qavs) native stack'ni to'ldirib process'ni ABORT qiladi —
-    // limit undan oldin aniq parse xatosi qaytaradi (issue #90).
+    // Recursive-descent depth (nested expressions/blocks). Unbounded deep nesting
+    // (~2000 parens) would fill the native stack and ABORT the process — the
+    // limit returns a clean parse error before that (issue #90).
     depth: usize,
 }
 
-// Ichma-ich ifoda/blok uchun maksimal chuqurlik. Real kod ~o'nlab darajadan
-// oshmaydi; 256 — xavfsiz zaxira bilan. Native stack `stacker::maybe_grow`
-// bilan segmentlab o'sadi (interp'dagi kabi), shuning uchun haqiqiy chegara
-// shu hisoblagich — 2MB'lik thread'da ham abort emas, aniq parse xatosi.
+// Maximum depth for nested expressions/blocks. Real code does not exceed a few
+// dozen levels; 256 leaves a safe margin. The native stack grows in segments via
+// `stacker::maybe_grow` (as in interp), so the real limit is this counter — even
+// on a 2MB thread we get a clean parse error rather than an abort.
 const MAX_NEST_DEPTH: usize = 256;
 
-// stacker parametrlari: red zone bir nesting darajasi (parse_expr ->
-// parse_binary -> ... -> parse_primary zanjiri) ishlatadigan native stack'dan
-// kattaroq; segment hajmi bir necha yuz darajani sig'diradi.
+// stacker parameters: the red zone is larger than the native stack used by one
+// nesting level (the parse_expr -> parse_binary -> ... -> parse_primary chain);
+// the segment size fits a few hundred levels.
 const STACK_RED_ZONE: usize = 64 * 1024;
 const STACK_GROW_SIZE: usize = 1024 * 1024;
 
@@ -53,7 +53,7 @@ pub fn parse(toks: Vec<Token>) -> ParseResult<Program> {
 }
 
 impl Parser {
-    // --- token oqimi yordamchilari ---
+    // --- token stream helpers ---
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -66,7 +66,7 @@ impl Parser {
     fn line(&self) -> usize {
         self.toks[self.pos].line
     }
-    // Joriy token oldidan bo'shliq bormi (grammatik ajratish uchun).
+    // Whether whitespace precedes the current token (for grammatical separation).
     fn spaced(&self) -> bool {
         self.toks[self.pos].spaced
     }
@@ -94,21 +94,21 @@ impl Parser {
             Ok(())
         } else {
             Err(format!(
-                "{}-qatorda {} kutilgan edi, lekin {:?} topildi",
-                self.line(),
+                "expected {} on line {}, but found {:?}",
                 what,
+                self.line(),
                 self.peek()
             ))
         }
     }
-    // Statement chegarasidagi newline'larni yutadi.
+    // Consumes the newlines at a statement boundary.
     fn skip_newlines(&mut self) {
         while self.check(&Tok::Newline) {
             self.advance();
         }
     }
 
-    // --- dastur ---
+    // --- program ---
     fn parse_program(&mut self) -> ParseResult<Program> {
         let mut stmts = Vec::new();
         self.skip_newlines();
@@ -119,13 +119,13 @@ impl Parser {
         Ok(stmts)
     }
 
-    // Chuqurlik hisobchisini oshiradi; limitdan oshsa aniq parse xatosi.
-    // Chaqiruvchi muvaffaqiyat/xatodan qat'i nazar `self.depth -= 1` qilishi
-    // shart (parse_expr/parse_block shunday o'raydi).
+    // Increments the depth counter; a clean parse error if the limit is exceeded.
+    // The caller must do `self.depth -= 1` regardless of success/error
+    // (parse_expr/parse_block wrap it that way).
     fn enter_depth(&mut self) -> ParseResult<()> {
         if self.depth >= MAX_NEST_DEPTH {
             return Err(format!(
-                "{}-qatorda ifoda/blok juda chuqur ichma-ich ({} darajadan oshdi) — soddalashtiring",
+                "expression/block nested too deep on line {} (exceeded {} levels) — simplify it",
                 self.line(),
                 MAX_NEST_DEPTH
             ));
@@ -134,8 +134,8 @@ impl Parser {
         Ok(())
     }
 
-    // Indent...Dedent bilan o'ralgan blok. Chaqiruvchi avval Newline'ni yutib,
-    // Indent kelishini ta'minlaydi.
+    // A block wrapped in Indent...Dedent. The caller first consumes the Newline,
+    // ensuring an Indent follows.
     fn parse_block(&mut self) -> ParseResult<Vec<Stmt>> {
         self.enter_depth()?;
         let r = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.parse_block_inner());
@@ -144,30 +144,30 @@ impl Parser {
     }
 
     fn parse_block_inner(&mut self) -> ParseResult<Vec<Stmt>> {
-        self.expect(&Tok::Indent, "blok (chekinish)")?;
+        self.expect(&Tok::Indent, "block (indentation)")?;
         let mut stmts = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
             stmts.push(self.parse_stmt()?);
             self.skip_newlines();
         }
-        self.expect(&Tok::Dedent, "blok oxiri")?;
+        self.expect(&Tok::Dedent, "end of block")?;
         Ok(stmts)
     }
 
-    // `->` dan keyingi tana: bir qatorli ifoda YOKI yangi qatordagi blok.
+    // The body after `->`: a single-line expression OR a block on a new line.
     fn parse_arrow_body(&mut self) -> ParseResult<Vec<Stmt>> {
         if self.check(&Tok::Newline) {
             self.advance();
             self.parse_block()
         } else {
-            // bir qatorli: bitta ifoda
+            // single-line: one expression
             let e = self.parse_expr()?;
             Ok(vec![Stmt::Expr(e)])
         }
     }
 
-    // --- statementlar ---
+    // --- statements ---
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         match self.peek() {
             Tok::Fn => self.parse_fn(false),
@@ -197,18 +197,18 @@ impl Parser {
             Tok::Tbl => self.parse_tbl(),
             Tok::Ident(_) => self.parse_ident_stmt(),
             _ => {
-                // boshqa har qanday ifoda statement
+                // any other expression statement
                 let e = self.parse_expr()?;
                 Ok(Stmt::Expr(e))
             }
         }
     }
 
-    // Ident bilan boshlangan: bind (=), assign (<-), yoki chaqiruv ifodasi.
+    // Started by an ident: a bind (=), an assign (<-), or a call expression.
     fn parse_ident_stmt(&mut self) -> ParseResult<Stmt> {
-        // `name = ...` — bind faqat oddiy ident'ga ruxsat etiladi (spec: `=`
-        // immutable yangi nom). Buni `peek2` orqali oldindan aniqlaymiz, shunda
-        // `name` chaqiruv argumentiga (`f name`) aralashmaydi.
+        // `name = ...` — a bind is only allowed on a plain ident (spec: `=` is an
+        // immutable new name). We detect this up front via `peek2` so that `name`
+        // is not mistaken for a call argument (`f name`).
         if let Tok::Ident(name) = self.peek().clone()
             && matches!(self.peek2(), Tok::Eq)
         {
@@ -217,10 +217,10 @@ impl Parser {
             let value = self.parse_expr()?;
             return Ok(Stmt::Bind { name, value });
         }
-        // Aks holda chap tomonni ifoda sifatida o'qiymiz. `<-` kelsa, bu
-        // assign (`x <- v` yoki `req.ctx <- v`); aks holda oddiy ifoda statement.
-        // `<-` statement-level token (operator emas), shuning uchun parse_expr
-        // undan oldin to'xtaydi — chap ifoda to'liq olinadi.
+        // Otherwise we read the left side as an expression. If `<-` follows, this
+        // is an assign (`x <- v` or `req.ctx <- v`); otherwise a plain expression
+        // statement. `<-` is a statement-level token (not an operator), so
+        // parse_expr stops before it — the left expression is read in full.
         let lhs = self.parse_expr()?;
         if self.eat(&Tok::Assign) {
             let value = self.parse_expr()?;
@@ -234,20 +234,20 @@ impl Parser {
 
     fn parse_fn(&mut self, exported: bool) -> ParseResult<Stmt> {
         self.advance(); // fn
-        let name = self.expect_ident("funksiya nomi")?;
+        let name = self.expect_ident("function name")?;
         let mut params = Vec::new();
         while let Tok::Ident(_) = self.peek() {
-            let p = self.expect_ident("parametr")?;
+            let p = self.expect_ident("parameter")?;
             if params.contains(&p) {
                 return Err(format!(
-                    "'{}' funksiyasida takror parametr nomi: '{}'",
+                    "duplicate parameter name in function '{}': '{}'",
                     name, p
                 ));
             }
             params.push(p);
         }
         if self.eat(&Tok::Arrow) {
-            // bir qatorli: fn double x -> x * 2
+            // single-line: fn double x -> x * 2
             let body = self.parse_arrow_body()?;
             Ok(Stmt::FnDecl {
                 name,
@@ -256,7 +256,7 @@ impl Parser {
                 exported,
             })
         } else {
-            self.expect(&Tok::Newline, "funksiya tanasi")?;
+            self.expect(&Tok::Newline, "function body")?;
             let body = self.parse_block()?;
             Ok(Stmt::FnDecl {
                 name,
@@ -273,7 +273,7 @@ impl Parser {
             return self.parse_fn(true);
         }
         // exp NAME = expr
-        let name = self.expect_ident("eksport nomi")?;
+        let name = self.expect_ident("export name")?;
         self.expect(&Tok::Eq, "'='")?;
         let value = self.parse_expr()?;
         Ok(Stmt::ExpBind { name, value })
@@ -281,13 +281,13 @@ impl Parser {
 
     fn parse_each(&mut self) -> ParseResult<Stmt> {
         self.advance(); // each
-        let mut vars = vec![self.expect_ident("loop o'zgaruvchisi")?];
+        let mut vars = vec![self.expect_ident("loop variable")?];
         if self.eat(&Tok::Comma) {
-            vars.push(self.expect_ident("ikkinchi loop o'zgaruvchisi")?);
+            vars.push(self.expect_ident("second loop variable")?);
         }
         self.expect(&Tok::In, "'in'")?;
         let iter = self.parse_expr()?;
-        self.expect(&Tok::Newline, "each tanasi")?;
+        self.expect(&Tok::Newline, "each body")?;
         let body = self.parse_block()?;
         Ok(Stmt::Each { vars, iter, body })
     }
@@ -297,12 +297,12 @@ impl Parser {
         Ok(Stmt::Expr(e))
     }
 
-    // `fail [status] message` — ifoda sifatida (statement ham shuni ishlatadi).
-    // `fail`dan keyingi argumentlar qavssiz application kabi yig'iladi.
+    // `fail [status] message` — as an expression (the statement uses this too).
+    // The arguments after `fail` are collected like a parenthesis-free application.
     fn parse_fail_expr(&mut self) -> ParseResult<Expr> {
         self.advance(); // fail
         let first = self.parse_postfix()?;
-        // fail 422 "xabar"  -> status + message ;  fail "xabar" -> faqat message
+        // fail 422 "msg"  -> status + message ;  fail "msg" -> message only
         if self.is_atom_start() {
             let message = self.parse_postfix()?;
             Ok(Expr::Fail {
@@ -326,14 +326,14 @@ impl Parser {
                     self.advance();
                     s
                 }
-                // ./tools  ->  Slash? aslida lexer'da './tools' qanday chiqadi?
-                // './tools' = Dot Slash Ident. Buni yig'amiz.
-                // ../lib/x ham ('..' yuqori papka) — parse_module_path ikkalasini ham yig'adi.
+                // ./tools  ->  Slash? how does the lexer actually emit './tools'?
+                // './tools' = Dot Slash Ident. We collect that.
+                // ../lib/x too ('..' is the parent dir) — parse_module_path collects both.
                 Tok::Dot | Tok::DotDot => self.parse_module_path()?,
                 _ => break,
             };
             let alias = if self.eat(&Tok::As) {
-                Some(self.expect_ident("alias nomi")?)
+                Some(self.expect_ident("alias name")?)
             } else {
                 None
             };
@@ -345,7 +345,7 @@ impl Parser {
         Ok(Stmt::Use { items })
     }
 
-    // ./tools  yoki  ../lib/x  kabi modul yo'lini yig'adi.
+    // Collects a module path like ./tools  or  ../lib/x.
     fn parse_module_path(&mut self) -> ParseResult<String> {
         let mut s = String::new();
         loop {
@@ -374,18 +374,18 @@ impl Parser {
 
     fn parse_tbl(&mut self) -> ParseResult<Stmt> {
         self.advance(); // tbl
-        let name = self.expect_ident("jadval nomi")?;
-        self.expect(&Tok::Newline, "jadval tanasi")?;
-        self.expect(&Tok::Indent, "jadval ustunlari (chekinish)")?;
+        let name = self.expect_ident("table name")?;
+        self.expect(&Tok::Newline, "table body")?;
+        self.expect(&Tok::Indent, "table columns (indentation)")?;
         let mut columns = Vec::new();
         let mut indexes: Vec<TblIndex> = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
-            // Ko'p-ustunli index/uniq qatori:  index(a b)  /  uniq(a, b).
-            // Ustun qatoridan ajratish: `index`/`uniq` keyin DARHOL `(` kelsa.
-            // Oddiy ustunda 2-token tip-ident yoki Newline bo'ladi, hech qachon
-            // `(` emas — shu sabab xavfsiz. (Paren ichida lexer Newline emit
-            // qilmaydi, shu sabab `uniq(\n a\n b\n)` ko'p-qatorli ham ishlaydi.)
+            // Multi-column index/uniq row:  index(a b)  /  uniq(a, b).
+            // Distinguished from a column row by `index`/`uniq` immediately
+            // followed by `(`. In a plain column the 2nd token is a type-ident or
+            // a Newline, never `(` — so this is safe. (Inside parens the lexer
+            // emits no Newline, so a multi-line `uniq(\n a\n b\n)` works too.)
             if let Tok::Ident(kw) = self.peek().clone()
                 && (kw == "index" || kw == "uniq")
                 && *self.peek2() == Tok::LParen
@@ -394,14 +394,14 @@ impl Parser {
                 self.advance(); // (
                 let mut cols = Vec::new();
                 while !self.check(&Tok::RParen) && !self.check(&Tok::Eof) {
-                    // Vergul ixtiyoriy (default bo'shliq bilan ajratiladi);
-                    // adashib `index(a, b)` yozgan agent uchun ham qabul.
+                    // Comma is optional (separation is whitespace by default);
+                    // also accepted for an agent who mistakenly wrote `index(a, b)`.
                     if self.eat(&Tok::Comma) {
                         continue;
                     }
-                    cols.push(self.expect_ident("indeks ustuni")?);
+                    cols.push(self.expect_ident("index column")?);
                 }
-                self.expect(&Tok::RParen, "indeks qavsi")?;
+                self.expect(&Tok::RParen, "index parenthesis")?;
                 indexes.push(TblIndex {
                     columns: cols,
                     unique: kw == "uniq",
@@ -410,27 +410,28 @@ impl Parser {
                 continue;
             }
 
-            // ustun:  nom tip mod1 mod2...  (modifikatorlar bo'shliq YOKI `|` bilan)
-            let col_name = self.expect_ident("ustun nomi")?;
+            // column:  name type mod1 mod2...  (modifiers separated by whitespace OR `|`)
+            let col_name = self.expect_ident("column name")?;
             let mut modifiers = Vec::new();
             let mut type_name = String::new();
             if let Tok::Ident(_) = self.peek() {
-                type_name = self.expect_ident("ustun tipi")?;
+                type_name = self.expect_ident("column type")?;
             }
-            // Modifikator loop: ident → push; keyingi `|` bo'lsa consume va davom
-            // (`index|uniq`). Bo'shliqli shakl (`index uniq`) ham shu loop bilan.
+            // Modifier loop: ident -> push; if a `|` follows, consume it and
+            // continue (`index|uniq`). The spaced form (`index uniq`) uses this
+            // loop too.
             loop {
                 if let Tok::Ident(m) = self.peek().clone() {
                     self.advance();
-                    // `ref:tbl.col` — FK modifikatori. `ref` dan keyin DARHOL `:`
-                    // kelsa maxsus tarmoq: nishon `tbl.col` ni o'qib bitta
-                    // `ref:tbl.col` modifikator-satri sifatida saqlaymiz (db_mod
-                    // uni FOREIGN KEY ... REFERENCES ga aylantiradi).
+                    // `ref:tbl.col` — an FK modifier. If `:` immediately follows
+                    // `ref`, take a special branch: read the target `tbl.col` and
+                    // store it as a single `ref:tbl.col` modifier string (db_mod
+                    // turns it into FOREIGN KEY ... REFERENCES).
                     if m == "ref" && self.check(&Tok::Colon) {
                         self.advance(); // :
-                        let target_tbl = self.expect_ident("ref jadval nomi")?;
+                        let target_tbl = self.expect_ident("ref table name")?;
                         self.expect(&Tok::Dot, "ref `tbl.col`")?;
-                        let target_col = self.expect_ident("ref ustun nomi")?;
+                        let target_col = self.expect_ident("ref column name")?;
                         modifiers.push(format!("ref:{target_tbl}.{target_col}"));
                     } else {
                         modifiers.push(m);
@@ -441,8 +442,8 @@ impl Parser {
                     break;
                 }
             }
-            // Single-ustun index/uniq modifikatorini TblIndex'ga ko'taramiz.
-            // `uniq` `index`'ni subsume qiladi — bitta unikal index (ikkita emas).
+            // Promote a single-column index/uniq modifier into a TblIndex.
+            // `uniq` subsumes `index` — one unique index (not two).
             let has = |m: &str| modifiers.iter().any(|x| x == m);
             if has("index") || has("uniq") {
                 indexes.push(TblIndex {
@@ -450,8 +451,8 @@ impl Parser {
                     unique: has("uniq"),
                 });
             }
-            // Tanilmagan qoldiq token'larni (kelajakdagi modifikatorlar) qator
-            // oxirigacha jim o'tkazib yuboramiz — `ref:` yuqorida ushlangan.
+            // Silently skip unrecognized leftover tokens (future modifiers) to
+            // the end of the line — `ref:` is already handled above.
             while !self.check(&Tok::Newline) && !self.check(&Tok::Dedent) && !self.check(&Tok::Eof)
             {
                 self.advance();
@@ -463,7 +464,7 @@ impl Parser {
             });
             self.skip_newlines();
         }
-        self.expect(&Tok::Dedent, "jadval oxiri")?;
+        self.expect(&Tok::Dedent, "end of table")?;
         Ok(Stmt::Tbl {
             name,
             columns,
@@ -471,9 +472,9 @@ impl Parser {
         })
     }
 
-    // --- ifodalar (precedence climbing) ---
-    // Har ichma-ich ifoda (qavs, list/map elementi, indeks, interpolatsiya)
-    // shu yerdan o'tadi — chuqurlik limiti uchun yagona nazorat nuqtasi.
+    // --- expressions (precedence climbing) ---
+    // Every nested expression (parens, list/map element, index, interpolation)
+    // passes through here — the single control point for the depth limit.
     fn parse_expr(&mut self) -> ParseResult<Expr> {
         self.enter_depth()?;
         let r = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.parse_binary(0));
@@ -481,13 +482,13 @@ impl Parser {
         r
     }
 
-    // Range `..` ustuvorligi: arifmetikadan PAST, lekin pipe/taqqoslash/mantiqdan
-    // YUQORI. Shu sababli `1..n+1` = `1..(n+1)` (arifmetika endpoint ichida
-    // bog'lanadi), `1..3 |> f` = `(1..3) |> f` (pipe butun range'ga qo'llanadi).
+    // Range `..` precedence: LOWER than arithmetic, but HIGHER than
+    // pipe/comparison/logic. So `1..n+1` = `1..(n+1)` (arithmetic binds inside the
+    // endpoint), `1..3 |> f` = `(1..3) |> f` (the pipe applies to the whole range).
     const RANGE_PREC: u8 = 7;
 
-    // Operator ustuvorligi jadvali. Kichik raqam = past ustuvorlik.
-    // `..` (RANGE_PREC = 7) arifmetika va pipe orasida turadi.
+    // Operator precedence table. Smaller number = lower precedence.
+    // `..` (RANGE_PREC = 7) sits between arithmetic and pipe.
     fn bin_prec(t: &Tok) -> Option<(BinOp, u8)> {
         Some(match t {
             Tok::Pipe => (BinOp::Or, 1),
@@ -512,9 +513,9 @@ impl Parser {
     fn parse_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
         let mut lhs = self.parse_application()?;
         loop {
-            // `..` ustuvorlik zinapoyasiga to'qilgan (Range BinOp emas, shuning
-            // uchun alohida tarmoq). Arifmetika o'ng tomonda bog'lanib qoladi
-            // (RANGE_PREC + 1), past operatorlar (pipe va h.k.) range'ni o'rab oladi.
+            // `..` is woven into the precedence ladder (Range is not a BinOp, hence
+            // a separate branch). Arithmetic binds on the right side
+            // (RANGE_PREC + 1), and lower operators (pipe etc.) wrap the range.
             if self.check(&Tok::DotDot) {
                 if Self::RANGE_PREC < min_prec {
                     break;
@@ -608,13 +609,13 @@ impl Parser {
                 Tok::Slash => out.push('/'),
                 Tok::Minus => out.push('-'),
                 Tok::Comma => out.push(','),
-                _ => unreachable!("is_cron_field_token kafolatlaydi"),
+                _ => unreachable!("is_cron_field_token guarantees this"),
             }
             self.advance();
         }
         if out.is_empty() {
             return Err(format!(
-                "{}-qatorda cron.on dan keyin cron ifoda kutilgan",
+                "expected a cron expression after cron.on on line {}",
                 self.line()
             ));
         }
@@ -682,7 +683,7 @@ impl Parser {
                             }
                             None => {
                                 return Err(format!(
-                                    "{}-qatorda '.' dan keyin nom yoki indeks kutilgan, {:?} topildi",
+                                    "expected a name or index after '.' on line {}, found {:?}",
                                     self.line(),
                                     tok
                                 ));
@@ -700,8 +701,8 @@ impl Parser {
                     self.advance();
                     if !self.check(&Tok::RParen) {
                         return Err(format!(
-                            "{}-qatorda `f()` faqat argumentsiz chaqiruv uchun; \
-                             argument bilan chaqirish qavssiz yoziladi (`f x`)",
+                            "`f()` on line {} is only for argument-less calls; \
+                             calling with arguments is written without parentheses (`f x`)",
                             self.line()
                         ));
                     }
@@ -808,7 +809,7 @@ impl Parser {
             Tok::Try => self.parse_try(),
             Tok::Fail => self.parse_fail_expr(),
             other => Err(format!(
-                "{}-qatorda ifoda kutilgan, {:?} topildi",
+                "expected an expression on line {}, found {:?}",
                 self.line(),
                 other
             )),
@@ -825,7 +826,7 @@ impl Parser {
                     // Asl qator raqamini sub-lexer'ga uzatamiz — aks holda
                     // xato har doim "1-qatorda" deb chalg'itadi (issue #106).
                     let toks = crate::lexer::lex_at(&src, line)
-                        .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
+                        .map_err(|e| format!("inside interpolation: {}", e))?;
                     let mut sub = Parser {
                         toks,
                         pos: 0,
@@ -837,7 +838,7 @@ impl Parser {
                     sub.skip_newlines();
                     let e = sub
                         .parse_expr()
-                        .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
+                        .map_err(|e| format!("inside interpolation: {}", e))?;
                     pieces.push(StrPiece::Expr(e));
                 }
             }
@@ -896,7 +897,7 @@ impl Parser {
                             s.clone()
                         } else {
                             return Err(format!(
-                                "{}-qatorda map kaliti oddiy matn bo'lishi kerak",
+                                "map key must be plain text on line {}",
                                 self.line()
                             ));
                         }
@@ -908,7 +909,7 @@ impl Parser {
                         }
                         None => {
                             return Err(format!(
-                                "{}-qatorda map kaliti kutilgan, {:?} topildi",
+                                "expected a map key on line {}, found {:?}",
                                 self.line(),
                                 other
                             ));
@@ -931,9 +932,9 @@ impl Parser {
         self.advance(); // backslash
         let mut params = Vec::new();
         while let Tok::Ident(_) = self.peek() {
-            let p = self.expect_ident("lambda parametri")?;
+            let p = self.expect_ident("lambda parameter")?;
             if params.contains(&p) {
-                return Err(format!("lambda'da takror parametr nomi: '{}'", p));
+                return Err(format!("duplicate parameter name in lambda: '{}'", p));
             }
             params.push(p);
         }
@@ -952,7 +953,7 @@ impl Parser {
         }
         let mut arms = Vec::new();
         let cond = self.parse_expr()?;
-        self.expect(&Tok::Newline, "if tanasi")?;
+        self.expect(&Tok::Newline, "if body")?;
         let block = self.parse_block()?;
         arms.push((cond, block));
         let mut else_block = None;
@@ -961,12 +962,12 @@ impl Parser {
             if self.check(&Tok::Elif) {
                 self.advance();
                 let c = self.parse_expr()?;
-                self.expect(&Tok::Newline, "elif tanasi")?;
+                self.expect(&Tok::Newline, "elif body")?;
                 let b = self.parse_block()?;
                 arms.push((c, b));
             } else if self.check(&Tok::Else) {
                 self.advance();
-                self.expect(&Tok::Newline, "else tanasi")?;
+                self.expect(&Tok::Newline, "else body")?;
                 else_block = Some(self.parse_block()?);
                 break;
             } else {
@@ -1022,8 +1023,8 @@ impl Parser {
     fn parse_match(&mut self) -> ParseResult<Expr> {
         self.advance(); // match
         let subject = self.parse_expr()?;
-        self.expect(&Tok::Newline, "match tanasi")?;
-        self.expect(&Tok::Indent, "match armlari (chekinish)")?;
+        self.expect(&Tok::Newline, "match body")?;
+        self.expect(&Tok::Indent, "match arms (indentation)")?;
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
@@ -1042,7 +1043,7 @@ impl Parser {
                 }
                 other => {
                     return Err(format!(
-                        "{}-qatorda match patterni (symbol/son/_) kutilgan, {:?} topildi",
+                        "expected a match pattern (symbol/number/_) on line {}, found {:?}",
                         self.line(),
                         other
                     ));
@@ -1053,7 +1054,7 @@ impl Parser {
             arms.push(MatchArm { pattern, body });
             self.skip_newlines();
         }
-        self.expect(&Tok::Dedent, "match oxiri")?;
+        self.expect(&Tok::Dedent, "end of match")?;
         Ok(Expr::Match(Box::new(MatchExpr { subject, arms })))
     }
 
@@ -1066,16 +1067,16 @@ impl Parser {
     // `if`ning `else`i kabi `try` bilan bir xil chekinish darajasida turadi.
     fn parse_try(&mut self) -> ParseResult<Expr> {
         self.advance(); // try
-        self.expect(&Tok::Newline, "try tanasi")?;
+        self.expect(&Tok::Newline, "try body")?;
         let body = self.parse_block()?;
         self.skip_newlines();
         self.expect(&Tok::Catch, "'catch'")?;
         let catch_var = if let Tok::Ident(_) = self.peek() {
-            Some(self.expect_ident("catch o'zgaruvchisi")?)
+            Some(self.expect_ident("catch variable")?)
         } else {
             None
         };
-        self.expect(&Tok::Newline, "catch tanasi")?;
+        self.expect(&Tok::Newline, "catch body")?;
         let catch_body = self.parse_block()?;
         Ok(Expr::TryCatch {
             body,
@@ -1092,9 +1093,9 @@ impl Parser {
                 Ok(s)
             }
             other => Err(format!(
-                "{}-qatorda {} kutilgan, {:?} topildi",
-                self.line(),
+                "expected {} on line {}, found {:?}",
                 what,
+                self.line(),
                 other
             )),
         }
@@ -1197,11 +1198,11 @@ mod tests {
     #[test]
     fn schema_type_names() {
         for t in ["str", "int", "flt", "bool", "json", "sym"] {
-            assert!(is_schema_type_name(t), "{} tip nomi bo'lishi kerak", t);
+            assert!(is_schema_type_name(t), "{} must be a type name", t);
         }
         // tip BO'LMAGAN nomlar tegilmaydi (o'zgaruvchi sifatida qoladi).
         for t in ["x", "str2", "serial", "now", "money", "upper"] {
-            assert!(!is_schema_type_name(t), "{} tip nomi BO'LMASLIGI kerak", t);
+            assert!(!is_schema_type_name(t), "{} must NOT be a type name", t);
         }
     }
 
@@ -1210,17 +1211,17 @@ mod tests {
         // bare tip ident -> sym
         match schema_type_sym(Expr::Ident("str".to_string())) {
             Expr::Sym(s) => assert_eq!(s, "str"),
-            _ => panic!("str ident sym'ga aylanishi kerak"),
+            _ => panic!("str ident must become a sym"),
         }
         // tip bo'lmagan ident -> o'zgarmaydi
         match schema_type_sym(Expr::Ident("foo".to_string())) {
             Expr::Ident(s) => assert_eq!(s, "foo"),
-            _ => panic!("foo ident o'zgarmasligi kerak"),
+            _ => panic!("foo ident must not change"),
         }
         // ident bo'lmagan ifoda (masalan, int literal) -> o'zgarmaydi
         match schema_type_sym(Expr::Int(5)) {
             Expr::Int(5) => {}
-            _ => panic!("Int literal o'zgarmasligi kerak"),
+            _ => panic!("Int literal must not change"),
         }
     }
 
@@ -1230,7 +1231,7 @@ mod tests {
         let prog = parse(crate::lexer::lex(src).unwrap()).unwrap();
         match &prog[0] {
             Stmt::Bind { value, .. } => value.clone(),
-            other => panic!("Bind kutilgan, {:?} topildi", other),
+            other => panic!("expected Bind, found {:?}", other),
         }
     }
 
@@ -1241,14 +1242,14 @@ mod tests {
                 assert!(matches!(&items[0], Expr::Sym(s) if s == "str"));
                 assert!(matches!(&items[1], Expr::Sym(s) if s == "int"));
             }
-            other => panic!("List kutilgan, {:?} topildi", other),
+            other => panic!("expected List, found {:?}", other),
         }
         // tip BO'LMAGAN ident ro'yxatda o'zgaruvchi sifatida qoladi.
         match first_expr("s = [x y]") {
             Expr::List(items) => {
                 assert!(matches!(&items[0], Expr::Ident(s) if s == "x"));
             }
-            other => panic!("List kutilgan, {:?} topildi", other),
+            other => panic!("expected List, found {:?}", other),
         }
     }
 
@@ -1257,7 +1258,7 @@ mod tests {
         let prog = parse(crate::lexer::lex(src).unwrap()).unwrap();
         match &prog[0] {
             Stmt::Tbl { indexes, .. } => indexes.clone(),
-            other => panic!("Tbl kutilgan, {:?} topildi", other),
+            other => panic!("expected Tbl, found {:?}", other),
         }
     }
 

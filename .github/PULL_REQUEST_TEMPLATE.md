@@ -1,29 +1,29 @@
-<!-- PR sarlavhasi qisqa va o'zbekcha bo'lsin: nima o'zgardi. -->
+<!-- Keep the PR title short: what changed. -->
 
-## Nima o'zgardi
+## What changed
 
-<!-- Bir-ikki jumla: bu PR nima qiladi va nega. -->
+<!-- One or two sentences: what this PR does and why. -->
 
-## Tur
+## Type
 
-- [ ] Yangi battery / imkoniyat
-- [ ] Bug tuzatish
+- [ ] New battery / feature
+- [ ] Bug fix
 - [ ] Performance
-- [ ] Hujjat
-- [ ] Refactor (xulq o'zgarmaydi)
+- [ ] Documentation
+- [ ] Refactor (no behavior change)
 
-## Tekshiruv ro'yxati
+## Checklist
 
-> Buyruqlar `runtime/` ichida ishlaydi.
+> Commands run inside `runtime/`.
 
-- [ ] `cargo build --locked` — kompilyatsiya bo'ladi
-- [ ] `cargo test --locked` — barcha testlar yashil
-- [ ] `cargo fmt --check` — formatlangan
-- [ ] `cargo clippy --all-targets -- -D warnings` — 0 warning
-- [ ] `cargo run -- run examples/demo.fx` — smoke-test ishlaydi
-- [ ] Yangi xulq uchun **test qo'shildi**
-- [ ] O'zgarish bitta mantiqiy ish (battery + refactor aralashmagan)
+- [ ] `cargo build --locked` — compiles
+- [ ] `cargo test --locked` — all tests green
+- [ ] `cargo fmt --check` — formatted
+- [ ] `cargo clippy --all-targets -- -D warnings` — 0 warnings
+- [ ] `cargo run -- run examples/demo.fx` — smoke test works
+- [ ] **Test added** for the new behavior
+- [ ] The change is one logical unit (battery + refactor not mixed)
 
-## Qo'shimcha
+## Additional
 
-<!-- Tegishli issue (#NN), buzilgan invariant haqida ogohlantirish, qaror sababi. -->
+<!-- Related issue (#NN), warning about a broken invariant, reasoning behind a decision. -->

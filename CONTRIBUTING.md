@@ -1,129 +1,130 @@
-# Fluxon loyihasiga hissa qo'shish
+# Contributing to Fluxon
 
-Rahmat! Fluxon ochiq manba va hissa qo'shuvchilarni kutamiz. Bu hujjat boshlash
-uchun kerak bo'lgan hamma narsani beradi.
+Thank you! Fluxon is open source and we welcome contributors. This document
+gives you everything you need to get started.
 
-> AI agent (Claude Code va h.k.) bilan ishlasangiz — qoidalar va navigatsiya
-> [`CLAUDE.md`](CLAUDE.md) da. Runtime ichki tuzilishi: [`ARCHITECTURE.md`](ARCHITECTURE.md).
-
----
-
-## Til: o'zbekcha
-
-Bu loyiha **o'zbek tilida** olib boriladi. Kod izohlari, commit xabarlari, PR
-tavsiflari va hujjatlar o'zbekcha bo'lsin. Texnik atamalar va kod nomlari
-(`HashMap`, `db.tx`) asl holida qoladi. Diakritik belgilarni to'g'ri yozing
-(`o'`, `g'`).
+> If you work with an AI agent (Claude Code etc.) — rules and navigation are in
+> [`CLAUDE.md`](CLAUDE.md). Runtime internals: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
-## Talablar
+## Language
 
-- **Rust** (stable, edition 2024) — [rustup.rs](https://rustup.rs) orqali o'rnating.
+Code comments, commit messages, PR descriptions, and documentation are written
+in **English**. Technical terms and code identifiers (`HashMap`, `db.tx`) stay
+as-is. Conversation in issues and PRs can be in whatever language is comfortable
+for the participants.
+
+---
+
+## Requirements
+
+- **Rust** (stable, edition 2024) — install via [rustup.rs](https://rustup.rs).
 - `git`.
-- Boshqa hech narsa kerak emas: SQLite **bundled** (tizim kutubxonasi shart emas),
-  HTTP/server deps `cargo` bilan keladi.
+- Nothing else needed: SQLite is **bundled** (no system library required),
+  HTTP/server deps come with `cargo`.
 
 ---
 
-## Tez boshlash
+## Quick start
 
 ```sh
 git clone <repo-url>
-cd fluxon-lang/runtime          # MUHIM: hamma cargo buyrug'i shu yerda
+cd fluxon-lang/runtime          # IMPORTANT: every cargo command runs here
 
-cargo build                   # qurish
-cargo test                    # testlar (hozir 197 ta)
-cargo run -- run examples/demo.fx   # bir .fx faylni ishga tushirish
+cargo build                   # build
+cargo test                    # tests (197 right now)
+cargo run -- run examples/demo.fx   # run a single .fx file
 ```
 
-Repo tuzilishi:
+Repository structure:
 
 ```
 fluxon-lang/
-├── runtime/          interpretator (Rust) — ASOSIY ISH SHU YERDA
-│   ├── src/          manba kod
-│   └── examples/     .fx misollari
-├── docs/             til spetsifikatsiyasi (fluxon-agent.md, fluxon-human.md)
-├── examples/         real loyiha misollari (chat, ecommerce, support-tickets)
-└── research/         til qanday dizayn qilingani
+├── runtime/          interpreter (Rust) — THE MAIN WORK IS HERE
+│   ├── src/          source code
+│   └── examples/     .fx examples
+├── docs/             language spec (fluxon-agent.md, fluxon-human.md)
+├── examples/         real project examples (chat, ecommerce, support-tickets)
+└── research/         how the language was designed
 ```
 
 ---
 
-## Ish jarayoni
+## Workflow
 
-1. **Branch oching** master'dan. Nom: `battery-<nom>`, `fix-<nom>`,
-   `perf-<nom>`, `docs/<nom>`.
-2. O'zgarish kiriting + **test yozing** (har yangi xulq uchun).
-3. Mahalliy tekshiring (pastdagi "PR tayyorligi" ro'yxati).
-4. Commit qiling (o'zbekcha xabar) → PR oching.
-5. CI yashil bo'lsin. Review'dan keyin merge qilinadi.
+1. **Open a branch** from master. Name: `battery-<name>`, `fix-<name>`,
+   `perf-<name>`, `docs/<name>`.
+2. Make the change + **write a test** (for every new behavior).
+3. Check locally (the "PR readiness" list below).
+4. Commit (a clear message) → open a PR.
+5. CI should be green. After review it gets merged.
 
-Bir PR = bir mantiqiy o'zgarish. Battery + refactor'ni aralashtirmang.
+One PR = one logical change. Don't mix a battery + a refactor.
 
 ---
 
-## PR tayyorligi (commit oldidan tekshiring)
+## PR readiness (check before committing)
 
-`runtime/` ichida:
+Inside `runtime/`:
 
 ```sh
-cargo build --locked                          # 1. kompilyatsiya
-cargo test --locked                           # 2. testlar yashil
-cargo fmt --check                             # 3. formatlangan
-cargo clippy --all-targets -- -D warnings     # 4. 0 warning
-cargo run -- run examples/demo.fx             # 5. smoke-test
+cargo build --locked                          # 1. compiles
+cargo test --locked                           # 2. tests green
+cargo fmt --check                             # 3. formatted
+cargo clippy --all-targets -- -D warnings     # 4. 0 warnings
+cargo run -- run examples/demo.fx             # 5. smoke test
 ```
 
-CI (`.github/workflows/ci.yml`) ubuntu + macOS da shularni tekshiradi:
+CI (`.github/workflows/ci.yml`) checks these on ubuntu + macOS:
 
-- **`build-test` job — MAJBURIY.** Qizil bo'lsa merge yo'q.
-- **`lint` job** (fmt + clippy) — hozircha non-blocking, lekin **yangi kod 0
-  warning** bilan kelishi kutiladi. Eski toza holatni buzmang.
-
----
-
-## Test yozish
-
-Ikki xil test (batafsil → [`ARCHITECTURE.md`](ARCHITECTURE.md) §6):
-
-- **Rust testlari** — modul ichida `#[cfg(test)] mod ...`, yoki `.fx` kodini run
-  qilib natijani tekshiruvchi integratsiya testi `main.rs::mod tests` da
-  (`run(src)` yordamchisi).
-- **`.fx` e2e testlari** — `runtime/tests-fx/` (Fluxon'ning o'zida yozilgan,
-  `run_all.sh` bilan ishga tushadi). Yangi battery qo'shsangiz shu uslubda.
-
-DB testlari global `DB_TEST_LOCK` mutex bilan serializatsiya qilinadi —
-namunani `db_mod.rs` dan ko'ring.
+- **`build-test` job — MANDATORY.** No merge if it's red.
+- **`lint` job** (fmt + clippy) — currently non-blocking, but **new code is
+  expected to arrive with 0 warnings**. Don't break the existing clean state.
 
 ---
 
-## Kod uslubi
+## Writing tests
 
-- `cargo fmt` standart sozlamasi (edition 2024).
-- Izohlar **nega** (why) ni tushuntirsin, **nima** (what) ni emas. Atrofdagi
-  kodning uslubiga moslang.
-- `unsafe` ishlatmang.
-- `Value: Send + Sync` invariantini buzmang (runtime thread-safe).
-- Muhim perf/semantik invariantlar [`CLAUDE.md`](CLAUDE.md) §7 da — buzmang.
+Two kinds of test (details → [`ARCHITECTURE.md`](ARCHITECTURE.md) §6):
 
----
+- **Rust tests** — inside a module via `#[cfg(test)] mod ...`, or an integration
+  test in `main.rs::mod tests` that runs `.fx` code and checks the result
+  (the `run(src)` helper).
+- **`.fx` e2e tests** — in `runtime/tests-fx/` (written in Fluxon itself, run
+  via `run_all.sh`). Follow this style when you add a new battery.
 
-## Nimadan boshlash
-
-- **Mavjud battery'ni chuqurlashtirish** — spec'dagi barcha batareyalar
-  (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) implementatsiya
-  qilingan; ularni kengaytirish yoki yangi til imkoniyati qo'shish.
-  Retsept: [`ARCHITECTURE.md`](ARCHITECTURE.md) §5. `http`/`db` namuna.
-- **Misollar/hujjat** yaxshilash.
-- **Bug fix** — avval qayta ishlab chiqaradigan test yozing.
-
-Katta o'zgarish boshlashdan oldin issue oching — yo'nalishni kelishib olamiz.
+DB tests are serialized with the global `DB_TEST_LOCK` mutex — see the example
+in `db_mod.rs`.
 
 ---
 
-## Xulq-atvor
+## Code style
 
-Hurmatli va konstruktiv bo'ling. Savol bering, kichik PR'lar yuboring, bir-biringizga
-yordam bering. Bu birga qurilayotgan til.
+- `cargo fmt` default settings (edition 2024).
+- Comments explain **why**, not **what**. Match the style of the surrounding
+  code.
+- Don't use `unsafe`.
+- Don't break the `Value: Send + Sync` invariant (the runtime is thread-safe).
+- Important perf/semantic invariants are in [`CLAUDE.md`](CLAUDE.md) §7 — don't
+  break them.
+
+---
+
+## Where to start
+
+- **Deepen an existing battery** — all batteries in the spec (`http`, `db`,
+  `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) are implemented; extend them or
+  add a new language feature. Recipe: [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.
+  `http`/`db` are the templates.
+- **Improve examples/docs**.
+- **Bug fix** — first write a test that reproduces it.
+
+Before starting a large change, open an issue — let's agree on the direction.
+
+---
+
+## Conduct
+
+Be respectful and constructive. Ask questions, send small PRs, help each other.
+This is a language we're building together.
