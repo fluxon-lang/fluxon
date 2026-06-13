@@ -6,6 +6,8 @@
 //   fluxon check <fayl.fx>   — faqat lex+parse (bajarmaydi); parse xato -> exit 2
 //   fluxon test [yo'l]       — test fayllarini ishga tushiradi (standart: tests/);
 //                              yo'l fayl yoki katalog bo'lishi mumkin
+//   fluxon repl              — interaktiv REPL (read-eval-print); argumentsiz
+//                              `fluxon` ham xuddi shu REPL'ni ochadi
 //   fluxon --version         — build qilingan package versiyasini chiqaradi
 //   fluxon --help            — foydalanish yo'riqnomasini chiqaradi
 
@@ -42,6 +44,8 @@ enum Command {
     Check(String),
     // test: yo'l ixtiyoriy — berilmasa standart `tests/` katalogi ishlatiladi.
     Test(Option<String>),
+    // repl: interaktiv read-eval-print sessiyasi (argument yo'q).
+    Repl,
     Version,
     Help,
 }
@@ -89,6 +93,8 @@ fn main() -> ExitCode {
         }
         // test: bitta fayl o'qimaydi — o'zi fayllarni topib ishga tushiradi.
         Command::Test(path) => run_tests(path.as_deref()),
+        // repl: stdin'dan o'qib, har blokni bajaradi (interaktiv sessiya).
+        Command::Repl => run_repl(),
         Command::Version => {
             println!("fluxon {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -101,7 +107,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>  |  fluxon test [yo'l]  |  fluxon --version  |  fluxon --help"
+    "Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>  |  fluxon test [yo'l]  |  fluxon repl  |  fluxon --version  |  fluxon --help"
 }
 
 // Faylni o'qiydi; xatoda xabarni chiqarib, chiqish kodini (1) qaytaradi.
@@ -117,9 +123,12 @@ fn parse_args(args: &[String]) -> Option<Command> {
         Some("run") => args.get(2).cloned().map(Command::Run),
         Some("check") => args.get(2).cloned().map(Command::Check),
         Some("test") => Some(Command::Test(args.get(2).cloned())),
+        Some("repl") => Some(Command::Repl),
         Some("--version" | "-V") => Some(Command::Version),
         Some("--help" | "-h") => Some(Command::Help),
         Some(p) if !p.starts_with('-') => Some(Command::Run(p.to_string())),
+        // Argumentsiz `fluxon` — interaktiv REPL (odam tilni tez sinab ko'rsin).
+        None => Some(Command::Repl),
         _ => None,
     }
 }
@@ -267,6 +276,147 @@ fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 fn run_source(src: &str) -> Result<(), String> {
     run_source_at(src, std::path::Path::new("."))
+}
+
+// `fluxon repl` — interaktiv read-eval-print (issue #138). Odam tilni o'rganishi
+// va bir-ikki qator kodni faylsiz sinab ko'rishi uchun. Bitta interp obyekti
+// butun sessiya davomida yashaydi: `x = 1` keyingi qatorda ko'rinadi.
+//
+// Ko'p qatorli blok: indentatsiyali konstruksiya (if/each/fn/...) bir necha
+// qatorga cho'ziladi. Qaysi qatorda blok tugashini xato-matnini tahlil qilib
+// emas, balki yig'ilgan buferni qayta parse qilib aniqlaymiz — parse o'tsa
+// blok to'liq (eval); parse xato bo'lsa ko'proq qator kutamiz, lekin foydalanuvchi
+// BO'SH qator kiritsa (blokni majburan yopsa) xatoni ko'rsatib buferni tozalaymiz.
+// Bu lex/parse xato xabarlarining ichki matniga bog'lanmaslik uchun (mo'rt bo'lardi).
+fn run_repl() -> ExitCode {
+    use std::io::Write;
+
+    let interp = interp::Interp::new_arc();
+    // REPL'da `use ./fayl` joriy ishchi katalogga nisbatan hal qilinsin.
+    interp.set_base(std::path::Path::new("."));
+
+    println!(
+        "Fluxon {} REPL — chiqish: :q yoki Ctrl-D, yordam: :help",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let stdin = std::io::stdin();
+    // Yig'iladigan bufer (ko'p qatorli blok uchun) — qatorlar `\n` bilan ulanadi.
+    let mut buf = String::new();
+
+    loop {
+        // Bo'sh buferda asosiy prompt, davom etayotgan blokda `...` prompt.
+        let prompt = if buf.is_empty() { "fx> " } else { "... " };
+        print!("{}", prompt);
+        // print! satr oxirisiz — prompt ko'rinishi uchun majburan flush qilamiz.
+        let _ = std::io::stdout().flush();
+
+        let mut line = String::new();
+        match stdin.read_line(&mut line) {
+            Ok(0) => {
+                // EOF (Ctrl-D). Yarim yig'ilgan blok bo'lsa oxirgi marta urinib
+                // ko'ramiz, keyin yangi qatorda chiqamiz.
+                println!();
+                if !buf.trim().is_empty() {
+                    repl_eval(&interp, &buf);
+                }
+                return ExitCode::SUCCESS;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("REPL o'qish xatosi: {}", e);
+                return ExitCode::from(1);
+            }
+        }
+
+        // read_line oxirgi `\n` ni saqlaydi — trailing'ni olib, bo'shlikni tekshiramiz.
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+
+        // REPL buyruqlari faqat bufer bo'sh bo'lganda (blok o'rtasida emas).
+        if buf.is_empty() {
+            match trimmed.trim() {
+                ":q" | ":quit" | ":exit" => return ExitCode::SUCCESS,
+                ":help" | ":h" => {
+                    print_repl_help();
+                    continue;
+                }
+                "" => continue, // bo'sh prompt — hech narsa qilmaymiz
+                _ => {}
+            }
+        }
+
+        // Bo'sh qator + yig'ilayotgan blok: foydalanuvchi blokni majburan yopdi —
+        // hozir bor narsani eval qilamiz (parse hali xato bo'lsa xato ko'rinadi).
+        let force_eval = !buf.is_empty() && trimmed.trim().is_empty();
+
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        buf.push_str(trimmed);
+
+        // Indentatsiyali (ko'p qatorli) blokni darhol eval QILMAYMIZ — `else`/`catch`
+        // yoki davomi keyingi qatorda kelishi mumkin (masalan `if`+body parse bo'ladi,
+        // ammo `else` hali yo'q). Bunday blokni faqat bo'sh qator (force_eval) yopadi.
+        // Indentatsiyasiz bir-qatorli ifoda esa parse o'tishi bilan darhol eval bo'ladi
+        // (oddiy `1 + 2` uchun bo'sh qator talab qilmaymiz).
+        let ready = if force_eval {
+            true
+        } else if is_multiline_block(&buf) {
+            false
+        } else {
+            check_source(&buf).is_ok()
+        };
+
+        if ready {
+            repl_eval(&interp, &buf);
+            buf.clear();
+        }
+    }
+}
+
+// Bufer indentatsiyali blokmi (biror qator bo'shliq bilan boshlanadimi)? Shunday
+// bo'lsa REPL davomini kutadi (else/catch/qo'shimcha body kelishi mumkin) va faqat
+// bo'sh qator blokni yopadi. Birinchi qator hech qachon indentatsiyali bo'lmaydi —
+// shuning uchun keyingi qatorlardan birortasi indentatsiyali bo'lsa yetadi.
+fn is_multiline_block(buf: &str) -> bool {
+    buf.lines()
+        .any(|l| l.starts_with(' ') || l.starts_with('\t'))
+}
+
+// Bufer mazmunini bajaradi va natijani chop etadi. Xato bo'lsa stderr'ga
+// "Fluxon xato: ..." ko'rinishida — sessiya tugamaydi (keyingi promptga o'tadi).
+fn repl_eval(interp: &interp::Interp, src: &str) {
+    match interp.run_repl_chunk(&match lex_parse(src) {
+        Ok(prog) => prog,
+        Err(e) => {
+            eprintln!("Fluxon xato: {}", e);
+            return;
+        }
+    }) {
+        // Nil natijani (e'lon, log, assign) chop etmaymiz — shovqin bo'lardi.
+        // Boshqa qiymatni `repr` bilan (string'lar tirnoqli) ko'rsatamiz.
+        Ok(value::Value::Nil) => {}
+        Ok(v) => println!("{}", v.repr()),
+        Err(e) => eprintln!("Fluxon xato: {}", e),
+    }
+}
+
+// REPL uchun lex+parse — `run_source_at` ichidagi bilan bir xil, lekin AST'ni
+// qaytaradi (REPL chunk'iga uzatish uchun).
+fn lex_parse(src: &str) -> Result<ast::Program, String> {
+    let toks = lexer::lex(src)?;
+    parser::parse(toks)
+}
+
+fn print_repl_help() {
+    println!(
+        "REPL buyruqlari:\n  \
+         :help, :h    — bu yordam\n  \
+         :q, :quit    — chiqish (Ctrl-D ham)\n\
+         Bir qator kod yozing va Enter bosing. if/each/fn kabi bloklar bir necha\n\
+         qatorga cho'zilsa, blok tugaguncha kiritishda davom eting; bo'sh qator\n\
+         blokni yopadi. Natija (nil bo'lmasa) avtomatik chop etiladi."
+    );
 }
 
 #[cfg(test)]
@@ -3484,5 +3634,66 @@ fs.del yol
 b = crypto.b64db "AP/+iA=="
 ((json.enc {fayl:b}) == "{\"fayl\":\"AP/+iA==\"}") | (fail "json.enc bytes buzildi")
 "#);
+    }
+
+    // Issue #138: REPL bitta blokni bajarib oxirgi ifoda QIYMATINI qaytaradi
+    // (chop etish uchun). `run` () qaytaradi — bu farq REPL natijasini ko'rsatishga
+    // imkon beradi. lex_parse + run_repl_chunk REPL'da aynan shu yo'l bilan ishlaydi.
+    fn repl_chunk(interp: &interp::Interp, src: &str) -> Result<value::Value, String> {
+        interp.run_repl_chunk(&lex_parse(src)?)
+    }
+
+    // Value Debug/PartialEq derive QILMAYDI (closure'lar) — qiymatni `repr()` matni
+    // bilan solishtiramiz (REPL ham aynan repr'ni chop etadi).
+    #[test]
+    fn repl_oxirgi_ifoda_qiymatini_qaytaradi() {
+        let interp = interp::Interp::new_arc();
+        // Ifoda qiymati qaytadi
+        assert_eq!(repl_chunk(&interp, "1 + 2").unwrap().repr(), "3");
+        // Bind (e'lon) nil qaytaradi — REPL bunday natijani chop ETMAYDI
+        assert!(matches!(
+            repl_chunk(&interp, "x = 10").unwrap(),
+            value::Value::Nil
+        ));
+        // Oxirgi stmt qiymati: oldingi chunk'dagi `x` ko'rinadi (state saqlanadi)
+        assert_eq!(repl_chunk(&interp, "x * 3").unwrap().repr(), "30");
+        // String qiymat repr'da tirnoq bilan ko'rsatiladi
+        assert_eq!(
+            repl_chunk(&interp, r#""salom""#).unwrap().repr(),
+            "\"salom\""
+        );
+    }
+
+    #[test]
+    fn repl_state_chunklar_orasida_saqlanadi() {
+        let interp = interp::Interp::new_arc();
+        // fn ta'rifi bir chunk'da, chaqiruvi keyingisida — bitta interp'da yashaydi.
+        repl_chunk(&interp, "fn sq n\n  ret n * n").unwrap();
+        assert_eq!(repl_chunk(&interp, "sq 9").unwrap().repr(), "81");
+        // <- bilan o'zgaruvchi va keyin uni o'qish
+        repl_chunk(&interp, "c <- 0").unwrap();
+        repl_chunk(&interp, "c <- c + 5").unwrap();
+        assert_eq!(repl_chunk(&interp, "c").unwrap().repr(), "5");
+    }
+
+    #[test]
+    fn repl_xato_qaytadi_sessiya_oldinmas() {
+        let interp = interp::Interp::new_arc();
+        // Noma'lum nom xato qaytaradi (panic emas) — REPL buni stderr'ga chiqarib
+        // davom etadi. Keyingi chunk normal ishlaydi (interp buzilmaydi).
+        assert!(repl_chunk(&interp, "nosuchvar + 1").is_err());
+        assert_eq!(repl_chunk(&interp, "1 + 1").unwrap().repr(), "2");
+    }
+
+    #[test]
+    fn repl_multiline_block_heuristikasi() {
+        // Bir qatorli ifoda — blok emas (parse o'tishi bilan darhol eval bo'ladi).
+        assert!(!is_multiline_block("1 + 2"));
+        // if + indentatsiyali body — blok (else/davom kelishi mumkin, kutiladi).
+        assert!(is_multiline_block("if x > 5\n  \"katta\""));
+        // tab bilan chekinish ham blok hisoblanadi.
+        assert!(is_multiline_block("fn f\n\tret 1"));
+        // Bo'sh bufer — blok emas.
+        assert!(!is_multiline_block(""));
     }
 }
