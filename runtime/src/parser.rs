@@ -22,13 +22,6 @@ pub struct Parser {
     // application bosqichini o'chiradi, shunda `{a:f b:g}` da `f` `b`ni argument
     // sifatida yutmaydi. Chaqiruv kerak bo'lsa: `{a:(f x)}`.
     no_app: bool,
-    // Bir qatorli lambda body o'qilayotganida yoqiladi (`\-> f x`). Body ichida
-    // qavssiz chaqiruv ishlasin (`f x`), LEKIN keyingi `\->` lambda'ni argument
-    // deb yutmasin — list/map ichidagi `[\-> a  \-> b]` da har lambda alohida
-    // element bo'lib qolishi uchun. Faqat ARGUMENT pozitsiyasidagi Backslash'ni
-    // to'sadi (body birinchi atomi `parse_primary` orqali baribir lambda bo'la
-    // oladi); nested lambda kerak bo'lsa qavs bilan: `\-> (\x -> x)`.
-    arrow_body: bool,
     // Rekursiv descent chuqurligi (ichma-ich ifoda/blok). Limitsiz chuqur
     // nesting (~2000 qavs) native stack'ni to'ldirib process'ni ABORT qiladi —
     // limit undan oldin aniq parse xatosi qaytaradi (issue #90).
@@ -54,7 +47,6 @@ pub fn parse(toks: Vec<Token>) -> ParseResult<Program> {
         toks,
         pos: 0,
         no_app: false,
-        arrow_body: false,
         depth: 0,
     };
     p.parse_program()
@@ -169,22 +161,9 @@ impl Parser {
             self.advance();
             self.parse_block()
         } else {
-            // bir qatorli: bitta ifoda. `->` aniq chegara, shuning uchun body
-            // ichida qavssiz chaqiruv yana ishlaydi — list/map elementi ichida
-            // lambda bo'lsa ham (`par [\-> http.get u]`, `[\-> str.up x]`).
-            // Aks holda `no_app` (list/map konteksti) lambda body'dagi `f x`
-            // chaqiruvni buzardi: `\-> str.up x` da `x` keyingi list elementi
-            // bo'lib yutilardi. `arrow_body` esa application'ni yoqadi, lekin
-            // keyingi `\->` lambda'ni argument deb yutishni to'sadi (list ichidagi
-            // `[\-> a  \-> b]` har lambda alohida element bo'lib qolsin).
-            let saved_no_app = self.no_app;
-            let saved_arrow = self.arrow_body;
-            self.no_app = false;
-            self.arrow_body = true;
-            let e = self.parse_expr();
-            self.no_app = saved_no_app;
-            self.arrow_body = saved_arrow;
-            Ok(vec![Stmt::Expr(e?)])
+            // bir qatorli: bitta ifoda
+            let e = self.parse_expr()?;
+            Ok(vec![Stmt::Expr(e)])
         }
     }
 
@@ -851,7 +830,6 @@ impl Parser {
                         toks,
                         pos: 0,
                         no_app: false,
-                        arrow_body: false,
                         // Tashqi chuqurlikni meros qilamiz — interpolatsiya orqali
                         // limitni aylanib o'tib bo'lmasin.
                         depth: self.depth,
@@ -1126,19 +1104,6 @@ impl Parser {
     // aniqlash uchun). Operatorlar, blok-chegaralar va kalit so'zlar atom
     // boshlamaydi.
     fn is_atom_start(&self) -> bool {
-        // Bir qatorli lambda body ichida (`arrow_body`):
-        //  • keyingi `\->` ARGUMENT emas — alohida lambda (list/map elementi yoki
-        //    keyingi binding). `[\-> a  \-> b]` da birinchi body `b`ni yutmasin.
-        //  • keyingi `ident :` map kalit naqshi (`{k: \s -> body  k2: ...}`) —
-        //    body `k2`ni argument deb yutib, `:`da xato bermasin.
-        if self.arrow_body {
-            if matches!(self.peek(), Tok::Backslash) {
-                return false;
-            }
-            if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek2(), Tok::Colon) {
-                return false;
-            }
-        }
         matches!(
             self.peek(),
             Tok::Int(_)

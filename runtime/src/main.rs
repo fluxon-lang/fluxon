@@ -461,13 +461,18 @@ g "saqlangan funksiya"
     // Issue #137: par — til-darajasidagi parallel fan-out. Lambdalar ro'yxatini
     // har birini alohida thread'da chaqiradi, hammasini kutadi, natijalar
     // (kirish tartibida) har biri {ok:...} yoki {err:...}.
+    // Eslatma: list ichidagi lambda elementlar QAVS bilan ajraladi — `(\-> ...)`.
+    // Lexer list/map ichida Newline token chiqarmaydi (`paren_depth>0`), shuning
+    // uchun qavssiz `[\-> a  \-> b]` da birinchi body ikkinchisini argument deb
+    // yutardi; qavs body chegarasini aniqlaydi va nested HOF (`\-> xs.map \x ->`)
+    // ham buzilmaydi (issue #137 PR review, P2).
     #[test]
     fn par_asosiy_fan_out() {
         run(r#"
 r = par [
-  \-> 1 + 1
-  \-> str.up "hi"
-  \-> [1 2 3].len
+  (\-> 1 + 1)
+  (\-> str.up "hi")
+  (\-> [1 2 3].len)
 ]
 ((r.len) == 3) | (fail "par 3 natija qaytarishi kerak")
 ((r.0.ok) == 2) | (fail "1-natija {ok:2} bo'lishi kerak")
@@ -482,9 +487,9 @@ r = par [
     fn par_qisman_muvaffaqiyat() {
         run(r#"
 r = par [
-  \-> 42
-  \-> fail "qasddan"
-  \-> "uchinchi"
+  (\-> 42)
+  (\-> fail "qasddan")
+  (\-> "uchinchi")
 ]
 ((r.0.ok) == 42) | (fail "1-natija ok bo'lishi kerak")
 ((r.1.err) == "qasddan") | (fail "2-natija err bo'lishi kerak")
@@ -497,9 +502,20 @@ r = par [
     fn par_closure_capture() {
         run(r#"
 base = 100
-r = par [\-> base + 1  \-> base + 2]
+r = par [(\-> base + 1) (\-> base + 2)]
 ((r.0.ok) == 101) | (fail "closure capture 1 buzildi")
 ((r.1.ok) == 102) | (fail "closure capture 2 buzildi")
+"#);
+    }
+
+    // Issue #137: lambda body ichida nested paren-free HOF (`xs.map \x -> ...`)
+    // qavs ichida to'liq o'qiladi — P2 regressiyasi yo'q.
+    #[test]
+    fn par_nested_hof() {
+        run(r#"
+r = par [(\-> [1 2 3].map \x -> x + 1)]
+((r.0.ok.0) == 2) | (fail "nested HOF 1-element buzildi")
+((r.0.ok.2) == 4) | (fail "nested HOF 3-element buzildi")
 "#);
     }
 
@@ -532,6 +548,30 @@ fn id v -> v
 par = (id 7)
 (par == 7) | (fail "par o'zgaruvchi sifatida shadow bo'lmadi")
 "#);
+    }
+
+    // Issue #137 (PR review P1): par'ni db.tx ichidan chaqirish aniq xato beradi —
+    // yangi thread'lar CURRENT_TX TLS'ni meros qilmaydi, jim ravishda tx
+    // tashqarisida ishlash o'rniga rad etiladi. (DB test — DB_TEST_LOCK.)
+    #[test]
+    fn par_db_tx_ichida_rad_etiladi() {
+        with_db_test("par_in_tx", || {
+            let e = run_source(
+                r#"
+use db
+tbl t
+  id serial pk
+db.tx \->
+  par [(\-> 1)]
+"#,
+            )
+            .unwrap_err();
+            assert!(
+                e.contains("db.tx ichida ishlatib bo'lmaydi"),
+                "par db.tx ichida aniq xato kutiladi, keldi: {}",
+                e
+            );
+        });
     }
 
     // Issue #139: foydalanuvchi `log` nomli o'zgaruvchi e'lon qilsa, u ustun

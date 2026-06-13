@@ -986,6 +986,16 @@ impl Drop for TxClearGuard {
     }
 }
 
+// Joriy thread'da aktiv tranzaksiya (`db.tx`) bormi. `par` shu orqali tx ichidan
+// chaqirilganini aniqlaydi: yangi thread'lar `CURRENT_TX` TLS'ni MEROS QILMAYDI,
+// shuning uchun par lambda'lari tranzaksiya kontekstidan tashqarida ishlardi
+// (read-your-writes/atomiklik buzilardi) — par buni aniq xato bilan rad etadi
+// (issue #137 PR review, P1). SQLite connection thread-safe emas, demak tx'ni
+// thread'lar orasida ulashib ham bo'lmaydi — taqiq to'g'ri yechim.
+pub(crate) fn tx_active() -> bool {
+    CURRENT_TX.with(|c| c.borrow().is_some())
+}
+
 // Joriy tx bo'lsa unga yo'naltiradi, aks holda global Db'ga. f — tx/db ustida
 // ishlaydigan closure.
 fn with_db<T>(

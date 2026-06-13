@@ -56,6 +56,19 @@ impl Interp {
             return Ok(Value::List(Vec::new()));
         }
 
+        // db.tx ichidan par CHAQIRIB BO'LMAYDI: tranzaksiya joriy thread'ning
+        // `CURRENT_TX` TLS'ida turadi va yangi thread'lar uni meros qilmaydi —
+        // par lambda'lari jim ravishda tranzaksiyadan TASHQARIDA (global DB,
+        // commit qilinmagan o'zgarishlarni ko'rmay) ishlardi, db.tx atomiklik/
+        // read-your-writes semantikasini buzib. SQLite connection thread-safe
+        // bo'lmagani uchun tx'ni ulashib ham bo'lmaydi. Jim noto'g'ri ishlash
+        // o'rniga aniq xato beramiz (issue #137 PR review, P1).
+        if crate::db_mod::tx_active() {
+            return Err(Flow::err(
+                "par: db.tx ichida ishlatib bo'lmaydi (tranzaksiya thread'lar orasida ulashilmaydi); tx tashqarisida chaqiring",
+            ));
+        }
+
         // Har lambdani alohida thread'da chaqiramiz. Thread `Arc<Interp>` klonini
         // ushlaydi (zaif emas — chaqiruv davomida tirik turishi kafolatlangan).
         let handles: Vec<_> = list
