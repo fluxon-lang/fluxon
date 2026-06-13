@@ -609,10 +609,16 @@ If a header value is not a string it is converted to text; a header with a `nil`
 value is dropped. If the user provides `content-type`, that is used instead of
 the automatic `application/json`.
 
-### 9.2 `db` — database (Postgres)
+### 9.2 `db` — database (SQLite)
 
 The connection is **automatic**: it is read from the `$DATABASE_URL` environment
-variable. You write no connection code.
+variable (default `sqlite:fluxon.db`). You write no connection code.
+
+> **Backend status.** Today the only working backend is **SQLite** (bundled via
+> `rusqlite` — no server to run). Set `DATABASE_URL=sqlite:app.db`, `sqlite::memory:`,
+> or `sqlite:file:...`. **Postgres and MySQL are planned, not yet wired** — a
+> `postgres://`/`mysql://` URL currently errors out. The `db` API is written to be
+> backend-agnostic, so your code will not change when they land.
 
 ```fluxon
 use db
@@ -663,11 +669,11 @@ ord = db.tx \->
   ret o            # the block value goes outside
 ```
 
-**Concurrency (parallel requests) guarantee.** `db.tx` automatically runs at the
-strongest isolation and **automatically retries** on conflict. This means the
-"read → check → modify" pattern is safe. For example, two parallel withdrawals
-from one account — both see the same balance, and they do not both go through (no
-overdraft):
+**Concurrency (parallel requests) guarantee.** `db.tx` takes the write lock up
+front (`BEGIN IMMEDIATE`) and a contending transaction waits (up to the
+`busy_timeout`) instead of racing. This means the "read → check → modify" pattern
+is safe. For example, two parallel withdrawals from one account — both cannot go
+through at once, and there is no overdraft:
 ```fluxon
 db.tx \->
   acc = db.one "select * from accounts where id=$1" [aid]

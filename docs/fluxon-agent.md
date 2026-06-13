@@ -232,7 +232,7 @@ http.on :get "/api/me" \req ->
   upstream → error instead of blocking forever. `timeout: 0` disables (trusted only).
   Server also enforces a 30s header-read timeout (slowloris guard).
 
-### db (Postgres, $DATABASE_URL auto)
+### db (SQLite bundled, $DATABASE_URL auto; Postgres planned)
 ```fluxon
 row  = db.ins "orders" {cust:5 status::new}          # → full row (with id)
 db.up "orders" {total:1500} {id:oid}                 # {set} {where}
@@ -296,8 +296,9 @@ res = db.tx \->
     db.up "products" {stock:it.stock - it.qty} {id:it.id}
   ret ord
 ```
-`db.tx` auto-serializable + retry → "read-check-update" is race-safe (no lock
-needed). Idempotency: `uniq` column + ins inside tx (duplicate → rollback):
+`db.tx` takes the write lock up front (`BEGIN IMMEDIATE`) and waits on contention
+(`busy_timeout`) → "read-check-update" is race-safe (no manual lock needed).
+Idempotency: `uniq` column + ins inside tx (duplicate → rollback):
 ```fluxon
 old = db.one "select * from txns where ikey=$1" [key]
 old ?? (ret old)

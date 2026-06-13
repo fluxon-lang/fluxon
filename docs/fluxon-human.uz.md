@@ -620,10 +620,17 @@ vaqtinchalik xato qaytarsa (429 rate-limit / 529 overloaded) so'rov **bir marta*
 avtomatik qayta uriniladi (server `Retry-After` bersa unga amal qilinadi,
 bo'lmasa 2s kutiladi); boshqa xatolar darhol qaytadi.
 
-### 9.2 `db` — ma'lumotlar bazasi (Postgres)
+### 9.2 `db` — ma'lumotlar bazasi (SQLite)
 
-Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi. Hech
-qanday ulanish kodi yozmaysiz.
+Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi (default
+`sqlite:fluxon.db`). Hech qanday ulanish kodi yozmaysiz.
+
+> **Backend holati.** Bugun ishlaydigan yagona backend — **SQLite** (`rusqlite`
+> orqali bundled, server kerak emas). `DATABASE_URL=sqlite:app.db`,
+> `sqlite::memory:` yoki `sqlite:file:...` qo'ying. **Postgres va MySQL
+> rejalashtirilgan, hali ulanmagan** — `postgres://`/`mysql://` URL hozir xato
+> qaytaradi. `db` API backend'dan mustaqil yozilgan, shuning uchun ular
+> qo'shilganda kodingiz o'zgarmaydi.
 
 ```fluxon
 use db
@@ -674,11 +681,11 @@ ord = db.tx \->
   ret o            # blok qiymati tashqariga
 ```
 
-**Concurrency (parallel so'rovlar) kafolati.** `db.tx` avtomat eng kuchli
-izolyatsiyada ishlaydi va konflikt bo'lsa **avtomat qayta uriniladi**. Bu
-shuni anglatadiki, "o'qib → tekshirib → o'zgartirish" naqshi xavfsiz. Masalan,
-bir hisobdan ikki parallel pul yechish — ikkalasi ham bir balansni ko'rib,
-ikkalasi ham o'tib ketmaydi (overdraft bo'lmaydi):
+**Concurrency (parallel so'rovlar) kafolati.** `db.tx` write-lock'ni oldindan
+oladi (`BEGIN IMMEDIATE`), raqib tranzaksiya esa poyga o'rniga kutadi
+(`busy_timeout` chegarasigacha). Bu shuni anglatadiki, "o'qib → tekshirib →
+o'zgartirish" naqshi xavfsiz. Masalan, bir hisobdan ikki parallel pul yechish —
+ikkalasi bir vaqtda o'tib keta olmaydi, overdraft bo'lmaydi:
 ```fluxon
 db.tx \->
   acc = db.one "select * from accounts where id=$1" [aid]
