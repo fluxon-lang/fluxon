@@ -1,10 +1,10 @@
-// Fluxon runtime qiymatlari.
+// Fluxon runtime values.
 //
-// List va Map ulashilgan/o'zgaruvchan bo'lishi mumkin (spec: `m.set`, `l.push`
-// yangi qiymat qaytaradi, lekin shared state map'lar `<-` bilan boshqariladi).
-// Soddalik uchun list/map'ni Rc<RefCell<...>> bilan emas, oddiy klonlanadigan
-// qiymat sifatida saqlaymiz — Fluxon semantikasi asosan "yangi qiymat qaytarish"
-// (persistent) uslubida, mutatsiya esa binding qayta tayinlash orqali.
+// List and Map may be shared/mutable (spec: `m.set`, `l.push` return a new
+// value, but shared-state maps are managed via `<-`). For simplicity we store
+// list/map as plain cloneable values rather than Rc<RefCell<...>> — Fluxon
+// semantics are mostly in the "return a new value" (persistent) style, with
+// mutation done by re-binding.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,35 +20,35 @@ pub enum Value {
     Bool(bool),
     Nil,
     Sym(String),
-    // Ikkilik ma'lumot (issue #132): fayl tarkibi, HTTP binary body, hash
-    // natijalari. Arc — katta fayl klonlashda nusxalanmasin (HTTP javobida
-    // body bir necha marta ko'chadi); Send+Sync invarianti ham saqlanadi.
+    // Binary data (issue #132): file contents, HTTP binary body, hash results.
+    // Arc keeps large files from being copied on clone (a body is moved several
+    // times in an HTTP response); the Send+Sync invariant is preserved too.
     Bytes(Arc<Vec<u8>>),
     List(Vec<Value>),
-    // Tartibni barqaror saqlash uchun BTreeMap (chiqishni deterministik qiladi).
+    // BTreeMap to keep a stable ordering (makes output deterministic).
     Map(BTreeMap<String, Value>),
-    // Foydalanuvchi funksiyasi (closure): parametrlar, tana, qamrab olingan
-    // muhit (lexical scope).
+    // User function (closure): parameters, body, captured environment
+    // (lexical scope).
     Fn(Arc<FnValue>),
-    // Rust'da yozilgan ichki funksiya (builtin).
+    // Built-in function written in Rust (builtin).
     Native(Arc<NativeFn>),
-    // Request-scoped context store: `req.ctx` shu yerda turadi (issue #68).
-    // Map immutable + klonlanadi, shuning uchun middleware va handler bir xil
-    // ctx'ni ko'rishi uchun SHARED mutable kerak — `Arc<Mutex>` aynan shuni
-    // beradi (klonlanganda Arc ulashiladi, cell o'sha qoladi). Send+Sync
-    // invarianti saqlanadi. Foydalanuvchiga oddiy map ko'rinadi (type_name="map",
-    // o'qiganda snapshot Map qaytadi — interp::get_field).
+    // Request-scoped context store: `req.ctx` lives here (issue #68). A Map is
+    // immutable + cloned, so for middleware and handler to see the same ctx we
+    // need SHARED mutable state — `Arc<Mutex>` gives exactly that (on clone the
+    // Arc is shared, the cell stays the same). The Send+Sync invariant is
+    // preserved. To the user it looks like a plain map (type_name="map", and
+    // reading it returns a snapshot Map — interp::get_field).
     Ctx(Arc<Mutex<BTreeMap<String, Value>>>),
 }
 
 pub struct FnValue {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
-    // Closure ota-havolasi. `apply` shundan child scope ochadi — top-level
-    // fn'lar uchun bu `Parent::Root`, shuning uchun rekursiv chaqiruvda root
-    // Arc klonlanmaydi/lock olinmaydi (atomik contention yo'q). Nested closure
-    // runtime'da joriy scope'ni ushlaydi (`Parent::Scope`). Avval to'liq
-    // `closure: Env` edi — har `apply` root Arc'ni klonlardi.
+    // Closure parent link. `apply` opens a child scope from it — for top-level
+    // fn's this is `Parent::Root`, so a recursive call does not clone the root
+    // Arc / take a lock (no atomic contention). A nested closure captures the
+    // current runtime scope (`Parent::Scope`). It used to be a full
+    // `closure: Env` — every `apply` cloned the root Arc.
     pub parent: crate::interp::Parent,
     pub name: String,
 }
@@ -58,7 +58,7 @@ pub struct NativeFn {
     pub func: Box<dyn Fn(Vec<Value>) -> Result<Value, crate::interp::Flow> + Send + Sync>,
 }
 
-// Map'ni `{k:v ...}` ko'rinishida chop etadi (Map va Ctx Display uchun umumiy).
+// Prints a map as `{k:v ...}` (shared by Map and Ctx Display).
 fn write_map(f: &mut fmt::Formatter<'_>, m: &BTreeMap<String, Value>) -> fmt::Result {
     write!(f, "{{")?;
     for (i, (k, v)) in m.iter().enumerate() {
@@ -70,13 +70,13 @@ fn write_map(f: &mut fmt::Formatter<'_>, m: &BTreeMap<String, Value>) -> fmt::Re
     write!(f, "}}")
 }
 
-// Ikki map'ni Fluxon `==` semantikasi bilan taqqoslaydi (Map va Ctx uchun umumiy).
+// Compares two maps with Fluxon `==` semantics (shared by Map and Ctx).
 fn maps_equal(a: &BTreeMap<String, Value>, b: &BTreeMap<String, Value>) -> bool {
     a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w)))
 }
 
 impl Value {
-    // Fluxon truthiness: faqat nil va false yolg'on; qolgan hammasi rost.
+    // Fluxon truthiness: only nil and false are falsy; everything else is true.
     pub fn truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }
@@ -92,13 +92,13 @@ impl Value {
             Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
             Value::Map(_) => "map",
-            // ctx foydalanuvchiga oddiy map ko'rinadi — ichki tipni oshkor qilmaymiz.
+            // ctx looks like a plain map to the user — we do not expose the inner type.
             Value::Ctx(_) => "map",
             Value::Fn(_) | Value::Native(_) => "fn",
         }
     }
 
-    // Tenglik — Fluxon `==` semantikasi.
+    // Equality — Fluxon `==` semantics.
     pub fn equals(&self, other: &Value) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
@@ -113,11 +113,11 @@ impl Value {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y))
             }
             (Value::Map(a), Value::Map(b)) => maps_equal(a, b),
-            // ctx oddiy map kabi taqqoslanadi (snapshot orqali). MUHIM: ikki lock'ni
-            // bir vaqtda USHLAMAYMIZ — `req == req` (yoki klon) da a va b bir xil
-            // Arc<Mutex> bo'lishi mumkin; ikkinchi lock o'sha non-reentrant mutex'ni
-            // qayta olib deadlock qilardi. Avval bir xil Arc'ni ptr_eq bilan
-            // qisqa-tutamiz, aks holda har birini ALOHIDA snapshot qilib taqqoslaymiz.
+            // ctx is compared like a plain map (via a snapshot). IMPORTANT: we do
+            // NOT hold two locks at once — in `req == req` (or a clone) a and b may
+            // be the same Arc<Mutex>; taking the second lock on that non-reentrant
+            // mutex would deadlock. We first short-circuit identical Arc's via
+            // ptr_eq, otherwise snapshot each one SEPARATELY and compare.
             (Value::Ctx(a), Value::Ctx(b)) => {
                 if Arc::ptr_eq(a, b) {
                     return true;
@@ -135,13 +135,13 @@ impl Value {
     }
 }
 
-// Foydalanuvchiga ko'rinadigan format (log uchun).
+// User-visible format (for logging).
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Int(n) => write!(f, "{}", n),
             Value::Flt(x) => {
-                // butun float bo'lsa ham nuqta ko'rsatamiz (1.0), aks holda oddiy
+                // show a decimal point even for whole floats (1.0), otherwise plain
                 if x.fract() == 0.0 && x.is_finite() {
                     write!(f, "{:.1}", x)
                 } else {
@@ -152,8 +152,8 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Nil => write!(f, "nil"),
             Value::Sym(s) => write!(f, ":{}", s),
-            // Xom baytlarni matnga quyish xavfli (terminal/log buziladi) —
-            // o'lchamli qisqa belgi chiqaramiz. Matn kerak bo'lsa: bytes.str b.
+            // Dumping raw bytes as text is dangerous (corrupts terminal/log) —
+            // we emit a short marker with the size. For text use: bytes.str b.
             Value::Bytes(b) => write!(f, "<bytes {}>", b.len()),
             Value::List(items) => {
                 write!(f, "[")?;
@@ -166,7 +166,7 @@ impl fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Map(m) => write_map(f, m),
-            // ctx oddiy map kabi chop etiladi (snapshot).
+            // ctx is printed like a plain map (snapshot).
             Value::Ctx(c) => write_map(f, &c.lock().unwrap()),
             Value::Fn(fv) => write!(f, "<fn {}>", fv.name),
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
@@ -175,10 +175,10 @@ impl fmt::Display for Value {
 }
 
 impl Value {
-    // Matnli ko'rinish: qiymat STRING'ga aylantirilganda ishlatiladi
-    // (interpolatsiya, str.str, `+` birlashtirish, log). Symbol bu yerda `:`
-    // prefiksisiz nomini beradi — `:` sintaksis belgisi, qiymatning matn
-    // ko'rinishi emas (issue #57). Qolgan turlar Display bilan bir xil.
+    // Text form: used when a value is converted to a STRING (interpolation,
+    // str.str, `+` concatenation, log). A symbol here gives its name without the
+    // `:` prefix — `:` is a syntax marker, not part of the value's text form
+    // (issue #57). Other types match Display.
     pub fn to_text(&self) -> String {
         match self {
             Value::Sym(s) => s.clone(),
@@ -186,9 +186,9 @@ impl Value {
         }
     }
 
-    // List/map ichida ko'rinish: stringlar tirnoq bilan, qolgani Display.
-    // Bu yerda symbol `:` prefiksini SAQLAYDI — list/map ichida symbol
-    // string'dan (yoki boshqa turdan) ajralib turishi kerak.
+    // Form inside a list/map: strings quoted, the rest as Display. Here a symbol
+    // KEEPS its `:` prefix — inside a list/map a symbol must be distinguishable
+    // from a string (or other type).
     pub fn repr(&self) -> String {
         match self {
             Value::Str(s) => format!("\"{}\"", s),

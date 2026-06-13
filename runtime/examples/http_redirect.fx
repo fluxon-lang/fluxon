@@ -1,33 +1,33 @@
-# HTTP klient: response header'lari + redirect kuzatuvi misoli (issue #13).
+# HTTP client: response headers + redirect following example (issue #13).
 #
-# Ikki yondashuv ko'rsatiladi:
-#   1) follow:true — klient redirectni o'zi kuzatadi (kam kod).
-#   2) Qo'lda loop — har hop nazorat ostida (res.headers.location o'qib).
+# Two approaches are shown:
+#   1) follow:true — the client follows the redirect itself (less code).
+#   2) Manual loop — every hop under control (reading res.headers.location).
 #
-# Ishga tushirish: redirect qaytaruvchi server kerak. Soddalik uchun shu fayl
-# o'z ichida server ko'taradi (/short → /long), keyin klient bilan tekshiradi.
-# Real holatda url tashqi bo'ladi (bit.ly va h.k.).
+# Running: a server returning a redirect is needed. For simplicity this file
+# brings up its own server (/short -> /long), then checks it with the client.
+# In real cases the url would be external (bit.ly etc.).
 
 use http
 
-# --- demonstratsion server: /short 302 bilan /long'ga yo'naltiradi ---
+# --- demonstration server: /short redirects to /long with 302 ---
 http.on :get "/short" \req ->
   rep 302 {location:"/long"}
 http.on :get "/long" \req ->
-  rep 200 {final:true msg:"manzilga yetdik"}
+  rep 200 {final:true msg:"reached the destination"}
 
-# Server alohida thread'da; klient sinovini shu jarayonda ham ishga tushirib
-# bo'lmaydi (http.serve bloklaydi), shuning uchun bu fayl SERVER sifatida ishlaydi.
-# Klient qismini boshqa terminalda quyidagicha sinang:
+# The server is on a separate thread; the client test cannot be run in this
+# same process (http.serve blocks), so this file runs as a SERVER. Try the
+# client part in another terminal like this:
 #
 #   res = http.get "http://127.0.0.1:8088/short" {follow:true}
 #   log "status=${res.status} hops=${res.hops} body=${res.body.msg}"
 #
-#   # qo'lda kuzatish (hops'ni o'zingiz sanaysiz):
+#   # manual following (you count the hops yourself):
 #   r = http.get "http://127.0.0.1:8088/short"
 #   if r.status >= 300 & r.status < 400
 #     loc = r.headers.location
-#     log "redirect → ${loc}"
+#     log "redirect -> ${loc}"
 
-log "redirect demo server 8088-portda..."
+log "redirect demo server on port 8088..."
 http.serve 8088

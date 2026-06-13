@@ -1,51 +1,51 @@
-# AI chat — terminalda ishlaydigan kichik suhbat (REPL).
+# AI chat — a small terminal conversation (REPL).
 #
-# Kalit AVTOMATIK topiladi (hech narsa sozlash shart emas):
-#   .env yoki muhitda ANTHROPIC_API_KEY bo'lsa -> Claude
-#   OPENAI_API_KEY bo'lsa            -> GPT
-# Model: $AI_MODEL ?? provayder default. Override: $AI_PROVIDER (anthropic|openai).
+# The key is found AUTOMATICALLY (nothing to configure):
+#   if ANTHROPIC_API_KEY is in .env or the environment -> Claude
+#   if OPENAI_API_KEY                                  -> GPT
+# Model: $AI_MODEL ?? provider default. Override: $AI_PROVIDER (anthropic|openai).
 #
-# Ishga tushirish — `.env` qaysi katalogda bo'lsa, fluxon O'SHA katalogdan
-# ishga tushganda topadi (env_lookup joriy katalogdagi `.env`ni o'qiydi).
-#   # .env loyiha root'ida bo'lsa:
-#   cd <loyiha-root> && runtime/target/release/fluxon run runtime/examples/ai_chat.fx
-#   # yoki kalitni muhitga eksport qilib, istalgan katalogdan:
-#   export ANTHROPIC_API_KEY=sk-ant-...   # yoki OPENAI_API_KEY=sk-...
+# Running it — fluxon finds the `.env` from WHICHEVER directory it is
+# started in (env_lookup reads the `.env` in the current directory).
+#   # if .env is in the project root:
+#   cd <project-root> && runtime/target/release/fluxon run runtime/examples/ai_chat.fx
+#   # or export the key to the environment and run from any directory:
+#   export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY=sk-...
 #   fluxon run examples/ai_chat.fx
 #
-# Chiqish: "chiq", "exit" yoki "/q" deb yozing (yoki Ctrl+D).
+# To exit: type "quit", "exit" or "/q" (or Ctrl+D).
 
 use ai io
 
-io.print "Fluxon AI chat — savolingizni yozing ('chiq' = tugatish)\n\n"
+io.print "Fluxon AI chat — type your question ('quit' = finish)\n\n"
 
-# Suhbat tarixi — har yangi xabar va javob shu yerga qo'shiladi, shunda model
-# kontekstni eslab qoladi (ai.run msgs orqali ko'p qadamli suhbat).
-tarix <- []
+# Conversation history — every new message and reply is added here, so the model
+# remembers the context (multi-step conversation via ai.run msgs).
+history <- []
 
 each i in 1..1000
-  savol = io.prompt "siz> "
+  question = io.prompt "you> "
 
-  # EOF (Ctrl+D) -> nil; yoki chiqish so'zlari -> tugatamiz.
-  if savol == nil
-    io.print "\nxayr!\n"
+  # EOF (Ctrl+D) -> nil; or exit words -> we finish.
+  if question == nil
+    io.print "\nbye!\n"
     ret nil
-  if savol == "chiq" | savol == "exit" | savol == "/q"
-    io.print "xayr!\n"
+  if question == "quit" | question == "exit" | question == "/q"
+    io.print "bye!\n"
     ret nil
-  # bo'sh qatorni o'tkazib yuboramiz.
-  if savol == ""
+  # skip an empty line.
+  if question == ""
     skip
 
-  # Foydalanuvchi xabarini tarixga qo'shamiz.
-  tarix <- tarix.push {role::user content:savol}
+  # Add the user message to the history.
+  history <- history.push {role::user content:question}
 
-  # Modeldan javob — ai.run bitta qadam qaytaradi. Bu chatda tool yo'q,
-  # shuning uchun har doim :final keladi.
-  r = ai.run tarix []
+  # Reply from the model — ai.run returns a single step. There is no tool in
+  # this chat, so it always returns :final.
+  r = ai.run history []
 
-  javob = r.text
-  io.print "ai > ${javob}\n\n"
+  answer = r.text
+  io.print "ai > ${answer}\n\n"
 
-  # Model javobini ham tarixga qo'shamiz (keyingi savolda kontekst bo'lsin).
-  tarix <- tarix.push {role::assistant content:javob}
+  # Add the model reply to the history too (for context in the next question).
+  history <- history.push {role::assistant content:answer}

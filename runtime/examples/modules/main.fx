@@ -1,15 +1,15 @@
-# Foydalanuvchi modullari — `use ./fayl` (issue #45).
-# Yo'l shu faylning katalogiga nisbatan hal qilinadi; `.fx` kengaytmasi avto.
+# User modules — `use ./file` (issue #45).
+# The path is resolved relative to this file's directory; `.fx` extension is auto.
 
 use ./greet                 # greet.fx -> greet.* namespace
 
-log (greet.hello "Aziza")   # Salom, Aziza!
-log "til: ${greet.lang}"    # til: o'zbekcha
+log (greet.hello "Aziza")   # Hello, Aziza!
+log "lang: ${greet.lang}"   # lang: english
 
-# `as` bilan qayta nomlash (batareya nomi bilan to'qnashuvni oldini oladi).
+# Renaming with `as` (avoids clashing with a battery name).
 use ./greet as g
-log (g.hello "Bobur")       # Salom, Bobur!
+log (g.hello "Bobur")       # Hello, Bobur!
 
-# Modul-private nom (`prefix`) namespace'da yo'q — nil qaytaradi.
-(greet.prefix == nil) | (fail "private nom eksport qilinmasligi kerak")
-log "ok: private nom yashirin"
+# A module-private name (`prefix`) is not in the namespace — returns nil.
+(greet.prefix == nil) | (fail "a private name must not be exported")
+log "ok: private name is hidden"

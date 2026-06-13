@@ -1,37 +1,37 @@
-# Queue demo — fon navbati (background jobs) HTTP server bilan birga.
+# Queue demo — background jobs together with an HTTP server.
 #
-# Falsafa: webhook TEZ javob qaytarishi kerak. Og'ir ishni (SMS yuborish, hisobot
-# tayyorlash) fonga uzatamiz — `queue.push` darhol qaytadi, ish fon worker
-# thread'ida ketma-ket (FIFO) bajariladi.
+# Philosophy: a webhook must respond FAST. We push heavy work (sending SMS,
+# preparing a report) to the background — `queue.push` returns immediately, the
+# work runs sequentially (FIFO) on the background worker thread.
 #
-# `queue.on` handler ro'yxatga oladi (bloklamaydi), `queue.push` ish qo'shadi
-# (bloklamaydi). Handler bittagina `job` argumenti oladi — bu `queue.push`'ga
-# berilgan payload (map). Eng oxirgi bloklovchi chaqiruv (bu yerda http.serve)
-# processni tirik ushlaydi; worker fonda navbatni qayta ishlaydi.
+# `queue.on` registers a handler (non-blocking), `queue.push` adds work
+# (non-blocking). A handler takes a single `job` argument — the payload given
+# to `queue.push` (a map). The last blocking call (here http.serve) keeps the
+# process alive; the worker processes the queue in the background.
 
 use http queue
 
-# Ishlovchi: "send" nomli ishlar shu yerda bajariladi. job — push qilingan payload.
+# Worker: jobs named "send" run here. job — the pushed payload.
 queue.on "send" \job ->
-  log "SMS yuborilmoqda -> ${job.ph}: ${job.body}"
+  log "sending SMS -> ${job.ph}: ${job.body}"
 
-# Ishlovchi: "report" nomli og'ir ish (masalan hisobot generatsiyasi).
+# Worker: heavy job named "report" (e.g. report generation).
 queue.on "report" \job ->
-  log "hisobot tayyorlanmoqda: ${job.kind}"
+  log "preparing report: ${job.kind}"
 
-# Webhook: kelgan so'rovni navbatga uzatib, DARHOL javob qaytaradi.
-# Klient kutib turmaydi — og'ir ish fonda bajariladi.
+# Webhook: hands the incoming request to the queue and responds IMMEDIATELY.
+# The client does not wait — heavy work runs in the background.
 http.on :post "/notify" \req ->
   queue.push "send" {ph:req.body.ph body:req.body.text}
   rep 202 {queued:true}
 
-# Boshqa endpoint: hisobotni fonga uzatadi.
+# Another endpoint: hands a report to the background.
 http.on :post "/report" \req ->
   queue.push "report" {kind:req.body.kind}
   rep 202 {queued:true}
 
-# Server processni ushlab turadi; worker fonda navbatni qayta ishlaydi.
+# The server keeps the process alive; the worker processes the queue in the background.
 http.serve 8080
 
-# --- Server YO'Q, faqat queue bo'lsa: push'lardan keyin processni ushlash uchun
-# bloklovchi chaqiruv kerak. http.serve / ws.serve / cron.run dan birini ishlating.
+# --- NO server, queue only: to keep the process alive after the pushes you
+# need a blocking call. Use one of http.serve / ws.serve / cron.run.

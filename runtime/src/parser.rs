@@ -1,15 +1,15 @@
-// Fluxon parser — tokenlardan AST quradi.
+// Fluxon parser — builds an AST from tokens.
 //
-// Ikki qatlam:
-//   1) Statement/blok darajasi (recursive descent): Indent/Dedent/Newline
-//      tokenlariga tayanadi.
-//   2) Expression darajasi (precedence climbing): operatorlar ustuvorligi.
+// Two layers:
+//   1) Statement/block level (recursive descent): relies on Indent/Dedent/Newline
+//      tokens.
+//   2) Expression level (precedence climbing): operator precedence.
 //
-// Eng nozik joy — QAVSSIZ CHAQIRISH. Fluxon'da `f a b` = chaqiruv, `a + b` =
-// operator. Yechim: eng yuqori ("application") darajada ketma-ket "atom"larni
-// yig'amiz; agar bittadan ortiq atom yonma-yon kelsa, birinchisi callee,
-// qolganlari argument. Atom — operator yoki blok-chegara tokeniga duch
-// kelguncha o'qiladigan eng kichik to'liq ifoda.
+// The trickiest part is PARENTHESIS-FREE CALLS. In Fluxon `f a b` = a call,
+// `a + b` = an operator. The solution: at the top ("application") level we
+// collect consecutive "atoms"; if more than one atom sits side by side, the
+// first is the callee and the rest are arguments. An atom is the smallest
+// complete expression read until an operator or a block-boundary token is hit.
 
 use crate::ast::*;
 use crate::token::{StrPart, Tok, Token};
@@ -17,26 +17,26 @@ use crate::token::{StrPart, Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
-    // List/map literal ichida qavssiz (juxtaposition) chaqiruv ishlatilmaydi —
-    // u yerda har element atom yoki qavsli chaqiruv. Bu bayroq shu kontekstda
-    // application bosqichini o'chiradi, shunda `{a:f b:g}` da `f` `b`ni argument
-    // sifatida yutmaydi. Chaqiruv kerak bo'lsa: `{a:(f x)}`.
+    // Inside a list/map literal parenthesis-free (juxtaposition) calls are not
+    // used — there each element is an atom or a parenthesized call. This flag
+    // disables the application stage in that context, so in `{a:f b:g}` `f` does
+    // not swallow `b` as an argument. For a call use: `{a:(f x)}`.
     no_app: bool,
-    // Rekursiv descent chuqurligi (ichma-ich ifoda/blok). Limitsiz chuqur
-    // nesting (~2000 qavs) native stack'ni to'ldirib process'ni ABORT qiladi —
-    // limit undan oldin aniq parse xatosi qaytaradi (issue #90).
+    // Recursive-descent depth (nested expressions/blocks). Unbounded deep nesting
+    // (~2000 parens) would fill the native stack and ABORT the process — the
+    // limit returns a clean parse error before that (issue #90).
     depth: usize,
 }
 
-// Ichma-ich ifoda/blok uchun maksimal chuqurlik. Real kod ~o'nlab darajadan
-// oshmaydi; 256 — xavfsiz zaxira bilan. Native stack `stacker::maybe_grow`
-// bilan segmentlab o'sadi (interp'dagi kabi), shuning uchun haqiqiy chegara
-// shu hisoblagich — 2MB'lik thread'da ham abort emas, aniq parse xatosi.
+// Maximum depth for nested expressions/blocks. Real code does not exceed a few
+// dozen levels; 256 leaves a safe margin. The native stack grows in segments via
+// `stacker::maybe_grow` (as in interp), so the real limit is this counter — even
+// on a 2MB thread we get a clean parse error rather than an abort.
 const MAX_NEST_DEPTH: usize = 256;
 
-// stacker parametrlari: red zone bir nesting darajasi (parse_expr ->
-// parse_binary -> ... -> parse_primary zanjiri) ishlatadigan native stack'dan
-// kattaroq; segment hajmi bir necha yuz darajani sig'diradi.
+// stacker parameters: the red zone is larger than the native stack used by one
+// nesting level (the parse_expr -> parse_binary -> ... -> parse_primary chain);
+// the segment size fits a few hundred levels.
 const STACK_RED_ZONE: usize = 64 * 1024;
 const STACK_GROW_SIZE: usize = 1024 * 1024;
 
@@ -53,7 +53,7 @@ pub fn parse(toks: Vec<Token>) -> ParseResult<Program> {
 }
 
 impl Parser {
-    // --- token oqimi yordamchilari ---
+    // --- token stream helpers ---
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -66,7 +66,7 @@ impl Parser {
     fn line(&self) -> usize {
         self.toks[self.pos].line
     }
-    // Joriy token oldidan bo'shliq bormi (grammatik ajratish uchun).
+    // Whether whitespace precedes the current token (for grammatical separation).
     fn spaced(&self) -> bool {
         self.toks[self.pos].spaced
     }
@@ -94,21 +94,21 @@ impl Parser {
             Ok(())
         } else {
             Err(format!(
-                "{}-qatorda {} kutilgan edi, lekin {:?} topildi",
-                self.line(),
+                "expected {} on line {}, but found {:?}",
                 what,
+                self.line(),
                 self.peek()
             ))
         }
     }
-    // Statement chegarasidagi newline'larni yutadi.
+    // Consumes the newlines at a statement boundary.
     fn skip_newlines(&mut self) {
         while self.check(&Tok::Newline) {
             self.advance();
         }
     }
 
-    // --- dastur ---
+    // --- program ---
     fn parse_program(&mut self) -> ParseResult<Program> {
         let mut stmts = Vec::new();
         self.skip_newlines();
@@ -119,13 +119,13 @@ impl Parser {
         Ok(stmts)
     }
 
-    // Chuqurlik hisobchisini oshiradi; limitdan oshsa aniq parse xatosi.
-    // Chaqiruvchi muvaffaqiyat/xatodan qat'i nazar `self.depth -= 1` qilishi
-    // shart (parse_expr/parse_block shunday o'raydi).
+    // Increments the depth counter; a clean parse error if the limit is exceeded.
+    // The caller must do `self.depth -= 1` regardless of success/error
+    // (parse_expr/parse_block wrap it that way).
     fn enter_depth(&mut self) -> ParseResult<()> {
         if self.depth >= MAX_NEST_DEPTH {
             return Err(format!(
-                "{}-qatorda ifoda/blok juda chuqur ichma-ich ({} darajadan oshdi) — soddalashtiring",
+                "expression/block nested too deep on line {} (exceeded {} levels) — simplify it",
                 self.line(),
                 MAX_NEST_DEPTH
             ));
@@ -134,8 +134,8 @@ impl Parser {
         Ok(())
     }
 
-    // Indent...Dedent bilan o'ralgan blok. Chaqiruvchi avval Newline'ni yutib,
-    // Indent kelishini ta'minlaydi.
+    // A block wrapped in Indent...Dedent. The caller first consumes the Newline,
+    // ensuring an Indent follows.
     fn parse_block(&mut self) -> ParseResult<Vec<Stmt>> {
         self.enter_depth()?;
         let r = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.parse_block_inner());
@@ -144,30 +144,30 @@ impl Parser {
     }
 
     fn parse_block_inner(&mut self) -> ParseResult<Vec<Stmt>> {
-        self.expect(&Tok::Indent, "blok (chekinish)")?;
+        self.expect(&Tok::Indent, "block (indentation)")?;
         let mut stmts = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
             stmts.push(self.parse_stmt()?);
             self.skip_newlines();
         }
-        self.expect(&Tok::Dedent, "blok oxiri")?;
+        self.expect(&Tok::Dedent, "end of block")?;
         Ok(stmts)
     }
 
-    // `->` dan keyingi tana: bir qatorli ifoda YOKI yangi qatordagi blok.
+    // The body after `->`: a single-line expression OR a block on a new line.
     fn parse_arrow_body(&mut self) -> ParseResult<Vec<Stmt>> {
         if self.check(&Tok::Newline) {
             self.advance();
             self.parse_block()
         } else {
-            // bir qatorli: bitta ifoda
+            // single-line: one expression
             let e = self.parse_expr()?;
             Ok(vec![Stmt::Expr(e)])
         }
     }
 
-    // --- statementlar ---
+    // --- statements ---
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         match self.peek() {
             Tok::Fn => self.parse_fn(false),
@@ -197,18 +197,18 @@ impl Parser {
             Tok::Tbl => self.parse_tbl(),
             Tok::Ident(_) => self.parse_ident_stmt(),
             _ => {
-                // boshqa har qanday ifoda statement
+                // any other expression statement
                 let e = self.parse_expr()?;
                 Ok(Stmt::Expr(e))
             }
         }
     }
 
-    // Ident bilan boshlangan: bind (=), assign (<-), yoki chaqiruv ifodasi.
+    // Started by an ident: a bind (=), an assign (<-), or a call expression.
     fn parse_ident_stmt(&mut self) -> ParseResult<Stmt> {
-        // `name = ...` — bind faqat oddiy ident'ga ruxsat etiladi (spec: `=`
-        // immutable yangi nom). Buni `peek2` orqali oldindan aniqlaymiz, shunda
-        // `name` chaqiruv argumentiga (`f name`) aralashmaydi.
+        // `name = ...` — a bind is only allowed on a plain ident (spec: `=` is an
+        // immutable new name). We detect this up front via `peek2` so that `name`
+        // is not mistaken for a call argument (`f name`).
         if let Tok::Ident(name) = self.peek().clone()
             && matches!(self.peek2(), Tok::Eq)
         {
@@ -217,10 +217,10 @@ impl Parser {
             let value = self.parse_expr()?;
             return Ok(Stmt::Bind { name, value });
         }
-        // Aks holda chap tomonni ifoda sifatida o'qiymiz. `<-` kelsa, bu
-        // assign (`x <- v` yoki `req.ctx <- v`); aks holda oddiy ifoda statement.
-        // `<-` statement-level token (operator emas), shuning uchun parse_expr
-        // undan oldin to'xtaydi — chap ifoda to'liq olinadi.
+        // Otherwise we read the left side as an expression. If `<-` follows, this
+        // is an assign (`x <- v` or `req.ctx <- v`); otherwise a plain expression
+        // statement. `<-` is a statement-level token (not an operator), so
+        // parse_expr stops before it — the left expression is read in full.
         let lhs = self.parse_expr()?;
         if self.eat(&Tok::Assign) {
             let value = self.parse_expr()?;
@@ -234,20 +234,20 @@ impl Parser {
 
     fn parse_fn(&mut self, exported: bool) -> ParseResult<Stmt> {
         self.advance(); // fn
-        let name = self.expect_ident("funksiya nomi")?;
+        let name = self.expect_ident("function name")?;
         let mut params = Vec::new();
         while let Tok::Ident(_) = self.peek() {
-            let p = self.expect_ident("parametr")?;
+            let p = self.expect_ident("parameter")?;
             if params.contains(&p) {
                 return Err(format!(
-                    "'{}' funksiyasida takror parametr nomi: '{}'",
+                    "duplicate parameter name in function '{}': '{}'",
                     name, p
                 ));
             }
             params.push(p);
         }
         if self.eat(&Tok::Arrow) {
-            // bir qatorli: fn double x -> x * 2
+            // single-line: fn double x -> x * 2
             let body = self.parse_arrow_body()?;
             Ok(Stmt::FnDecl {
                 name,
@@ -256,7 +256,7 @@ impl Parser {
                 exported,
             })
         } else {
-            self.expect(&Tok::Newline, "funksiya tanasi")?;
+            self.expect(&Tok::Newline, "function body")?;
             let body = self.parse_block()?;
             Ok(Stmt::FnDecl {
                 name,
@@ -273,7 +273,7 @@ impl Parser {
             return self.parse_fn(true);
         }
         // exp NAME = expr
-        let name = self.expect_ident("eksport nomi")?;
+        let name = self.expect_ident("export name")?;
         self.expect(&Tok::Eq, "'='")?;
         let value = self.parse_expr()?;
         Ok(Stmt::ExpBind { name, value })
@@ -281,13 +281,13 @@ impl Parser {
 
     fn parse_each(&mut self) -> ParseResult<Stmt> {
         self.advance(); // each
-        let mut vars = vec![self.expect_ident("loop o'zgaruvchisi")?];
+        let mut vars = vec![self.expect_ident("loop variable")?];
         if self.eat(&Tok::Comma) {
-            vars.push(self.expect_ident("ikkinchi loop o'zgaruvchisi")?);
+            vars.push(self.expect_ident("second loop variable")?);
         }
         self.expect(&Tok::In, "'in'")?;
         let iter = self.parse_expr()?;
-        self.expect(&Tok::Newline, "each tanasi")?;
+        self.expect(&Tok::Newline, "each body")?;
         let body = self.parse_block()?;
         Ok(Stmt::Each { vars, iter, body })
     }
@@ -297,12 +297,12 @@ impl Parser {
         Ok(Stmt::Expr(e))
     }
 
-    // `fail [status] message` — ifoda sifatida (statement ham shuni ishlatadi).
-    // `fail`dan keyingi argumentlar qavssiz application kabi yig'iladi.
+    // `fail [status] message` — as an expression (the statement uses this too).
+    // The arguments after `fail` are collected like a parenthesis-free application.
     fn parse_fail_expr(&mut self) -> ParseResult<Expr> {
         self.advance(); // fail
         let first = self.parse_postfix()?;
-        // fail 422 "xabar"  -> status + message ;  fail "xabar" -> faqat message
+        // fail 422 "msg"  -> status + message ;  fail "msg" -> message only
         if self.is_atom_start() {
             let message = self.parse_postfix()?;
             Ok(Expr::Fail {
@@ -326,14 +326,14 @@ impl Parser {
                     self.advance();
                     s
                 }
-                // ./tools  ->  Slash? aslida lexer'da './tools' qanday chiqadi?
-                // './tools' = Dot Slash Ident. Buni yig'amiz.
-                // ../lib/x ham ('..' yuqori papka) — parse_module_path ikkalasini ham yig'adi.
+                // ./tools  ->  Slash? how does the lexer actually emit './tools'?
+                // './tools' = Dot Slash Ident. We collect that.
+                // ../lib/x too ('..' is the parent dir) — parse_module_path collects both.
                 Tok::Dot | Tok::DotDot => self.parse_module_path()?,
                 _ => break,
             };
             let alias = if self.eat(&Tok::As) {
-                Some(self.expect_ident("alias nomi")?)
+                Some(self.expect_ident("alias name")?)
             } else {
                 None
             };
@@ -345,7 +345,7 @@ impl Parser {
         Ok(Stmt::Use { items })
     }
 
-    // ./tools  yoki  ../lib/x  kabi modul yo'lini yig'adi.
+    // Collects a module path like ./tools  or  ../lib/x.
     fn parse_module_path(&mut self) -> ParseResult<String> {
         let mut s = String::new();
         loop {
@@ -374,18 +374,18 @@ impl Parser {
 
     fn parse_tbl(&mut self) -> ParseResult<Stmt> {
         self.advance(); // tbl
-        let name = self.expect_ident("jadval nomi")?;
-        self.expect(&Tok::Newline, "jadval tanasi")?;
-        self.expect(&Tok::Indent, "jadval ustunlari (chekinish)")?;
+        let name = self.expect_ident("table name")?;
+        self.expect(&Tok::Newline, "table body")?;
+        self.expect(&Tok::Indent, "table columns (indentation)")?;
         let mut columns = Vec::new();
         let mut indexes: Vec<TblIndex> = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
-            // Ko'p-ustunli index/uniq qatori:  index(a b)  /  uniq(a, b).
-            // Ustun qatoridan ajratish: `index`/`uniq` keyin DARHOL `(` kelsa.
-            // Oddiy ustunda 2-token tip-ident yoki Newline bo'ladi, hech qachon
-            // `(` emas — shu sabab xavfsiz. (Paren ichida lexer Newline emit
-            // qilmaydi, shu sabab `uniq(\n a\n b\n)` ko'p-qatorli ham ishlaydi.)
+            // Multi-column index/uniq row:  index(a b)  /  uniq(a, b).
+            // Distinguished from a column row by `index`/`uniq` immediately
+            // followed by `(`. In a plain column the 2nd token is a type-ident or
+            // a Newline, never `(` — so this is safe. (Inside parens the lexer
+            // emits no Newline, so a multi-line `uniq(\n a\n b\n)` works too.)
             if let Tok::Ident(kw) = self.peek().clone()
                 && (kw == "index" || kw == "uniq")
                 && *self.peek2() == Tok::LParen
@@ -394,14 +394,14 @@ impl Parser {
                 self.advance(); // (
                 let mut cols = Vec::new();
                 while !self.check(&Tok::RParen) && !self.check(&Tok::Eof) {
-                    // Vergul ixtiyoriy (default bo'shliq bilan ajratiladi);
-                    // adashib `index(a, b)` yozgan agent uchun ham qabul.
+                    // Comma is optional (separation is whitespace by default);
+                    // also accepted for an agent who mistakenly wrote `index(a, b)`.
                     if self.eat(&Tok::Comma) {
                         continue;
                     }
-                    cols.push(self.expect_ident("indeks ustuni")?);
+                    cols.push(self.expect_ident("index column")?);
                 }
-                self.expect(&Tok::RParen, "indeks qavsi")?;
+                self.expect(&Tok::RParen, "index parenthesis")?;
                 indexes.push(TblIndex {
                     columns: cols,
                     unique: kw == "uniq",
@@ -410,27 +410,28 @@ impl Parser {
                 continue;
             }
 
-            // ustun:  nom tip mod1 mod2...  (modifikatorlar bo'shliq YOKI `|` bilan)
-            let col_name = self.expect_ident("ustun nomi")?;
+            // column:  name type mod1 mod2...  (modifiers separated by whitespace OR `|`)
+            let col_name = self.expect_ident("column name")?;
             let mut modifiers = Vec::new();
             let mut type_name = String::new();
             if let Tok::Ident(_) = self.peek() {
-                type_name = self.expect_ident("ustun tipi")?;
+                type_name = self.expect_ident("column type")?;
             }
-            // Modifikator loop: ident → push; keyingi `|` bo'lsa consume va davom
-            // (`index|uniq`). Bo'shliqli shakl (`index uniq`) ham shu loop bilan.
+            // Modifier loop: ident -> push; if a `|` follows, consume it and
+            // continue (`index|uniq`). The spaced form (`index uniq`) uses this
+            // loop too.
             loop {
                 if let Tok::Ident(m) = self.peek().clone() {
                     self.advance();
-                    // `ref:tbl.col` — FK modifikatori. `ref` dan keyin DARHOL `:`
-                    // kelsa maxsus tarmoq: nishon `tbl.col` ni o'qib bitta
-                    // `ref:tbl.col` modifikator-satri sifatida saqlaymiz (db_mod
-                    // uni FOREIGN KEY ... REFERENCES ga aylantiradi).
+                    // `ref:tbl.col` — an FK modifier. If `:` immediately follows
+                    // `ref`, take a special branch: read the target `tbl.col` and
+                    // store it as a single `ref:tbl.col` modifier string (db_mod
+                    // turns it into FOREIGN KEY ... REFERENCES).
                     if m == "ref" && self.check(&Tok::Colon) {
                         self.advance(); // :
-                        let target_tbl = self.expect_ident("ref jadval nomi")?;
+                        let target_tbl = self.expect_ident("ref table name")?;
                         self.expect(&Tok::Dot, "ref `tbl.col`")?;
-                        let target_col = self.expect_ident("ref ustun nomi")?;
+                        let target_col = self.expect_ident("ref column name")?;
                         modifiers.push(format!("ref:{target_tbl}.{target_col}"));
                     } else {
                         modifiers.push(m);
@@ -441,8 +442,8 @@ impl Parser {
                     break;
                 }
             }
-            // Single-ustun index/uniq modifikatorini TblIndex'ga ko'taramiz.
-            // `uniq` `index`'ni subsume qiladi — bitta unikal index (ikkita emas).
+            // Promote a single-column index/uniq modifier into a TblIndex.
+            // `uniq` subsumes `index` — one unique index (not two).
             let has = |m: &str| modifiers.iter().any(|x| x == m);
             if has("index") || has("uniq") {
                 indexes.push(TblIndex {
@@ -450,8 +451,8 @@ impl Parser {
                     unique: has("uniq"),
                 });
             }
-            // Tanilmagan qoldiq token'larni (kelajakdagi modifikatorlar) qator
-            // oxirigacha jim o'tkazib yuboramiz — `ref:` yuqorida ushlangan.
+            // Silently skip unrecognized leftover tokens (future modifiers) to
+            // the end of the line — `ref:` is already handled above.
             while !self.check(&Tok::Newline) && !self.check(&Tok::Dedent) && !self.check(&Tok::Eof)
             {
                 self.advance();
@@ -463,7 +464,7 @@ impl Parser {
             });
             self.skip_newlines();
         }
-        self.expect(&Tok::Dedent, "jadval oxiri")?;
+        self.expect(&Tok::Dedent, "end of table")?;
         Ok(Stmt::Tbl {
             name,
             columns,
@@ -471,9 +472,9 @@ impl Parser {
         })
     }
 
-    // --- ifodalar (precedence climbing) ---
-    // Har ichma-ich ifoda (qavs, list/map elementi, indeks, interpolatsiya)
-    // shu yerdan o'tadi — chuqurlik limiti uchun yagona nazorat nuqtasi.
+    // --- expressions (precedence climbing) ---
+    // Every nested expression (parens, list/map element, index, interpolation)
+    // passes through here — the single control point for the depth limit.
     fn parse_expr(&mut self) -> ParseResult<Expr> {
         self.enter_depth()?;
         let r = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.parse_binary(0));
@@ -481,13 +482,13 @@ impl Parser {
         r
     }
 
-    // Range `..` ustuvorligi: arifmetikadan PAST, lekin pipe/taqqoslash/mantiqdan
-    // YUQORI. Shu sababli `1..n+1` = `1..(n+1)` (arifmetika endpoint ichida
-    // bog'lanadi), `1..3 |> f` = `(1..3) |> f` (pipe butun range'ga qo'llanadi).
+    // Range `..` precedence: LOWER than arithmetic, but HIGHER than
+    // pipe/comparison/logic. So `1..n+1` = `1..(n+1)` (arithmetic binds inside the
+    // endpoint), `1..3 |> f` = `(1..3) |> f` (the pipe applies to the whole range).
     const RANGE_PREC: u8 = 7;
 
-    // Operator ustuvorligi jadvali. Kichik raqam = past ustuvorlik.
-    // `..` (RANGE_PREC = 7) arifmetika va pipe orasida turadi.
+    // Operator precedence table. Smaller number = lower precedence.
+    // `..` (RANGE_PREC = 7) sits between arithmetic and pipe.
     fn bin_prec(t: &Tok) -> Option<(BinOp, u8)> {
         Some(match t {
             Tok::Pipe => (BinOp::Or, 1),
@@ -512,9 +513,9 @@ impl Parser {
     fn parse_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
         let mut lhs = self.parse_application()?;
         loop {
-            // `..` ustuvorlik zinapoyasiga to'qilgan (Range BinOp emas, shuning
-            // uchun alohida tarmoq). Arifmetika o'ng tomonda bog'lanib qoladi
-            // (RANGE_PREC + 1), past operatorlar (pipe va h.k.) range'ni o'rab oladi.
+            // `..` is woven into the precedence ladder (Range is not a BinOp, hence
+            // a separate branch). Arithmetic binds on the right side
+            // (RANGE_PREC + 1), and lower operators (pipe etc.) wrap the range.
             if self.check(&Tok::DotDot) {
                 if Self::RANGE_PREC < min_prec {
                     break;
@@ -534,7 +535,7 @@ impl Parser {
                 break;
             }
             self.advance();
-            // chap-assotsiativ: o'ng tomon yuqoriroq ustuvorlik bilan
+            // left-associative: the right side with a higher precedence
             let rhs = self.parse_binary(prec + 1)?;
             lhs = Expr::Binary {
                 op,
@@ -545,21 +546,22 @@ impl Parser {
         Ok(lhs)
     }
 
-    // Qavssiz chaqirish: atom atom atom...
+    // Parenless call: atom atom atom...
     fn parse_application(&mut self) -> ParseResult<Expr> {
         let first = self.parse_postfix()?;
-        // List/map literal ichida juxtaposition-call o'chirilgan.
+        // Inside a list/map literal juxtaposition-call is disabled.
         if self.no_app {
             return Ok(first);
         }
-        // `cron.on` MAXSUS: birinchi argument standart Unix 5-maydonli cron ifoda
-        // bo'lib, TIRNOQSIZ yoziladi (`cron.on 0 * * * * f`). `*` bu yerda ko'paytirish
-        // EMAS — cron belgisi. Tirnoqli variant (`cron.on "0 * * * *" f`) maxsus
-        // rejimsiz, oddiy str sifatida o'tadi (quyidagi shart `Str`da yonmaydi).
+        // `cron.on` SPECIAL: the first argument is a standard Unix 5-field cron
+        // expression, written WITHOUT QUOTES (`cron.on 0 * * * * f`). `*` here is
+        // NOT multiplication — it is a cron token. The quoted variant
+        // (`cron.on "0 * * * *" f`) has no special mode and passes through as a
+        // plain str (the condition below does not fire on `Str`).
         if is_cron_on(&first) && self.is_cron_field_start() {
             return self.parse_cron_application(first);
         }
-        // Keyingi token yana atom boshlasa — bu chaqiruv.
+        // If the next token starts another atom — this is a call.
         if !self.is_atom_start() {
             return Ok(first);
         }
@@ -573,13 +575,13 @@ impl Parser {
         })
     }
 
-    // `cron.on <5 maydon> <handler...>` — cron ifodani str'ga yig'ib, qolgan
-    // argumentlarni odatdagidek o'qiydi. FAQAT callee aynan `cron.on` bo'lganda
-    // chaqiriladi, shuning uchun boshqa chaqiruvlarga ta'sir qilmaydi.
+    // `cron.on <5 fields> <handler...>` — collects the cron expression into a str
+    // and reads the rest of the arguments as usual. Called ONLY when the callee is
+    // exactly `cron.on`, so it does not affect other calls.
     fn parse_cron_application(&mut self, callee: Expr) -> ParseResult<Expr> {
         let expr = self.parse_cron_fields()?;
         let mut args = vec![Expr::Str(vec![StrPiece::Lit(expr)])];
-        // Qolgan argumentlar (nomli funksiya yoki lambda) — odatdagi juxtaposition.
+        // The remaining arguments (a named function or lambda) — ordinary juxtaposition.
         while self.is_atom_start() {
             args.push(self.parse_postfix()?);
         }
@@ -589,11 +591,11 @@ impl Parser {
         })
     }
 
-    // Cron 5-maydon ketma-ketligini (`0 */15 1,2,3 * 1-5`) token oqimidan o'qib,
-    // bitta str'ga yig'adi. Cron token'lari: Int/Star/Slash/Minus/Comma. Token
-    // oldida `spaced` bo'lsa orasiga bo'shliq qo'yamiz (maydon ajratuvchisi).
-    // Birinchi NO-cron token (Ident/Backslash/Newline...) kelganda to'xtaymiz —
-    // u handler argumenti yoki qator oxiri.
+    // Reads the cron 5-field sequence (`0 */15 1,2,3 * 1-5`) from the token stream
+    // and collects it into a single str. Cron tokens: Int/Star/Slash/Minus/Comma.
+    // If a token has `spaced` before it we insert a space (the field separator).
+    // We stop at the first NON-cron token (Ident/Backslash/Newline...) — that is
+    // the handler argument or the end of the line.
     fn parse_cron_fields(&mut self) -> ParseResult<String> {
         let mut out = String::new();
         let mut first = true;
@@ -608,26 +610,26 @@ impl Parser {
                 Tok::Slash => out.push('/'),
                 Tok::Minus => out.push('-'),
                 Tok::Comma => out.push(','),
-                _ => unreachable!("is_cron_field_token kafolatlaydi"),
+                _ => unreachable!("is_cron_field_token guarantees this"),
             }
             self.advance();
         }
         if out.is_empty() {
             return Err(format!(
-                "{}-qatorda cron.on dan keyin cron ifoda kutilgan",
+                "expected a cron expression after cron.on on line {}",
                 self.line()
             ));
         }
         Ok(out)
     }
 
-    // Joriy token cron maydon belgisini boshlaydimi (5-maydon yig'ish uchun).
-    // Int yoki Star — maydon boshi (Slash/Minus/Comma faqat maydon ichida keladi).
+    // Does the current token start a cron field (for the 5-field collection)?
+    // Int or Star starts a field (Slash/Minus/Comma only occur inside a field).
     fn is_cron_field_start(&self) -> bool {
         matches!(self.peek(), Tok::Int(_) | Tok::Star)
     }
 
-    // Joriy token cron ifoda tarkibidagi belgimi.
+    // Is the current token part of a cron expression?
     fn is_cron_field_token(&self) -> bool {
         matches!(
             self.peek(),
@@ -642,7 +644,7 @@ impl Parser {
             match self.peek() {
                 Tok::Dot => {
                     self.advance();
-                    // .name  yoki  .0 (raqamli indeks)  yoki  .(ifoda) (hisoblangan indeks)
+                    // .name  or  .0 (numeric index)  or  .(expr) (computed index)
                     match self.peek().clone() {
                         Tok::Int(n) => {
                             self.advance();
@@ -651,10 +653,10 @@ impl Parser {
                                 key: Box::new(Expr::Int(n)),
                             };
                         }
-                        // `.(ifoda)` — hisoblangan indeks: `xs.(i)`, `xs.(xs.len - 1)`.
-                        // Bracket shakli (`xs[i]`) bilan bir xil Expr::Index quradi;
-                        // ikki shakl ham qo'llab-quvvatlanadi. Qavs ichida to'liq
-                        // application yana yoqiladi (`no_app` muhitidan qat'i nazar).
+                        // `.(expr)` — computed index: `xs.(i)`, `xs.(xs.len - 1)`.
+                        // Builds the same Expr::Index as the bracket form (`xs[i]`);
+                        // both forms are supported. Inside the parens full
+                        // application is re-enabled (regardless of the `no_app` context).
                         Tok::LParen => {
                             self.advance(); // (
                             let saved = self.no_app;
@@ -668,10 +670,11 @@ impl Parser {
                                 key: Box::new(key),
                             };
                         }
-                        // Field nomi: oddiy ident yoki KALIT SO'Z (`time.in`, `x.match`).
-                        // Kalit so'zlar member pozitsiyasida nom sifatida ishlaydi —
-                        // bu Fluxon falsafasi (til AI'ga moslashadi): AI tabiiy `time.in`
-                        // yozadi, `in` global kalit so'z bo'lsa ham field bo'la oladi.
+                        // Field name: a plain ident or a KEYWORD (`time.in`, `x.match`).
+                        // Keywords act as names in member position — this is the
+                        // Fluxon philosophy (the language adapts to AI): the AI writes
+                        // a natural `time.in`, and `in`, though a global keyword, can
+                        // still be a field.
                         tok => match keyword_as_name(&tok) {
                             Some(name) => {
                                 self.advance();
@@ -682,7 +685,7 @@ impl Parser {
                             }
                             None => {
                                 return Err(format!(
-                                    "{}-qatorda '.' dan keyin nom yoki indeks kutilgan, {:?} topildi",
+                                    "expected a name or index after '.' on line {}, found {:?}",
                                     self.line(),
                                     tok
                                 ));
@@ -690,18 +693,19 @@ impl Parser {
                         },
                     }
                 }
-                // `()` tutash bo'lsa — argumentsiz (nullary) chaqiruv (`new_id()`).
-                // Qavssiz chaqirish argument bilan aniqlanadi, shuning uchun 0-arity
-                // funksiyani chaqirishning yagona yo'li shu. `f` (qavssiz) funksiya
-                // QIYMATI, `f()` esa CHAQIRUV — ikki ma'no aniq ajraladi.
-                // Faqat BO'SH qavs: `f(x)` emas (canonical shakl `f x`). Bo'shliqli
-                // `f ()` ham emas — u parse_application'da argument bo'lib o'qiladi.
+                // Adjacent `()` — an argument-less (nullary) call (`new_id()`).
+                // A parenless call is identified by its arguments, so this is the
+                // only way to call a 0-arity function. `f` (parenless) is the
+                // function VALUE, while `f()` is a CALL — the two meanings are
+                // cleanly separated. Only EMPTY parens: not `f(x)` (the canonical
+                // form is `f x`). Not the spaced `f ()` either — that is read as an
+                // argument in parse_application.
                 Tok::LParen if !self.spaced() => {
                     self.advance();
                     if !self.check(&Tok::RParen) {
                         return Err(format!(
-                            "{}-qatorda `f()` faqat argumentsiz chaqiruv uchun; \
-                             argument bilan chaqirish qavssiz yoziladi (`f x`)",
+                            "`f()` on line {} is only for argument-less calls; \
+                             calling with arguments is written without parentheses (`f x`)",
                             self.line()
                         ));
                     }
@@ -711,9 +715,9 @@ impl Parser {
                         args: Vec::new(),
                     };
                 }
-                // `[` postfix indeks BO'LADI faqat tutash bo'lsa (`arr[i]`).
-                // Bo'shliq bilan kelsa (`f "x" [a]`) bu alohida list argument —
-                // parse_application uni o'zi oladi.
+                // `[` is a postfix index ONLY when adjacent (`arr[i]`). When it
+                // comes with a space (`f "x" [a]`) it is a separate list argument —
+                // parse_application takes it itself.
                 Tok::LBracket if !self.spaced() => {
                     self.advance();
                     let key = self.parse_expr()?;
@@ -723,9 +727,9 @@ impl Parser {
                         key: Box::new(key),
                     };
                 }
-                // `!` postfix Try BO'LADI faqat tutash bo'lsa (`db.one ...!`).
-                // Bo'shliq bilan kelsa (`log !x`) bu prefiks not boshlanishi —
-                // parse_application uni argument sifatida o'zi oladi.
+                // `!` is a postfix Try ONLY when adjacent (`db.one ...!`). When it
+                // comes with a space (`log !x`) it is the start of a prefix not —
+                // parse_application takes it as an argument itself.
                 Tok::Bang if !self.spaced() => {
                     self.advance();
                     e = Expr::Try(Box::new(e));
@@ -792,7 +796,7 @@ impl Parser {
             }
             Tok::LParen => {
                 self.advance();
-                // Qavs ichida to'liq application yana yoqiladi.
+                // Inside parens full application is re-enabled.
                 let saved = self.no_app;
                 self.no_app = false;
                 let e = self.parse_expr()?;
@@ -808,7 +812,7 @@ impl Parser {
             Tok::Try => self.parse_try(),
             Tok::Fail => self.parse_fail_expr(),
             other => Err(format!(
-                "{}-qatorda ifoda kutilgan, {:?} topildi",
+                "expected an expression on line {}, found {:?}",
                 self.line(),
                 other
             )),
@@ -821,23 +825,23 @@ impl Parser {
             match p {
                 StrPart::Lit(s) => pieces.push(StrPiece::Lit(s)),
                 StrPart::Expr(src, line) => {
-                    // ifoda manbasini mustaqil tokenize + parse qilamiz.
-                    // Asl qator raqamini sub-lexer'ga uzatamiz — aks holda
-                    // xato har doim "1-qatorda" deb chalg'itadi (issue #106).
+                    // Tokenize + parse the expression source independently.
+                    // We pass the original line number to the sub-lexer — otherwise
+                    // an error always misleadingly says "on line 1" (issue #106).
                     let toks = crate::lexer::lex_at(&src, line)
-                        .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
+                        .map_err(|e| format!("inside interpolation: {}", e))?;
                     let mut sub = Parser {
                         toks,
                         pos: 0,
                         no_app: false,
-                        // Tashqi chuqurlikni meros qilamiz — interpolatsiya orqali
-                        // limitni aylanib o'tib bo'lmasin.
+                        // Inherit the outer depth — so the limit cannot be bypassed
+                        // through interpolation.
                         depth: self.depth,
                     };
                     sub.skip_newlines();
                     let e = sub
                         .parse_expr()
-                        .map_err(|e| format!("interpolatsiya ichida: {}", e))?;
+                        .map_err(|e| format!("inside interpolation: {}", e))?;
                     pieces.push(StrPiece::Expr(e));
                 }
             }
@@ -848,14 +852,14 @@ impl Parser {
     fn parse_list(&mut self) -> ParseResult<Expr> {
         self.advance(); // [
         let saved = self.no_app;
-        self.no_app = true; // elementlar bo'shliq bilan ajraladi (juxtaposition-call yo'q)
+        self.no_app = true; // elements are separated by whitespace (no juxtaposition-call)
         let mut items = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::RBracket) && !self.check(&Tok::Eof) {
-            // Element pozitsiyasida ham bare tip nomi (`[str]`) sym'ga aylanadi —
-            // map qiymat pozitsiyasi (`{k:str}`) bilan izchil, schema uchun.
+            // In element position too, a bare type name (`[str]`) becomes a sym —
+            // consistent with map value position (`{k:str}`), for schemas.
             items.push(schema_type_sym(self.parse_expr()?));
-            self.eat(&Tok::Comma); // vergul ixtiyoriy/tolerantlik
+            self.eat(&Tok::Comma); // comma optional / tolerant
             self.skip_newlines();
         }
         self.no_app = saved;
@@ -866,18 +870,19 @@ impl Parser {
     fn parse_map(&mut self) -> ParseResult<Expr> {
         self.advance(); // {
         let saved = self.no_app;
-        self.no_app = true; // qiymatlar atom/qavsli; `{a:f b:g}` da f g ni yutmaydi
+        self.no_app = true; // values are atom/parenthesized; in `{a:f b:g}` f does not swallow g
         let mut entries = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::RBrace) && !self.check(&Tok::Eof) {
             if self.check(&Tok::Spread) {
                 self.advance();
-                // Spread manbasi atom (ident yoki qavsli ifoda) — keyingi `[k]:v`
-                // ni indeks deb yutmasligi uchun postfix EMAS, primary ishlatamiz.
+                // The spread source is an atom (ident or parenthesized expression) —
+                // we use primary, NOT postfix, so it does not swallow a following
+                // `[k]:v` as an index.
                 let e = self.parse_primary()?;
                 entries.push(MapEntry::Spread(e));
             } else if self.check(&Tok::LBracket) {
-                // dinamik kalit: [k]:v
+                // dynamic key: [k]:v
                 self.advance();
                 let k = self.parse_expr()?;
                 self.expect(&Tok::RBracket, "']'")?;
@@ -885,18 +890,18 @@ impl Parser {
                 let v = self.parse_expr()?;
                 entries.push(MapEntry::Dynamic { key: k, value: v });
             } else {
-                // kalit: ident, kalit so'z (`{in: 1}`) yoki string-literal.
-                // Kalit so'z map kalitida ham nom sifatida ishlaydi — field access
-                // (`m.in`) bilan simmetrik, Fluxon falsafasiga mos.
+                // key: ident, keyword (`{in: 1}`) or string-literal.
+                // A keyword acts as a name in a map key too — symmetric with field
+                // access (`m.in`), matching the Fluxon philosophy.
                 let key = match self.peek().clone() {
                     Tok::Str(parts) => {
                         self.advance();
-                        // faqat oddiy literal string kalit sifatida
+                        // only a plain literal string as a key
                         if let [StrPart::Lit(s)] = parts.as_slice() {
                             s.clone()
                         } else {
                             return Err(format!(
-                                "{}-qatorda map kaliti oddiy matn bo'lishi kerak",
+                                "map key must be plain text on line {}",
                                 self.line()
                             ));
                         }
@@ -908,7 +913,7 @@ impl Parser {
                         }
                         None => {
                             return Err(format!(
-                                "{}-qatorda map kaliti kutilgan, {:?} topildi",
+                                "expected a map key on line {}, found {:?}",
                                 self.line(),
                                 other
                             ));
@@ -931,9 +936,9 @@ impl Parser {
         self.advance(); // backslash
         let mut params = Vec::new();
         while let Tok::Ident(_) = self.peek() {
-            let p = self.expect_ident("lambda parametri")?;
+            let p = self.expect_ident("lambda parameter")?;
             if params.contains(&p) {
-                return Err(format!("lambda'da takror parametr nomi: '{}'", p));
+                return Err(format!("duplicate parameter name in lambda: '{}'", p));
             }
             params.push(p);
         }
@@ -944,15 +949,15 @@ impl Parser {
 
     fn parse_if(&mut self) -> ParseResult<Expr> {
         self.advance(); // if
-        // `if shart a else b` — inline (ternary) shakli. Shu mantiqiy qatorda
-        // (qavslardan tashqarida) `else` bo'lsa, blok emas, ifoda shaklini
-        // o'qiymiz.
+        // `if cond a else b` — the inline (ternary) form. If there is an `else` on
+        // this logical line (outside parens), we read the expression form, not the
+        // block form.
         if self.if_is_inline() {
             return self.parse_inline_if();
         }
         let mut arms = Vec::new();
         let cond = self.parse_expr()?;
-        self.expect(&Tok::Newline, "if tanasi")?;
+        self.expect(&Tok::Newline, "if body")?;
         let block = self.parse_block()?;
         arms.push((cond, block));
         let mut else_block = None;
@@ -961,12 +966,12 @@ impl Parser {
             if self.check(&Tok::Elif) {
                 self.advance();
                 let c = self.parse_expr()?;
-                self.expect(&Tok::Newline, "elif tanasi")?;
+                self.expect(&Tok::Newline, "elif body")?;
                 let b = self.parse_block()?;
                 arms.push((c, b));
             } else if self.check(&Tok::Else) {
                 self.advance();
-                self.expect(&Tok::Newline, "else tanasi")?;
+                self.expect(&Tok::Newline, "else body")?;
                 else_block = Some(self.parse_block()?);
                 break;
             } else {
@@ -976,11 +981,11 @@ impl Parser {
         Ok(Expr::If(Box::new(IfExpr { arms, else_block })))
     }
 
-    // `if` dan keyin shu mantiqiy qatorda (qavs ichida emas) `else` uchrasa,
-    // bu inline ifoda shakli. Blok shaklida shartdan keyin avval Newline keladi,
-    // shuning uchun depth-0 Newline'ga birinchi yetsak — blok. Qavs/list/map
-    // ichidagi `else` (masalan ichki inline if) chuqurlik bilan o'tkazib
-    // yuboriladi.
+    // If an `else` appears after `if` on this logical line (not inside parens),
+    // this is the inline expression form. In the block form a Newline comes first
+    // after the condition, so if we reach a depth-0 Newline first — it is a block.
+    // An `else` inside parens/list/map (for example a nested inline if) is skipped
+    // by tracking depth.
     fn if_is_inline(&self) -> bool {
         let mut depth = 0i32;
         let mut i = self.pos;
@@ -999,11 +1004,12 @@ impl Parser {
         false
     }
 
-    // Inline if: `if shart a else b` — bir qiymat qaytaradi (ternary ekvivalenti).
-    // Shartda qavssiz (juxtaposition) chaqiruv o'chiriladi, shunda shart `a`
-    // tarmog'ini argument sifatida yutmaydi. Chaqiruvli shart kerak bo'lsa qavsga
-    // oling: `if (str.empty s) "" else s`. Tarmoqlar to'liq ifoda (chaqiruv ham
-    // mumkin). IfExpr sifatida quramiz, shunda interpreter o'zgarmaydi.
+    // Inline if: `if cond a else b` — returns one value (the ternary equivalent).
+    // Parenless (juxtaposition) calls are disabled in the condition, so the
+    // condition does not swallow the `a` branch as an argument. If you need a call
+    // in the condition, wrap it in parens: `if (str.empty s) "" else s`. The
+    // branches are full expressions (a call is allowed too). We build it as an
+    // IfExpr, so the interpreter does not change.
     fn parse_inline_if(&mut self) -> ParseResult<Expr> {
         let saved = self.no_app;
         self.no_app = true;
@@ -1022,8 +1028,8 @@ impl Parser {
     fn parse_match(&mut self) -> ParseResult<Expr> {
         self.advance(); // match
         let subject = self.parse_expr()?;
-        self.expect(&Tok::Newline, "match tanasi")?;
-        self.expect(&Tok::Indent, "match armlari (chekinish)")?;
+        self.expect(&Tok::Newline, "match body")?;
+        self.expect(&Tok::Indent, "match arms (indentation)")?;
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Tok::Dedent) && !self.check(&Tok::Eof) {
@@ -1042,7 +1048,7 @@ impl Parser {
                 }
                 other => {
                     return Err(format!(
-                        "{}-qatorda match patterni (symbol/son/_) kutilgan, {:?} topildi",
+                        "expected a match pattern (symbol/number/_) on line {}, found {:?}",
                         self.line(),
                         other
                     ));
@@ -1053,29 +1059,30 @@ impl Parser {
             arms.push(MatchArm { pattern, body });
             self.skip_newlines();
         }
-        self.expect(&Tok::Dedent, "match oxiri")?;
+        self.expect(&Tok::Dedent, "end of match")?;
         Ok(Expr::Match(Box::new(MatchExpr { subject, arms })))
     }
 
-    // try/catch — xatoni ushlab qoladi (issue #125). `if`/`match` kabi blok-ifoda:
+    // try/catch — catches an error (issue #125). A block expression like
+    // `if`/`match`:
     //   try
-    //     <tana>
+    //     <body>
     //   catch e
-    //     <xato ishlovchisi>
-    // `catch` o'zgaruvchisi ixtiyoriy (`catch` yoki `catch e`). E'tibor: `catch`
-    // `if`ning `else`i kabi `try` bilan bir xil chekinish darajasida turadi.
+    //     <error handler>
+    // The `catch` variable is optional (`catch` or `catch e`). Note: `catch` sits
+    // at the same indentation level as `try`, like the `else` of an `if`.
     fn parse_try(&mut self) -> ParseResult<Expr> {
         self.advance(); // try
-        self.expect(&Tok::Newline, "try tanasi")?;
+        self.expect(&Tok::Newline, "try body")?;
         let body = self.parse_block()?;
         self.skip_newlines();
         self.expect(&Tok::Catch, "'catch'")?;
         let catch_var = if let Tok::Ident(_) = self.peek() {
-            Some(self.expect_ident("catch o'zgaruvchisi")?)
+            Some(self.expect_ident("catch variable")?)
         } else {
             None
         };
-        self.expect(&Tok::Newline, "catch tanasi")?;
+        self.expect(&Tok::Newline, "catch body")?;
         let catch_body = self.parse_block()?;
         Ok(Expr::TryCatch {
             body,
@@ -1084,7 +1091,7 @@ impl Parser {
         })
     }
 
-    // --- yordamchi predikatlar ---
+    // --- helper predicates ---
     fn expect_ident(&mut self, what: &str) -> ParseResult<String> {
         match self.peek().clone() {
             Tok::Ident(s) => {
@@ -1092,17 +1099,16 @@ impl Parser {
                 Ok(s)
             }
             other => Err(format!(
-                "{}-qatorda {} kutilgan, {:?} topildi",
-                self.line(),
+                "expected {} on line {}, found {:?}",
                 what,
+                self.line(),
                 other
             )),
         }
     }
 
-    // Atom boshlanishi mumkinmi? (qavssiz chaqiruvda argument chegarasini
-    // aniqlash uchun). Operatorlar, blok-chegaralar va kalit so'zlar atom
-    // boshlamaydi.
+    // Can an atom start here? (used to find the argument boundary in a parenless
+    // call). Operators, block boundaries and keywords do not start an atom.
     fn is_atom_start(&self) -> bool {
         matches!(
             self.peek(),
@@ -1118,17 +1124,17 @@ impl Parser {
                 | Tok::LBracket
                 | Tok::LBrace
                 | Tok::Backslash
-                // Prefiks not (`f !x`) — atom boshlay oladi. Postfix Try bilan
-                // to'qnashmaydi: u faqat tutash (`x!`) bo'lganda parse_postfix
-                // ichida yutiladi, bu yerga yetib kelgan `!` doim bo'shliqdan
-                // keyin, ya'ni prefiks.
+                // Prefix not (`f !x`) — can start an atom. It does not clash with
+                // postfix Try: that is swallowed inside parse_postfix only when
+                // adjacent (`x!`); a `!` reaching here is always after whitespace,
+                // i.e. a prefix.
                 | Tok::Bang
         )
     }
 }
 
-// Callee aynan `cron.on` (Field{Ident("cron"), "on"}) ekanini tekshiradi.
-// Cron ifodani tirnoqsiz o'qish maxsus rejimini faqat shu chaqiruv yoqadi.
+// Checks that the callee is exactly `cron.on` (Field{Ident("cron"), "on"}).
+// Only this call enables the special mode of reading a cron expression unquoted.
 fn is_cron_on(callee: &Expr) -> bool {
     matches!(
         callee,
@@ -1137,17 +1143,18 @@ fn is_cron_on(callee: &Expr) -> bool {
     )
 }
 
-// `.` dan keyingi field nomi: kalit so'z bo'lsa ham uning matnli nomini qaytaradi.
-// `time.in`, `x.match`, `x.if` kabi member nomlari kalit so'z bilan to'qnashmasin —
-// member pozitsiyasida grammatik ma'no yo'q, faqat nom kerak (Fluxon: til AI'ga moslashadi).
-// Manba: lexer scan_ident dagi kalit so'z jadvalining teskarisi.
-// Map qiymat pozitsiyasidagi bare tip nomini (`{a:str}`) sym sifatida talqin
-// qiladi (`{a::str}` bilan teng). Bu `ai.json`/tool schema'da docs va'da qilgan
-// `{product:str qty:int}` sintaksisini ishlatadi: `wrap_schema` allaqachon
-// sym/str tip nomini JSON-schema tipiga aylantiradi (str->string ...). `str`
-// ham modul nomi bo'lganligi uchun, qiymat sifatida u "noma'lum nom: str"
-// xatosini berardi — bu yerda faqat YAKKA, qo'shimchasiz ident bo'lsa sym'ga
-// aylantiramiz; chaqiruv/maydon (`str.upper`) yoki boshqa ifoda tegmaydi.
+// Field name after `.`: returns its textual name even if it is a keyword.
+// So member names like `time.in`, `x.match`, `x.if` do not clash with keywords —
+// in member position there is no grammatical meaning, only a name is needed
+// (Fluxon: the language adapts to AI). Source: the inverse of the keyword table in
+// the lexer's scan_ident.
+// Interprets a bare type name in map value position (`{a:str}`) as a sym (equal to
+// `{a::str}`). This enables the `{product:str qty:int}` syntax the docs promise for
+// `ai.json`/tool schemas: `wrap_schema` already converts a sym/str type name into a
+// JSON-schema type (str->string ...). Because `str` is also a module name, as a
+// value it would give an "unknown name: str" error — here we convert to a sym only
+// for a SINGLE, suffix-free ident; a call/field (`str.upper`) or any other
+// expression is untouched.
 fn schema_type_sym(value: Expr) -> Expr {
     match value {
         Expr::Ident(name) if is_schema_type_name(&name) => Expr::Sym(name),
@@ -1155,8 +1162,9 @@ fn schema_type_sym(value: Expr) -> Expr {
     }
 }
 
-// Schema kontekstida tip nomi sifatida tan olinadigan identifikatorlar.
-// `tbl` ustun tiplaridan (docs/fluxon-agent.md) JSON-schema'ga ma'no beradiganlar.
+// Identifiers recognized as type names in a schema context.
+// From the `tbl` column types (docs/fluxon-agent.md), the ones that map to a
+// JSON-schema type.
 fn is_schema_type_name(name: &str) -> bool {
     matches!(name, "str" | "int" | "flt" | "bool" | "json" | "sym")
 }
@@ -1197,40 +1205,40 @@ mod tests {
     #[test]
     fn schema_type_names() {
         for t in ["str", "int", "flt", "bool", "json", "sym"] {
-            assert!(is_schema_type_name(t), "{} tip nomi bo'lishi kerak", t);
+            assert!(is_schema_type_name(t), "{} must be a type name", t);
         }
-        // tip BO'LMAGAN nomlar tegilmaydi (o'zgaruvchi sifatida qoladi).
+        // NON-type names are untouched (they remain variables).
         for t in ["x", "str2", "serial", "now", "money", "upper"] {
-            assert!(!is_schema_type_name(t), "{} tip nomi BO'LMASLIGI kerak", t);
+            assert!(!is_schema_type_name(t), "{} must NOT be a type name", t);
         }
     }
 
     #[test]
     fn schema_sym_only_for_bare_type_ident() {
-        // bare tip ident -> sym
+        // bare type ident -> sym
         match schema_type_sym(Expr::Ident("str".to_string())) {
             Expr::Sym(s) => assert_eq!(s, "str"),
-            _ => panic!("str ident sym'ga aylanishi kerak"),
+            _ => panic!("str ident must become a sym"),
         }
-        // tip bo'lmagan ident -> o'zgarmaydi
+        // non-type ident -> unchanged
         match schema_type_sym(Expr::Ident("foo".to_string())) {
             Expr::Ident(s) => assert_eq!(s, "foo"),
-            _ => panic!("foo ident o'zgarmasligi kerak"),
+            _ => panic!("foo ident must not change"),
         }
-        // ident bo'lmagan ifoda (masalan, int literal) -> o'zgarmaydi
+        // non-ident expression (for example an int literal) -> unchanged
         match schema_type_sym(Expr::Int(5)) {
             Expr::Int(5) => {}
-            _ => panic!("Int literal o'zgarmasligi kerak"),
+            _ => panic!("Int literal must not change"),
         }
     }
 
-    // `s = [str int]` da ro'yxat element pozitsiyasida bare tip nomi sym'ga
-    // aylanadi — schema (`{blocks:[str]}`) uchun map qiymati bilan izchil.
+    // In `s = [str int]` a bare type name in list element position becomes a sym —
+    // consistent with map values, for schemas (`{blocks:[str]}`).
     fn first_expr(src: &str) -> Expr {
         let prog = parse(crate::lexer::lex(src).unwrap()).unwrap();
         match &prog[0] {
             Stmt::Bind { value, .. } => value.clone(),
-            other => panic!("Bind kutilgan, {:?} topildi", other),
+            other => panic!("expected Bind, found {:?}", other),
         }
     }
 
@@ -1241,23 +1249,23 @@ mod tests {
                 assert!(matches!(&items[0], Expr::Sym(s) if s == "str"));
                 assert!(matches!(&items[1], Expr::Sym(s) if s == "int"));
             }
-            other => panic!("List kutilgan, {:?} topildi", other),
+            other => panic!("expected List, found {:?}", other),
         }
-        // tip BO'LMAGAN ident ro'yxatda o'zgaruvchi sifatida qoladi.
+        // A NON-type ident stays a variable in a list.
         match first_expr("s = [x y]") {
             Expr::List(items) => {
                 assert!(matches!(&items[0], Expr::Ident(s) if s == "x"));
             }
-            other => panic!("List kutilgan, {:?} topildi", other),
+            other => panic!("expected List, found {:?}", other),
         }
     }
 
-    // tbl tanasidan index'larni ajratib oladi.
+    // Extracts the indexes from a tbl body.
     fn tbl_indexes(src: &str) -> Vec<TblIndex> {
         let prog = parse(crate::lexer::lex(src).unwrap()).unwrap();
         match &prog[0] {
             Stmt::Tbl { indexes, .. } => indexes.clone(),
-            other => panic!("Tbl kutilgan, {:?} topildi", other),
+            other => panic!("expected Tbl, found {:?}", other),
         }
     }
 
@@ -1274,7 +1282,7 @@ mod tests {
 
     #[test]
     fn tbl_pipe_modifier_one_unique_index() {
-        // `c sym index|uniq` -> bitta unikal index (uniq index'ni subsume qiladi).
+        // `c sym index|uniq` -> a single unique index (uniq subsumes index).
         let idx = tbl_indexes("tbl t\n  c sym index|uniq\n");
         assert_eq!(idx.len(), 1);
         assert_eq!(idx[0].columns, vec!["c"]);
@@ -1283,7 +1291,7 @@ mod tests {
 
     #[test]
     fn tbl_index_comma_optional() {
-        // `index(a, b)` vergulli forma `index(a b)` bilan bir xil natija.
+        // `index(a, b)` (comma form) gives the same result as `index(a b)`.
         let comma = tbl_indexes("tbl t\n  index(a, b)\n");
         let space = tbl_indexes("tbl t\n  index(a b)\n");
         assert_eq!(comma.len(), 1);
@@ -1294,7 +1302,7 @@ mod tests {
 
     #[test]
     fn tbl_spaced_modifier_still_works() {
-        // Bo'shliqli `index uniq` ham qabul qilinadi (kanonik shakl `|`).
+        // The spaced `index uniq` is also accepted (the canonical form is `|`).
         let idx = tbl_indexes("tbl t\n  d sym index uniq\n");
         assert_eq!(idx.len(), 1);
         assert!(idx[0].unique);

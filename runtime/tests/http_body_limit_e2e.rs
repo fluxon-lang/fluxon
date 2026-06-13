@@ -1,17 +1,17 @@
-// HTTP so'rov tanasi (body) o'lcham chegarasi end-to-end testi (issue #91).
+// HTTP request body size limit end-to-end test (issue #91).
 //
-// Chegarasiz `req.into_body().collect()` butun tanani xotiraga yig'ardi — mijoz
-// ulkan body yuborib server xotirasini to'ldira olardi (DoS). Endi `http.serve`
-// default 10 MiB chegara qo'yadi va `{max_body: N}` bilan sozlanadi; oshsa 413.
+// Without a limit, `req.into_body().collect()` collected the whole body into
+// memory -- a client could send a huge body and fill the server's memory (DoS).
+// Now `http.serve` sets a default 10 MiB limit, configurable via `{max_body: N}`;
+// if exceeded, 413.
 //
-// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP POST bilan
-// tekshiramiz:
-//   - chegaradan kichik body  -> 200
-//   - chegaradan katta body (to'g'ri Content-Length)  -> 413 (tez yo'l)
-//   - Content-Length'siz (chunked) katta body  -> 413 (Limited oqim davomida)
-//   - max_body: 0 -> chegara o'chiriladi (katta body o'tadi)
+// We run the `fluxon` binary as a subprocess and check with a real HTTP POST:
+//   - body smaller than the limit  -> 200
+//   - body larger than the limit (correct Content-Length)  -> 413 (fast path)
+//   - large body without Content-Length (chunked)  -> 413 (during the Limited stream)
+//   - max_body: 0 -> limit is disabled (large body passes through)
 //
-// Pattern http_ratelimit_e2e.rs dan: vaqtinchalik .fx fayl + subprocess + raw HTTP.
+// Pattern from http_ratelimit_e2e.rs: temporary .fx file + subprocess + raw HTTP.
 
 use std::io::Write;
 use std::process::{Child, Command};
@@ -53,7 +53,7 @@ impl Drop for Killer {
     }
 }
 
-// Raw HTTP/1.1 POST — Content-Length bilan. To'liq javob matnini qaytaradi.
+// Raw HTTP/1.1 POST -- with Content-Length. Returns the full response text.
 async fn http_post(port: u16, path: &str, body: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -68,13 +68,13 @@ async fn http_post(port: u16, path: &str, body: &str) -> String {
     );
     stream.write_all(req.as_bytes()).await.expect("http yozish");
     let mut resp = Vec::new();
-    stream.read_to_end(&mut resp).await.expect("http o'qish");
+    stream.read_to_end(&mut resp).await.expect("http read");
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// Raw HTTP/1.1 POST — Content-Length'siz, chunked transfer encoding bilan. Bu
-// Content-Length tez yo'lini chetlab o'tadi, shuning uchun chegarani Limited
-// oqim davomida majburlashi tekshiriladi. `body` bitta chunk sifatida yuboriladi.
+// Raw HTTP/1.1 POST -- without Content-Length, with chunked transfer encoding.
+// This bypasses the Content-Length fast path, so it checks that the limit is
+// enforced during the Limited stream. `body` is sent as a single chunk.
 async fn http_post_chunked(port: u16, path: &str, body: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -89,11 +89,11 @@ async fn http_post_chunked(port: u16, path: &str, body: &str) -> String {
     );
     stream.write_all(req.as_bytes()).await.expect("http yozish");
     let mut resp = Vec::new();
-    stream.read_to_end(&mut resp).await.expect("http o'qish");
+    stream.read_to_end(&mut resp).await.expect("http read");
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// max_body: 64 bayt.
+// max_body: 64 bytes.
 const LIMIT_SCRIPT: &str = r#"
 http.on :post "/echo" \req ->
   rep 200 {ok: true}
@@ -109,9 +109,9 @@ async fn body_chegaradan_kichik_otadi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // 20 bayt — 64 chegaradan kichik, 200 bo'lishi kerak.
+    // 20 bytes -- smaller than the 64 limit, should be 200.
     let resp = http_post(port, "/echo", &"x".repeat(20)).await;
-    assert!(resp.contains("200"), "kichik body 200 kutilgan: {}", resp);
+    assert!(resp.contains("200"), "small body expected 200: {}", resp);
 
     let _ = std::fs::remove_file(&path);
 }
@@ -124,11 +124,11 @@ async fn body_chegaradan_katta_413() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // 200 bayt — 64 chegaradan katta, to'g'ri Content-Length bilan -> 413 (tez yo'l).
+    // 200 bytes -- larger than the 64 limit, with correct Content-Length -> 413 (fast path).
     let resp = http_post(port, "/echo", &"x".repeat(200)).await;
     assert!(
         resp.contains("413"),
-        "katta body 413 (Payload Too Large) kutilgan: {}",
+        "large body expected 413 (Payload Too Large): {}",
         resp
     );
 
@@ -143,19 +143,19 @@ async fn chunked_katta_body_413() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Content-Length'siz (chunked) 200 bayt — tez yo'l yo'q, Limited oqim
-    // davomida chegarani majburlab 413 qaytarishi kerak.
+    // 200 bytes without Content-Length (chunked) -- no fast path, must enforce
+    // the limit during the Limited stream and return 413.
     let resp = http_post_chunked(port, "/echo", &"x".repeat(200)).await;
     assert!(
         resp.contains("413"),
-        "chunked katta body 413 kutilgan: {}",
+        "chunked large body expected 413: {}",
         resp
     );
 
     let _ = std::fs::remove_file(&path);
 }
 
-// max_body: 0 -> chegara o'chiriladi; katta body ham o'tishi kerak.
+// max_body: 0 -> limit is disabled; even a large body should pass through.
 const UNLIMITED_SCRIPT: &str = r#"
 http.on :post "/echo" \req ->
   rep 200 {ok: true}
@@ -171,11 +171,11 @@ async fn max_body_nol_chegarani_ochiradi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // 5000 bayt — chegara o'chirilgan, 200 bo'lishi kerak.
+    // 5000 bytes -- limit is disabled, should be 200.
     let resp = http_post(port, "/echo", &"x".repeat(5000)).await;
     assert!(
         resp.contains("200"),
-        "max_body:0 da katta body 200 kutilgan: {}",
+        "with max_body:0 large body expected 200: {}",
         resp
     );
 

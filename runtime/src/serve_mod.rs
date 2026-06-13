@@ -1,67 +1,69 @@
-// Umumiy server/uzoq-ishlovchi boshqaruvi — bir jarayonda HTTP + WS + cron.run
-// birga ishlashi uchun.
+// Shared server / long-running control — so HTTP + WS + cron.run can run together
+// in a single process.
 //
-// Muammo: `http.serve`/`ws.serve` (va `cron.run`) ilgari har biri o'zicha ABADIY
-// bloklardi (serve `block_on`, cron.run `loop { sleep }`). Faylда bir nechtasi
-// chaqirilsa, birinchisi o'sha qatorda qotardi — qolganlari hech qachon ishga
-// tushmasdi. REST + realtime + rejalashtirilgan vazifalarni (zamonaviy backend)
-// bir jarayonda birlashtirib bo'lmasdi.
+// Problem: `http.serve`/`ws.serve` (and `cron.run`) each used to block FOREVER on
+// their own (serve via `block_on`, cron.run via `loop { sleep }`). If several were
+// called in one file, the first one would hang on that line — the rest never
+// started. REST + realtime + scheduled tasks (a modern backend) could not be
+// combined in a single process.
 //
-// Yechim: ular darhol bloklamaydi — `Interp.pending_servers` ro'yxatiga tavsif
-// qo'shadi (deferred). Top-level kod tugagach `run_pending` hammasini BITTA umumiy
-// tokio runtime'da spawn qilib bloklaydi. Hammasi bir runtime + bir `Interp`da
-// bo'lgani uchun HTTP handler ichidan `ws.room.send` chaqirilsa WS ulanishlariga
-// yetadi (shared state). `cron.run` esa shunchaki "dasturni ushlab tur" belgisi —
-// scheduler allaqachon o'z fon thread'ida ishlaydi.
+// Solution: they no longer block immediately — they append a descriptor to the
+// `Interp.pending_servers` list (deferred). Once top-level code finishes,
+// `run_pending` spawns all of them on ONE shared tokio runtime and blocks. Since
+// everything lives on a single runtime + single `Interp`, calling `ws.room.send`
+// from inside an HTTP handler reaches the WS connections (shared state). `cron.run`
+// is merely a "keep the program alive" marker — the scheduler already runs in its
+// own background thread.
 
 use std::sync::Arc;
 
 use crate::interp::{Flow, Interp};
 
-// Kutilayotgan deferred ish. `http.serve`/`ws.serve`/`cron.run` ro'yxatga qo'shadi.
+// A pending deferred job. `http.serve`/`ws.serve`/`cron.run` append to the list.
 #[derive(Clone, Copy)]
 pub enum PendingServer {
-    // max_body — so'rov tanasi o'lcham chegarasi (bayt); 0 = cheklovsiz (#91).
+    // max_body — request body size limit (bytes); 0 = unlimited (#91).
     Http { port: u16, max_body: usize },
     Ws { port: u16 },
-    // cron.run — port yo'q; scheduler fon thread'da ishlaydi, bu faqat dasturni
-    // ushlab turish (top-level tugaganda chiqib ketmaslik) belgisi.
+    // cron.run — no port; the scheduler runs in a background thread, this is just
+    // a marker to keep the program alive (don't exit when top-level finishes).
     Cron,
 }
 
-// Top-level kod tugagach chaqiriladi. Kutilayotgan ish bo'lsa, dasturni ushlab
-// turadi (bloklaydi); aks holda darhol qaytadi — oddiy skript normal tugaydi.
+// Called once top-level code finishes. If there is pending work, it keeps the
+// program alive (blocks); otherwise it returns immediately — a plain script ends
+// normally.
 //
-// Tarmoq serveri (http/ws) bo'lsa: global bir marta muzlatiladi (lock-free
-// qidiruv), bitta umumiy tokio runtime har serverni spawn qiladi va kutadi. Faqat
-// `cron.run` bo'lsa (server yo'q): tokio runtime ham, freeze_globals ham KERAK
-// EMAS — scheduler RwLock orqali o'qiydi (cron.on top-level o'rtasida bo'lishi
-// mumkin, muzlatish keyingi global'larni yo'qotardi) — asosiy thread'ni uxlatib
-// turamiz.
+// If there is a network server (http/ws): globals are frozen once (lock-free
+// lookup), a single shared tokio runtime spawns and awaits each server. If there
+// is only `cron.run` (no server): neither a tokio runtime nor freeze_globals is
+// needed — the scheduler reads via RwLock (cron.on may appear in the middle of
+// top-level, and freezing would lose the later globals) — so we just put the main
+// thread to sleep.
 pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
     let pending = interp.pending_servers.lock().unwrap().clone();
     if pending.is_empty() {
         return Ok(());
     }
 
-    // Tarmoq serverlari (cron'siz) — tokio runtime'da spawn qilinadi.
+    // Network servers (excluding cron) — spawned on the tokio runtime.
     let servers: Vec<PendingServer> = pending
         .iter()
         .copied()
         .filter(|p| !matches!(p, PendingServer::Cron))
         .collect();
 
-    // Hech qanday tarmoq serveri yo'q, faqat cron.run — runtime'siz, freeze'siz
-    // asosiy thread'ni uxlatib turamiz (scheduler fon thread'da davom etadi).
+    // No network server at all, only cron.run — put the main thread to sleep
+    // without a runtime or freeze (the scheduler continues in its background thread).
     if servers.is_empty() {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
 
-    // Global qidiruv lock-free bo'lsin (parallel handler'lar RwLock'ga urilmasin).
-    // Bir marta — bu yerda hamma server boshlanishidan oldin. cron bo'lsa, u ham
-    // shu frozen snapshot'dan o'qiydi (lookup ikkalasini qo'llaydi).
+    // Make global lookup lock-free (so parallel handlers don't contend on the
+    // RwLock). Done once — here, before any server starts. If cron is present, it
+    // too reads from this frozen snapshot (lookup supports both).
     interp.freeze_globals();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -69,12 +71,12 @@ pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
         .build()
         .map_err(|e| Flow::err(format!("tokio runtime: {}", e)))?;
 
-    // Portlarni AVVAL bind qilamiz (accept loop'ni spawn qilishdan oldin). Port
-    // band bo'lsa bind xato qaytaradi → butun `run_pending` `Err` bilan chiqadi →
-    // jarayon exit code ≠ 0 (issue #108: deploy/supervisor jim muvaffaqiyatga
-    // aldanmasin). Bind upfront bo'lgani uchun xato deterministik chiqadi —
-    // accept loop'lar cheksiz bo'lib, hech qachon tugamasligini hisobga olib,
-    // ularning `await`'iga tayanib bo'lmaydi.
+    // Bind the ports FIRST (before spawning the accept loop). If a port is in use,
+    // bind returns an error → the whole `run_pending` exits with `Err` → the
+    // process exit code is != 0 (issue #108: don't fool deploy/supervisor with a
+    // silent success). Because binding happens upfront the error surfaces
+    // deterministically — accept loops run forever and never finish, so we cannot
+    // rely on their `await` for this.
     rt.block_on(async move {
         let mut handles = Vec::new();
         for srv in servers {
@@ -92,13 +94,14 @@ pub fn run_pending(interp: &Arc<Interp>) -> Result<(), Flow> {
                         crate::ws_mod::serve_loop(interp, listener).await
                     }));
                 }
-                // Cron yuqorida filtrlangan — bu yerga yetib kelmaydi.
+                // Cron was filtered out above — never reaches here.
                 PendingServer::Cron => continue,
             }
         }
-        // Har bir serve_loop cheksiz (accept loop). Hammasini kutib turamiz —
-        // amalda hech biri tugamaydi, jarayon shu yerda bloklanib qoladi.
-        // (cron.run bo'lsa ham, server bloki dasturni ushlaydi — scheduler fonda.)
+        // Each serve_loop runs forever (accept loop). We await all of them — in
+        // practice none ever finish, so the process blocks here.
+        // (Even with cron.run, the server block keeps the program alive — scheduler
+        // runs in the background.)
         for h in handles {
             let _ = h.await;
         }
@@ -113,10 +116,10 @@ mod tests {
 
     #[test]
     fn band_port_run_pending_err() {
-        // Bind xatosi `run_pending` dan `Err(Flow::Error)` bo'lib ko'tariladi
-        // (issue #108) — jim `Ok(())` emas. Bu interp.rs'da exit code ≠ 0 ga
-        // aylanadi (deploy/supervisor xatoni sezsin). Portni std listener bilan
-        // egallaymiz, so'ng o'sha portni kutilayotgan Http server qilib qo'yamiz.
+        // A bind error propagates from `run_pending` as `Err(Flow::Error)`
+        // (issue #108) — not a silent `Ok(())`. In interp.rs this turns into an
+        // exit code != 0 (so deploy/supervisor notices the error). We occupy the
+        // port with a std listener, then set up a pending Http server on that port.
         let occupied = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let port = occupied.local_addr().unwrap().port();
 
@@ -130,7 +133,7 @@ mod tests {
         let res = run_pending(&interp);
         assert!(
             matches!(res, Err(Flow::Error(_))),
-            "band port → Err(Flow::Error) kutilgan, oldingi jim Ok emas"
+            "occupied port → expected Err(Flow::Error), not a silent Ok"
         );
     }
 }

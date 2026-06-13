@@ -1,9 +1,9 @@
-# 11 — sh battery (tashqi shell buyruqlari).
-# Ishga: ./target/release/fluxon run tests-fx/11_sh.fx
+# 11 - sh battery (external shell commands).
+# Run: ./target/release/fluxon run tests-fx/11_sh.fx
 #
-# sh.run cmd -> {stdout: str  stderr: str  code: int}. Buyruq shell orqali boradi,
-# shuning uchun `&&`, quvur (|) ishlaydi. Bu testlar Unix shell (sh) ni nazarda
-# tutadi — CI ubuntu+macOS da ishlaydi.
+# sh.run cmd -> {stdout: str  stderr: str  code: int}. The command goes through the shell,
+# so `&&` and pipes (|) work. These tests assume a Unix shell (sh) -
+# CI runs on ubuntu+macOS.
 
 fails <- 0
 
@@ -21,32 +21,32 @@ fn truthy v label
     log "FAIL ${label}: got=${v}"
     fails <- fails + 1
 
-# --- Oddiy chaqiruv: stdout + code ---
-r = sh.run "printf salom"
-eq r.stdout "salom" "printf stdout"
-eq r.code 0 "muvaffaqiyat kodi 0"
-eq r.stderr "" "stderr bo'sh"
+# --- Simple call: stdout + code ---
+r = sh.run "printf hello"
+eq r.stdout "hello" "printf stdout"
+eq r.code 0 "success code 0"
+eq r.stderr "" "stderr empty"
 
-# --- Non-zero exit: Flow::err EMAS, code orqali bilinadi ---
+# --- Non-zero exit: NOT a Flow::err, signaled via code ---
 bad = sh.run "exit 5"
 eq bad.code 5 "exit 5 -> code 5"
 
-# --- stderr alohida tutiladi (stdout bilan aralashmaydi) ---
-e = sh.run "printf xato 1>&2"
-eq e.stderr "xato" "stderr tutildi"
-eq e.stdout "" "xato vaqtida stdout bo'sh"
+# --- stderr captured separately (does not mix with stdout) ---
+e = sh.run "printf error 1>&2"
+eq e.stderr "error" "stderr captured"
+eq e.stdout "" "stdout empty on error"
 
-# --- Shell xususiyatlari: `&&` ketma-ket buyruq ---
+# --- Shell features: `&&` sequential commands ---
 chain = sh.run "printf a && printf b"
-eq chain.stdout "ab" "&& ketma-ket buyruq"
-eq chain.code 0 "&& kodi 0"
+eq chain.stdout "ab" "&& sequential commands"
+eq chain.code 0 "&& code 0"
 
-# --- Quvur (|) ishlaydi ---
-pipe = sh.run "printf 'bir\nikki\nuch' | wc -l"
-truthy (str.int pipe.stdout >= 2) "quvur (wc -l) ishladi"
+# --- Pipe (|) works ---
+pipe = sh.run "printf 'one\ntwo\nthree' | wc -l"
+truthy (str.int pipe.stdout >= 2) "pipe (wc -l) worked"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 11_sh: HAMMASI O'TDI ==="
+  log "=== 11_sh: ALL PASSED ==="
 else
-  log "=== 11_sh: ${fails} TEST YIQILDI ==="
+  log "=== 11_sh: ${fails} TESTS FAILED ==="

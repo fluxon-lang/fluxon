@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Fluxon .fx test to'plamini ishga tushiruvchi. Toza master ustida mavjud
-# imkoniyatlarni (yadro til, kolleksiyalar+modullar, db, time+env, http) sinaydi.
+# Runs the Fluxon .fx test suite. Exercises the available features (core
+# language, collections+modules, db, time+env, http) on a clean master.
 #
-# Ishga (lokal):  ./tests-fx/run_all.sh        # runtime/ papkasidan
-# Ishga (CI):     FLUXON_BIN=target/release/fluxon ./tests-fx/run_all.sh
+# Run (local):  ./tests-fx/run_all.sh        # from the runtime/ directory
+# Run (CI):     FLUXON_BIN=target/release/fluxon ./tests-fx/run_all.sh
 #
-# FLUXON_BIN — fluxon binary'ga yo'l (standart: ./target/release/fluxon). DIR esa shu
-# skript joylashgan papkadan aniqlanadi, qaysi cwd'dan chaqirilsa ham ishlaydi.
+# FLUXON_BIN — path to the fluxon binary (default: ./target/release/fluxon). DIR is
+# resolved from this script's own directory, so it works from any cwd.
 set -u
 BIN="${FLUXON_BIN:-./target/release/fluxon}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pass=0; fail=0
 
-run() {  # run <label> <env...> -- <fx-fayl>
+run() {  # run <label> <env...> -- <fx-file>
   local label="$1"; shift
   local out
   out="$("$@" 2>&1)"
   echo "$out"
-  if echo "$out" | grep -q "HAMMASI O'TDI"; then
+  if echo "$out" | grep -q "ALL PASSED"; then
     echo ">>> $label: PASS"; pass=$((pass+1))
   else
     echo ">>> $label: FAIL"; fail=$((fail+1))
@@ -25,10 +25,10 @@ run() {  # run <label> <env...> -- <fx-fayl>
   echo
 }
 
-echo "############ 01 yadro til ############"
+echo "############ 01 core language ############"
 run "01_core"               $BIN run $DIR/01_core.fx
 
-echo "############ 02 kolleksiyalar + modullar ############"
+echo "############ 02 collections + modules ############"
 run "02_collections_modules" $BIN run $DIR/02_collections_modules.fx
 
 echo "############ 03 db (in-memory SQLite) ############"
@@ -48,9 +48,10 @@ rm -f "$DB"
 echo
 
 echo "############ 04 time + env ############"
+# NOTE: FLUXON_TEST_VAR=salom is asserted by 04_time_env.fx — keep in sync.
 run "04_time_env"  env FLUXON_TEST_VAR=salom PORT=9090 $BIN run $DIR/04_time_env.fx
 
-echo "############ 05 http (server + klient) ############"
+echo "############ 05 http (server + client) ############"
 $BIN run $DIR/05_http_server.fx >/tmp/fluxon_srv_$$.log 2>&1 &
 SRV=$!
 for i in $(seq 1 40); do
@@ -61,51 +62,52 @@ http_out="$($BIN run $DIR/05_http_client.fx 2>&1)"
 echo "$http_out"
 kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 rm -f /tmp/fluxon_srv_$$.log
-if echo "$http_out" | grep -q "HAMMASI O'TDI"; then
+if echo "$http_out" | grep -q "ALL PASSED"; then
   echo ">>> 05_http: PASS"; pass=$((pass+1))
 else
   echo ">>> 05_http: FAIL"; fail=$((fail+1))
 fi
 echo
 
-echo "############ 06 reg (funksiya registri) ############"
+echo "############ 06 reg (function registry) ############"
 run "06_reg"                $BIN run $DIR/06_reg.fx
 
-echo "############ 07 cron (rejalashtirilgan vazifalar) ############"
+echo "############ 07 cron (scheduled tasks) ############"
 run "07_cron"               $BIN run $DIR/07_cron.fx
 
 echo "############ 08 io (terminal input/output) ############"
-# io stdin'dan o'qiydi — standart run() stdin bermaydi, shuning uchun quvuraymiz.
+# io reads from stdin — the standard run() does not feed stdin, so we pipe it.
+# NOTE: "Firdavs\n42\n" is asserted by 08_io.fx — keep in sync.
 io_out="$(printf 'Firdavs\n42\n' | $BIN run $DIR/08_io.fx 2>&1)"
 echo "$io_out"
-if echo "$io_out" | grep -q "HAMMASI O'TDI"; then
+if echo "$io_out" | grep -q "ALL PASSED"; then
   echo ">>> 08_io: PASS"; pass=$((pass+1))
 else
   echo ">>> 08_io: FAIL"; fail=$((fail+1))
 fi
 echo
 
-echo "############ 09 fs (lokal fayl tizimi) ############"
+echo "############ 09 fs (local file system) ############"
 run "09_fs"                 $BIN run $DIR/09_fs.fx
 
-echo "############ 10 ai (LLM primitiv — tarmoqsiz) ############"
-# ai.ask/json/run haqiqiy chaqiruvi $AI_KEY + tarmoq talab qiladi; bu test faqat
-# shadowing va tool-loop'ning Fluxon tomonini sinaydi (token sarflamaydi).
+echo "############ 10 ai (LLM primitive — no network) ############"
+# A real ai.ask/json/run call requires $AI_KEY + network; this test only
+# exercises the Fluxon side of shadowing and the tool-loop (spends no tokens).
 run "10_ai"                 $BIN run $DIR/10_ai.fx
 
-echo "############ 11 sh (tashqi shell buyruqlari) ############"
+echo "############ 11 sh (external shell commands) ############"
 run "11_sh"                 $BIN run $DIR/11_sh.fx
 
-echo "############ 12 modules (use ./fayl) ############"
+echo "############ 12 modules (use ./file) ############"
 run "12_modules"            $BIN run $DIR/12_modules.fx
 
-echo "############ 13 auth (JWT + parol hash) ############"
-run "13_auth"  env AUTH_SECRET=sirli-kalit-13 $BIN run $DIR/13_auth.fx
+echo "############ 13 auth (JWT + password hash) ############"
+run "13_auth"  env AUTH_SECRET=secret-key-13 $BIN run $DIR/13_auth.fx
 
 echo "############ 14 crypto (hash/hmac/b64/hex/uuid) ############"
 run "14_crypto"             $BIN run $DIR/14_crypto.fx
 
 echo "================================================"
-echo "YAKUN: $pass PASS, $fail FAIL"
+echo "TOTAL: $pass PASS, $fail FAIL"
 echo "================================================"
 [ "$fail" -eq 0 ]

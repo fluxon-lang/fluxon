@@ -1,60 +1,60 @@
-# try/catch demo (issue #125) — xatoni ushlab qolib, ishni davom ettirish.
-# Ishga: cargo run -- run examples/trycatch_demo.fx
+# try/catch demo (issue #125) — catch an error and keep going.
+# Run: cargo run -- run examples/trycatch_demo.fx
 
-# 1) Fallback: xato chiqsa default qiymat bilan davom et.
-fn narx_ol mahsulot
-  if mahsulot == "yo'q"
-    fail 404 "mahsulot topilmadi: ${mahsulot}"
+# 1) Fallback: on error, continue with a default value.
+fn get_price product
+  if product == "none"
+    fail 404 "product not found: ${product}"
   ret 100
 
-narx = try
-  narx_ol "yo'q"
+price = try
+  get_price "none"
 catch e
-  log "ogohlantirish: ${e.message} (status: ${e.status})"
-  0                                  # fallback narx
-log "narx = ${narx}"                 # → 0
+  log "warning: ${e.message} (status: ${e.status})"
+  0                                  # fallback price
+log "price = ${price}"               # -> 0
 
-# 2) Custom xato: o'z biznes qoidangizdan fail chiqarish.
-fn tekshir items
+# 2) Custom error: raise a fail from your own business rule.
+fn validate items
   if (items.len) != 4
-    fail "yuborilgan ma'lumot faqat 4ta bo'lishi kerak"
+    fail "the submitted data must contain exactly 4 items"
   ret :ok
 
-xabar = try
-  tekshir [1 2 3]
+msg = try
+  validate [1 2 3]
 catch e
   e.message
-log xabar                            # → yuborilgan ma'lumot faqat 4ta...
+log msg                              # -> the submitted data must contain exactly 4...
 
-# 3) Bir nechta manbadan birinchi ishlaganini olish (re-raise bilan).
-fn birlamchi -> fail "birlamchi manba yiqildi"
-fn zaxira -> "zaxiradan ma'lumot"
+# 3) Take the first one that works from several sources (with re-raise).
+fn primary -> fail "primary source failed"
+fn fallback -> "data from fallback"
 
-natija = try
-  birlamchi()
+result = try
+  primary()
 catch e
-  log "birlamchi yiqildi: ${e.message} — zaxiraga o'tamiz"
+  log "primary failed: ${e.message} — switching to fallback"
   try
-    zaxira()
+    fallback()
   catch e2
-    fail "ikkala manba ham yiqildi: ${e2.message}"
-log natija                           # → zaxiradan ma'lumot
+    fail "both sources failed: ${e2.message}"
+log result                           # -> data from fallback
 
-# 4) Qayta urinish (retry): xato bo'lsa bir necha marta urinish.
-urinish <- 0
-fn beqaror
-  urinish <- urinish + 1
-  if urinish < 3
-    fail "vaqtinchalik xato (urinish ${urinish})"
-  ret "muvaffaqiyat"
+# 4) Retry: on error, try a few times.
+attempt <- 0
+fn flaky
+  attempt <- attempt + 1
+  if attempt < 3
+    fail "temporary error (attempt ${attempt})"
+  ret "success"
 
-javob <- nil
+reply <- nil
 each i in 1..3
-  javob <- try
-    beqaror()
+  reply <- try
+    flaky()
   catch e
-    log "urinish yiqildi: ${e.message}"
+    log "attempt failed: ${e.message}"
     nil
-  if javob != nil
+  if reply != nil
     stop
-log "yakuniy javob: ${javob}"        # → muvaffaqiyat (3-urinishda)
+log "final reply: ${reply}"          # -> success (on the 3rd attempt)

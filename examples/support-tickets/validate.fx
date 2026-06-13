@@ -1,6 +1,6 @@
-# Validatsiya yordamchilari
+# Validation helpers
 
-# Oddiy email tekshiruvi: '@' va '.' bo'lishi, bo'sh bo'lmasligi kerak
+# Simple email check: must contain '@' and '.', and must not be empty.
 exp fn valid_email s
   if s == nil
     ret false
@@ -10,7 +10,7 @@ exp fn valid_email s
     ret false
   ret str.has s "."
 
-# Matn bo'sh emasligini tekshiradi (nil yoki bo'sh satr emas)
+# Checks that text is not empty (not nil and not an empty string)
 exp fn non_empty s
   if s == nil
     ret false

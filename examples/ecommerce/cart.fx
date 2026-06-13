@@ -1,16 +1,16 @@
-# cart.fluxon — savatcha endpointlari
-# add item, view cart (hisoblangan jami), remove item, update qty.
+# cart.fluxon — cart endpoints
+# add item, view cart (computed total), remove item, update qty.
 use http db
 
-# Mijoz uchun ochiq savatcha topadi yoki yangisini yaratadi.
+# Find an open cart for the customer, or create a new one.
 fn get_open_cart customer_id
   c = db.one "select * from carts where customer=$1 and status=$2" [customer_id :open]
   if c == nil
     ret db.ins "carts" {customer:customer_id status::open}
   ret c
 
-# Savatcha tarkibini hisoblab beradi: itemlar + jami narx.
-# Har bir item uchun mahsulot narxi va qatorlik subtotal qaytariladi.
+# Compute the cart contents: items + total price.
+# For each item we return the product price and a per-row subtotal.
 fn build_cart_view cart_id
   rows = db.q "select ci.id, ci.product, ci.qty, p.name, p.price, p.stock from cart_items ci join products p on p.id = ci.product where ci.cart=$1 order by ci.id" [cart_id]
   total <- 0.0
@@ -28,8 +28,8 @@ fn build_cart_view cart_id
     }
   ret {cart_id:cart_id items:items total:total}
 
-# POST /carts/:customer_id/items — savatchaga mahsulot qo'shish.
-# Agar mahsulot allaqachon savatda bo'lsa — qty ni oshiramiz.
+# POST /carts/:customer_id/items — add a product to the cart.
+# If the product is already in the cart, bump its qty.
 http.on :post "/carts/:customer_id/items" \req ->
   b = req.body
   if b.product == nil | b.qty == nil
@@ -49,7 +49,7 @@ http.on :post "/carts/:customer_id/items" \req ->
         db.up "cart_items" {qty: existing.qty + b.qty} {id:existing.id}
       rep 201 (build_cart_view cart.id)
 
-# GET /carts/:customer_id — savatchani hisoblangan jami bilan ko'rsatish.
+# GET /carts/:customer_id — show the cart with its computed total.
 http.on :get "/carts/:customer_id" \req ->
   cart = db.one "select * from carts where customer=$1 and status=$2" [req.params.customer_id :open]
   if cart == nil
@@ -57,7 +57,7 @@ http.on :get "/carts/:customer_id" \req ->
   else
     rep 200 (build_cart_view cart.id)
 
-# PUT /carts/items/:item_id — savatdagi item qty sini yangilash.
+# PUT /carts/items/:item_id — update the qty of a cart item.
 http.on :put "/carts/items/:item_id" \req ->
   item = db.one "select * from cart_items where id=$1" [req.params.item_id]
   if item == nil
@@ -65,14 +65,14 @@ http.on :put "/carts/items/:item_id" \req ->
   elif req.body.qty == nil
     rep 400 {error:"qty required"}
   elif req.body.qty <= 0
-    # qty 0 yoki manfiy → itemni o'chiramiz.
+    # qty 0 or negative → delete the item.
     db.q "delete from cart_items where id=$1" [item.id]
     rep 200 (build_cart_view item.cart)
   else
     db.up "cart_items" {qty:req.body.qty} {id:item.id}
     rep 200 (build_cart_view item.cart)
 
-# DELETE /carts/items/:item_id — savatdan itemni olib tashlash.
+# DELETE /carts/items/:item_id — remove an item from the cart.
 http.on :del "/carts/items/:item_id" \req ->
   item = db.one "select * from cart_items where id=$1" [req.params.item_id]
   if item == nil

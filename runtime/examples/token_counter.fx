@@ -1,26 +1,26 @@
-# Token hisoblagich — docs va misollar Claude uchun qancha token sarflashini O'LCHAYDI.
+# Token counter — MEASURES how many tokens the docs and examples cost for Claude.
 #
-# Nega: character-base taxmin (char/4) aniq emas — Fluxon docs'ida (o'zbekcha matn +
-# kod) char/token nisbati ~1.9, ya'ni char/4 taxmini qariyb 2 baravar past
-# ko'rsatadi. Aniq raqam uchun Anthropic'ning count_tokens API'si kerak (bepul,
-# faqat RPM limiti bor).
+# Why: the character-based estimate (char/4) is inaccurate — in the Fluxon docs
+# (Uzbek text + code) the char/token ratio is ~1.9, i.e. the char/4 estimate is
+# off by nearly 2x on the low side. For an exact number you need Anthropic's
+# count_tokens API (free, only has an RPM limit).
 #
-# Bu tool Fluxon'ning o'zida yozilgan (dogfooding): fs.read/fs.ls + http.post +
-# custom header (x-api-key). HTTPS, fs va so'rov header'lari batareyalardan keladi.
+# This tool is written in Fluxon itself (dogfooding): fs.read/fs.ls + http.post +
+# a custom header (x-api-key). HTTPS, fs and request headers come from batteries.
 #
-# Ishga tushirish (runtime/ ichida):
+# Running (inside runtime/):
 #   ANTHROPIC_API_KEY=sk-... cargo run -- run examples/token_counter.fx
 
 use http
 
 key = env.ANTHROPIC_API_KEY
 if key == nil
-  fail "ANTHROPIC_API_KEY env o'rnatilmagan (count_tokens API uchun kerak)"
+  fail "ANTHROPIC_API_KEY env is not set (needed for the count_tokens API)"
 
-# count_tokens API har doim shu model va versiya bilan ishlaydi.
+# The count_tokens API always works with this model and version.
 model = "claude-opus-4-8"
 
-# Bitta matn uchun aniq token sonini qaytaradi (yoki xato bo'lsa fail).
+# Returns the exact token count for one text (or fails on error).
 count_tokens = \text ->
   res = http.post "https://api.anthropic.com/v1/messages/count_tokens" {
     model: model
@@ -32,23 +32,23 @@ count_tokens = \text ->
     }
   }
   if res.status != 200
-    fail "count_tokens xato (status ${res.status}): ${json.enc res.body}"
+    fail "count_tokens error (status ${res.status}): ${json.enc res.body}"
   res.body.input_tokens
 
-# char/token nisbatini "1.93" ko'rinishida formatlaydi (2 kasr xona).
-# Butun arifmetika: (chars*100)/tokens → 193 → "1.93".
+# Formats the char/token ratio as "1.93" (2 decimal places).
+# Integer arithmetic: (chars*100)/tokens -> 193 -> "1.93".
 ratio_str = \chars tokens ->
   r = math.floor ((chars * 100) / tokens)
   whole = math.floor (r / 100)
   frac = r % 100
-  # frac bir xonali bo'lsa old nol qo'shamiz ("1.9" emas "1.09").
+  # If frac is single-digit, add a leading zero ("1.09" not "1.9").
   if frac < 10
     "${whole}.0${frac}"
   else
     "${whole}.${frac}"
 
-# Bitta faylni o'lchaydi va natija map'ini qaytaradi {path chars tokens}.
-# Fayl yo'q bo'lsa nil (chaqiruvchi o'tkazib yuboradi).
+# Measures one file and returns a result map {path chars tokens}.
+# If the file is missing, nil (the caller skips it).
 measure = \path ->
   text = fs.read path
   if text == nil
@@ -57,8 +57,8 @@ measure = \path ->
   tokens = count_tokens text
   {path: path chars: chars tokens: tokens}
 
-# Papkadagi barcha .md (yoki berilgan kengaytma) fayllarni o'lchaydi.
-# dir oxirida "/" bo'lishi shart emas — qo'shib beramiz.
+# Measures all .md (or the given extension) files in a folder.
+# A trailing "/" on dir is not required — we add it.
 measure_dir = \dir ext ->
   names = fs.ls dir
   out <- []
@@ -69,8 +69,8 @@ measure_dir = \dir ext ->
         out <- out.push m
   out
 
-# --- Skanerlash: docs/*.md va examples/*.fx (worktree ildizidan nisbiy) ---
-log "=== Token hisobi (model: ${model}) ==="
+# --- Scanning: docs/*.md and examples/*.fx (relative to the worktree root) ---
+log "=== Token count (model: ${model}) ==="
 log ""
 
 groups = [
@@ -90,14 +90,14 @@ each g in groups
     sub_tokens <- sub_tokens + row.tokens
     sub_chars <- sub_chars + row.chars
     log "  ${row.path}"
-    log "    belgilar: ${row.chars}  ·  tokenlar: ${row.tokens}  ·  char/tok: ${ratio_str row.chars row.tokens}"
-  log "  guruh jami: ${sub_tokens} tok (${sub_chars} belgi, char/4 taxmini: ${math.floor (sub_chars / 4)})"
+    log "    chars: ${row.chars}  |  tokens: ${row.tokens}  |  char/tok: ${ratio_str row.chars row.tokens}"
+  log "  group total: ${sub_tokens} tok (${sub_chars} chars, char/4 estimate: ${math.floor (sub_chars / 4)})"
   log ""
   grand_tokens <- grand_tokens + sub_tokens
   grand_chars <- grand_chars + sub_chars
 
-log "=== UMUMIY JAMI ==="
-log "belgilar: ${grand_chars}"
-log "tokenlar: ${grand_tokens}  (aniq, Claude)"
-log "char/4 taxmini: ${math.floor (grand_chars / 4)} tok  (xato!)"
-log "haqiqiy char/tok nisbati: ${ratio_str grand_chars grand_tokens}"
+log "=== GRAND TOTAL ==="
+log "chars: ${grand_chars}"
+log "tokens: ${grand_tokens}  (exact, Claude)"
+log "char/4 estimate: ${math.floor (grand_chars / 4)} tok  (wrong!)"
+log "real char/tok ratio: ${ratio_str grand_chars grand_tokens}"

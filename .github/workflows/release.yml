@@ -1,14 +1,14 @@
 name: Release
 
-# version/* branch'dan ochilgan PR merge bo'lganda GitHub Release yaratadi.
-# Qo'lda qayta ishga tushirish uchun workflow_dispatch ham qoldirilgan.
+# Creates a GitHub Release when a PR opened from a version/* branch is merged.
+# workflow_dispatch is also kept for manual re-runs.
 on:
   pull_request:
     types: [closed]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release versiyasi (masalan: 0.2.0 yoki v0.2.0)"
+        description: "Release version (for example: 0.2.0 or v0.2.0)"
         required: true
 
 permissions:
@@ -25,7 +25,7 @@ env:
 
 jobs:
   prepare:
-    name: Release ma'lumotlarini tayyorlash
+    name: Prepare release metadata
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Release versiyasini aniqlash
+      - name: Determine release version
         id: release
         shell: bash
         run: |
@@ -54,12 +54,12 @@ jobs:
           crate_version="$(awk -F '"' '/^version =/ { print $2; exit }' "$WORKDIR/Cargo.toml")"
 
           if [ -z "$release_version" ]; then
-            echo "Release version topilmadi." >&2
+            echo "Release version not found." >&2
             exit 1
           fi
 
           if [ "$release_version" != "$crate_version" ]; then
-            echo "Branch/input versiyasi ($release_version) runtime/Cargo.toml versiyasi ($crate_version) bilan mos emas." >&2
+            echo "Branch/input version ($release_version) does not match runtime/Cargo.toml version ($crate_version)." >&2
             exit 1
           fi
 
@@ -82,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust toolchain o'rnatish (stable)
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache
@@ -93,7 +93,7 @@ jobs:
       - name: Release build
         run: cargo build --locked --release --verbose
 
-      - name: Binary'ni paketlash
+      - name: Package the binary
         shell: bash
         run: |
           mkdir -p dist package
@@ -112,7 +112,7 @@ jobs:
               bin_file="$BIN_NAME.exe"
               ;;
             *)
-              echo "Noma'lum OS: $RUNNER_OS" >&2
+              echo "Unknown OS: $RUNNER_OS" >&2
               exit 1
               ;;
           esac
@@ -136,7 +136,7 @@ jobs:
             tar -czf "dist/$asset_base.tar.gz" -C package "$bin_file"
           fi
 
-      - name: Build artifact yuklash
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.os }}
@@ -144,7 +144,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: GitHub Release yaratish
+    name: Create GitHub Release
     needs: [prepare, build]
     runs-on: ubuntu-latest
     env:
@@ -153,19 +153,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Release artifactlarini yuklab olish
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
 
-      - name: Checksum yaratish
+      - name: Generate checksums
         run: |
           cd dist
           sha256sum * > SHA256SUMS.txt
 
-      - name: Release yaratish yoki assetlarni yangilash
+      - name: Create release or update assets
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" dist/* --clobber

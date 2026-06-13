@@ -216,7 +216,7 @@ http.serve 8080
 ```fluxon
 http.before "/api/*" \req ->
   if !req.headers.authorization
-    fail 401 "auth kerak"
+    fail 401 "auth required"
   req.ctx <- {tenant_id: 5 role: "admin"}
 http.on :get "/api/me" \req ->
   ctx = req.ctx
@@ -422,7 +422,7 @@ reg.has "calc"   ·   reg.names
 ```fluxon
 l.len · l.push x · l.filter \x->x>0 · l.map \x->x*2 · l.has x · l.0
 l.slice a b · l.join ", " · l.reduce 0 \acc x -> acc + x
-l.index x → birinchi indeks yoki -1 · l.find \x->x>4 → birinchi mos element yoki nil
+l.index x → first index or -1 · l.find \x->x>4 → first matching element or nil
 l.sort → natural order (nums/strs) · l.sort \a b -> a.p - b.p (comparator → number: neg = a first)
 l.reverse · l.uniq (first kept) · l.flat (one level) · l.zip other → [[a b] ...]
 l.any \x->x>4 → bool (short-circuit) · l.all \x->x>0 → bool

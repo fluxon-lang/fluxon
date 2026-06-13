@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Savol / muhokama
+  - name: Question / discussion
     url: https://github.com/Firdavs9512/fluxon-lang/discussions
-    about: Umumiy savollar va g'oyalar uchun (bug/taklif emas).
+    about: For general questions and ideas (not a bug/feature request).
