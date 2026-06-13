@@ -2142,6 +2142,18 @@ fn arg_int(v: Option<&Value>, who: &str) -> Result<i64, Flow> {
 mod tests {
     use super::*;
 
+    // Bu modul testlari haqiqiy DB ochadi. `:memory:` aslida JARAYON BO'YLAB
+    // bitta umumiy shared-cache DB (Pool izohi: `file::memory:?cache=shared`) —
+    // shu sabab `CREATE TABLE` qiluvchi testlar parallel ishlaganda jadval-nomi
+    // ("table ... already exists") yoki shared-cache table-lock ("database
+    // table is locked") to'qnashuvi flaky qiladi (issue #145). Yechim: har test
+    // NOYOB nomli shared-cache memory DB ishlatsin (pool bir nechta connection
+    // ochadi → shared-cache shart; unikal nom → testlar bir-birini ko'rmaydi).
+    // `mem_db(name)` shu naqshni markazlashtiradi; nom test ichida unikal bo'lsin.
+    fn mem_db(name: &str) -> SqliteDb {
+        SqliteDb::open(&format!("file:{name}?mode=memory&cache=shared")).unwrap()
+    }
+
     fn idx(table: &str, cols: &[&str], unique: bool) -> IndexDef {
         IndexDef {
             table: table.to_string(),
@@ -2245,13 +2257,7 @@ mod tests {
     fn rebuild_preserves_data_and_adds_fk() {
         // rebuild_table: mavjud ustunga FK qo'shadi, ma'lumotni saqlaydi,
         // foreign_keys() introspeksiyasi yangi FK'ni ko'radi.
-        //
-        // NOYOB nomli memory DB: default `:memory:` aslida JARAYON BO'YLAB
-        // bitta umumiy shared-cache DB (Pool izohi) — parallel ishlaydigan
-        // boshqa db testlari bilan jadval nomi va shared-cache table-lock
-        // ("database table is locked") to'qnashuvi flaky qiladi. Alohida nom
-        // testni to'liq izolyatsiya qiladi.
-        let db = SqliteDb::open("file:rebuild_fk_test?mode=memory&cache=shared").unwrap();
+        let db = mem_db("rebuild_fk_test");
         // Parent + child (FK'siz) + ma'lumot.
         db.exec(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
@@ -2301,11 +2307,7 @@ mod tests {
     fn rebuild_twice_same_ts_no_backup_collision() {
         // Codex revyu: bir jadval bir sekundda (bir xil `ts`) ikki marta rebuild
         // bo'lsa (ref qo'shish -> tez orada olib tashlash), backup nomi to'qnashmasin.
-        //
-        // NOYOB nomli memory DB — sabab rebuild_preserves_data_and_adds_fk
-        // izohida (default :memory: jarayon bo'ylab umumiy, parallel test
-        // to'qnashuvi flaky qiladi).
-        let db = SqliteDb::open("file:rebuild_ts_test?mode=memory&cache=shared").unwrap();
+        let db = mem_db("rebuild_ts_test");
         db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY)", &[])
             .unwrap();
         db.exec("INSERT INTO users (id) VALUES (1)", &[]).unwrap();
@@ -2401,7 +2403,7 @@ mod tests {
         // ochiq qoladi) connection poolga ROLLBACK qilinib qaytishi kerak —
         // aks holda keyingi begin() "cannot start a transaction within a
         // transaction" oladi.
-        let db = SqliteDb::open(":memory:").unwrap();
+        let db = mem_db("commit_failure_clean_conn");
         db.exec("CREATE TABLE p (id INTEGER PRIMARY KEY)", &[])
             .unwrap();
         db.exec(
@@ -2438,8 +2440,12 @@ mod tests {
         // Pool dizaynining asosiy va'dasi: tx connection'ni egallab turganda
         // global (tx'siz) so'rov pooldan BOSHQA connection olib ishlayveradi va
         // uncommitted yozuvni ko'rmaydi. WAL snapshot kerak — fayl DB ishlatamiz
-        // (shared-cache :memory: WAL'ni qo'llamaydi).
-        let path = std::env::temp_dir().join("fluxon_dbmod_pool_promise.db");
+        // (shared-cache :memory: WAL'ni qo'llamaydi). Fayl nomiga PID qo'shamiz:
+        // bir vaqtda ikki `cargo test` jarayoni bo'lsa ham fayl to'qnashmasin.
+        let path = std::env::temp_dir().join(format!(
+            "fluxon_dbmod_pool_promise_{}.db",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -2472,7 +2478,7 @@ mod tests {
         // Issue #103 (bog'liq): lambda ichida Rust-darajali panic bo'lsa guard
         // CURRENT_TX'ni tozalashi kerak — spawn_blocking thread'i qayta
         // ishlatilganda keyingi request eski tx ichida qolib ketmasin.
-        let db = SqliteDb::open(":memory:").unwrap();
+        let db = mem_db("tx_guard_clears_tl");
         db.exec("CREATE TABLE t (id INTEGER)", &[]).unwrap();
 
         let tx = db.begin().unwrap();
