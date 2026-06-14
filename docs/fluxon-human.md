@@ -550,7 +550,7 @@ http.serve 8080
 **File upload (`multipart/form-data`).** Files sent by a browser form or
 `curl -F` land in `req.files`, plain form fields in `req.body` (symmetric with
 JSON):
-```flux
+```fluxon
 http.on :post "/upload" \req ->
   f = req.files.0
   fs.write f.filename f.content
