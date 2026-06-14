@@ -2,17 +2,21 @@
 
 > 🌐 **Til:** O'zbek (joriy) · [English](README.md)
 
-**AI agentlar yaxshi yozadigan backend dasturlash tili.**
+**AI-native dasturlash tili — AI agentlar yaxshi yozadigan, va AI'ni backend'ning
+birinchi darajali qismiga aylantiradigan til.**
 
 > Falsafa: *"Til AI'ga moslashadi, AI tilga emas."*
 
 Hozirgi dasturlash tillari odamlar uchun yaratilgan. Ularda bir ishni o'nlab
 yo'l bilan qilish mumkin, sintaksis qulay lekin token-isrofgar, va eng oddiy
 narsa ham qo'shimcha paket talab qiladi. AI agent uchun bu — shovqin: har
-"tanlov nuqtasi" potensial xato, har ortiqcha belgi sarflangan kontekst.
+"tanlov nuqtasi" potensial xato, har ortiqcha belgi sarflangan kontekst. Va
+LLM chaqirish — AI davridagi backend'lar doim qiladigan ish — SDK tortish, kalit
+ulash va JSON'ni qo'lda parse qilish demakdir.
 
 Fluxon boshqacha qurilgan — AI nimani oson va ishonchli yozishini o'lchab, tilni
-shunga moslab.
+shunga moslab, va LLM'ni dependency emas, kalit so'z qilib (`ai.ask` / `ai.json`
+/ `ai.run`).
 
 ```fx
 use http db
@@ -33,6 +37,27 @@ http.serve 8080
 
 Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
 
+AI esa to'g'ridan-to'g'ri tilning ichida. So'rovni klassifikatsiya qiling,
+tilning ichidagi ishonch (confidence) ni o'qing va shunga qarab yo'naltiring —
+SDK yo'q, JSON parse qilish yo'q:
+
+```fx
+use http ai
+
+http.on :post "/triage" \req ->
+  r = ai.json "bu murojaatni klassifikatsiya qil: ${req.body.text}" {topic::a urgency:int}
+  if r._.conf > 0.85
+    rep 200 {auto:true result:r}      # ishonch tilning ichiga qurilgan
+  else
+    rep 200 {auto:false review:true}  # past ishonch → odamga yuborish
+
+http.serve 8080
+```
+
+Tool ishlatadigan agent kerakmi? `ai.run` loop'ning bitta qadamini qaytaradi va
+boshqaruvni sizga qaytaradi — logging, narx va tasdiqlash SDK ichida emas, sizning
+kodingizda qoladi.
+
 ---
 
 ## Asosiy tamoyillar
@@ -50,12 +75,18 @@ Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
    ichida. `npm install` yo'q. Compile vaqtida faqat ishlatilgani binary'ga
    kiradi (tree-shaking).
 
-4. **AI — birinchi darajali primitiv.** LLM chaqirish — kalit so'z, SDK emas:
+4. **AI — birinchi darajali primitiv.** LLM chaqirish — kalit so'z, SDK emas —
+   strukturalangan natija, ishonch, token soni va narx hammasi tilning ichidan
+   qaytadi:
    ```fx
    r = ai.json "buyurtmani ajrat: ${text}" {intent::a items:[{product:str qty:int}]}
-   if r._.conf > 0.85
-     auto r          # ishonch metadata tilning ichida
+   if r._.conf > 0.85          # ishonch metadata tilning ichida
+     log "narx: ${r._.cost} · token: ${r._.tokens}"
    ```
+   Provayderlar muhitdan avtomatik aniqlanadi (`ANTHROPIC_API_KEY` → Claude,
+   `OPENAI_API_KEY` → GPT) — sozlash shart emas. `ai.run` tool ishlatadigan
+   agentlarni boshqaradi, loop (va uning logging/narx/tasdiqlashi) sizning
+   kodingizda qoladi.
 
 ---
 
@@ -104,25 +135,30 @@ fluxon-lang/
 
 ## Hozirgi holat
 
-🚧 **Faol ishlab chiqilmoqda.** Til yadrosi ishlaydigan **runtime** (Rust,
-tree-walking interpreter) mavjud — `.fx` fayllarni ishga tushira oladi.
-Loyiha qayerga ketayotgani va fazalar: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Beta.** Til yadrosi va spec'dagi barcha batareyalar implement qilingan, 479 ta
+o'tadigan test bilan qoplangan. Runtime (Rust, tree-walking interpreter) bugun
+`.fx` fayllarni ishga tushiradi, HTTP/WebSocket xizmat qiladi, ma'lumotlar
+bazasi bilan ishlaydi va LLM agentlarni boshqaradi.
 
 **Ishlaydi:**
 
 - Til yadrosi: tiplar, bindings (`=`/`<-`), `fn`/lambda/closure, `if`/`each`/
-  `match`, operatorlar, string interpolatsiya, `fail`/`!`/`??`/`|>`.
-- Yadro modullari: `str`, `math`, `rand`, `json`, `time`, `env`, `io`, `fs`, `sh`.
-- Batareyalar (barchasi): **`http`** (server + klient + middleware), **`db`**
-  (SQLite, tranzaksiya, schema, auto-migration), **`ai`** (LLM), **`auth`**
-  (JWT + parol hash), **`ws`** (websocket), **`cron`**, **`queue`**, **`reg`**
-  (tool registry).
+  `match`, operatorlar, string interpolatsiya, xatolar (`fail`/`!`/`??`),
+  `try`/`catch`, `par` (parallel fan-out), `|>` pipe.
+- Yadro modullari: `str`, `math`, `rand`, `json`, `time`, `env`, `io`, `fs`, `sh`,
+  darajalangan `log`, hamda `assert` + ichki `fluxon test` runner va interaktiv
+  REPL.
+- Batareyalar (barchasi): **`http`** (server + klient + middleware + static),
+  **`db`** (SQLite, tranzaksiya, schema, auto-migration, query builder),
+  **`ai`** (LLM — `ai.ask`/`ai.json`/`ai.run`, Anthropic + OpenAI auto-detect,
+  tool-loop, confidence/token/narx metadata, retry + timeout), **`auth`** (JWT +
+  parol hash), **`crypto`**, **`ws`** (websocket), **`cron`**, **`queue`**,
+  **`reg`** (agentlar uchun tool registry).
 
-`docs/fluxon-agent.md` da spetsifikatsiyalangan barcha batareyalar mavjud. Bitta
-eslatma: `db` battery hozircha faqat **SQLite** backend bilan ishlaydi — spec
-uni Postgres deb sarlavhalagan bo'lsa-da, `postgres:`/`mysql:` `DATABASE_URL`
-sxemalari hali stub (xato qaytaradi). Fluxon `db.*` kodi backend-neytral, shuning
-uchun bu backendlar foydalanuvchi kodini o'zgartirmasdan qo'shiladi.
+CLI'da `fluxon run`, `fluxon check` (lex + parse, hozircha semantik tekshiruvsiz),
+`fluxon test` va interaktiv `fluxon repl` bor. Hali yo'l xaritasida turgani
+(Postgres/MySQL backendlari, semantik/statik tekshiruv, `fluxon fmt`, paketlash,
+LSP) [`docs/ROADMAP.md`](docs/ROADMAP.md) da kuzatiladi.
 
 Ishga tushirish:
 

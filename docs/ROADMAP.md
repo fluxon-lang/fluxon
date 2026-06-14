@@ -1,7 +1,9 @@
 # Fluxon Roadmap — the path to a real, working programming language
 
-> Status: June 2026. 267 green tests in the runtime, all batteries in the spec
-> implemented. The current focus is **Phase 0**.
+> Status: June 2026. 479 green tests in the runtime, all batteries in the spec
+> implemented, and the Phase 0 stability bugs all closed. The current focus is
+> **Phase 1** (hardening the core), with **Phase 5** (distribution, beta) work
+> starting in parallel.
 
 The logic is simple: Phases 0–1 make the language *reliable*, Phase 2 *keeps*
 that reliability *automatically*, Phase 3 makes it *useful*, Phase 4 *fast*,
@@ -11,37 +13,31 @@ panics in the foundation.
 
 ---
 
-## Phase 0 — Stability: closing open bugs *(current phase)*
+## Phase 0 — Stability: closing open bugs *(done)*
 
-Open bugs that came out of the full code review, in three waves by importance:
+The crash/DoS, security, and silent-incorrectness bugs from the full code review
+have all been fixed and shipped with regression tests. Open issues with the
+`bug` label are now **0**.
 
-### Wave 1 — crash/DoS (can take the server down)
+What was closed, by wave:
 
-- [#87](https://github.com/Firdavs9512/fluxon-lang/issues/87) `json.dec` panics on malformed JSON — DoS via request body
-- [#91](https://github.com/Firdavs9512/fluxon-lang/issues/91) no http request body size limit — memory DoS
-- [#90](https://github.com/Firdavs9512/fluxon-lang/issues/90) no depth limit — unbounded recursion stack overflow abort
-- [#89](https://github.com/Firdavs9512/fluxon-lang/issues/89) integer arithmetic overflow panic / silent wrap
-- [#88](https://github.com/Firdavs9512/fluxon-lang/issues/88) `extract_from_table` Unicode char-boundary panic
-- [#92](https://github.com/Firdavs9512/fluxon-lang/issues/92) no http client + ai timeout — the handler thread hangs forever
+- **Wave 1 — crash/DoS:** `json.dec` panic on malformed JSON (#87), no request
+  body size limit (#91), unbounded recursion stack overflow (#90), integer
+  overflow panic (#89), `extract_from_table` Unicode panic (#88), no
+  client/`ai` timeout (#92).
+- **Wave 2 — security:** non-cryptographic `rand` for tokens (#97),
+  `Authorization` leak on cross-origin redirect (#96), dirty connection returned
+  to the pool without ROLLBACK on tx error (#103).
+- **Wave 3 — silent incorrectness:** `uniq(a, b)` dropping the multi-column
+  constraint (#94), `ai` keeping only the last `tool_use` block (#95),
+  parser/lexer silent errors `!x` / `m.0.1` / `1..n+1` (#93/#98/#99), `db.up`
+  empty-where malformed SQL (#104), lost repeated headers (#101), queue
+  handler-less busy-loop and shutdown job loss (#105), query-string
+  percent-decoding (#100).
 
-### Wave 2 — security
-
-- [#97](https://github.com/Firdavs9512/fluxon-lang/issues/97) `rand` is not cryptographic — token/session IDs are predictable
-- [#96](https://github.com/Firdavs9512/fluxon-lang/issues/96) on a cross-origin redirect the `Authorization` header leaks to a foreign host
-- [#103](https://github.com/Firdavs9512/fluxon-lang/issues/103) on a db tx error a dirty connection returns to the pool without ROLLBACK
-
-### Wave 3 — silent incorrectness (works wrong without raising an error)
-
-- [#94](https://github.com/Firdavs9512/fluxon-lang/issues/94) `uniq(a, b)` silently drops the multi-column constraint
-- [#95](https://github.com/Firdavs9512/fluxon-lang/issues/95) ai: with multiple `tool_use` blocks only the last one is kept
-- [#93](https://github.com/Firdavs9512/fluxon-lang/issues/93) / [#98](https://github.com/Firdavs9512/fluxon-lang/issues/98) / [#99](https://github.com/Firdavs9512/fluxon-lang/issues/99) parser-lexer silent errors (`!x`, `m.0.1`, `1..n+1`)
-- [#104](https://github.com/Firdavs9512/fluxon-lang/issues/104) `db.up` empty where — malformed SQL
-- [#101](https://github.com/Firdavs9512/fluxon-lang/issues/101) repeated headers are lost
-- [#105](https://github.com/Firdavs9512/fluxon-lang/issues/105) queue: handler-less jobs busy-loop, and jobs are silently lost on shutdown
-- [#100](https://github.com/Firdavs9512/fluxon-lang/issues/100) query string percent-decoding
-
-**Exit criterion:** open issues with the `bug` label = 0, and every fix shipped
-with a regression test.
+Since the review, several language features also landed: `try`/`catch` (#125),
+`assert` + `fluxon test` (#136), an interactive REPL (#138), the `par` parallel
+fan-out primitive (#137), and leveled `log` output (#139).
 
 ---
 
@@ -87,11 +83,16 @@ What separates a real language from a toy is a definite answer to any input:
   "backend language" claim. Fluxon `db.*` code is backend-neutral, the user code
   doesn't change.
 - **Deploy story:** single binary, graceful shutdown, `$PORT`/secrets
-  convention, structured logging (the stdout vs stderr split started in `io`).
+  convention. Structured, leveled logging already landed (`log` with
+  `debug`/`info`/`warn`/`err` + `$LOG_LEVEL`/`$LOG_FORMAT`, stdout vs stderr
+  split) — #139.
+- **`fluxon check`** — fast feedback for the AI agent loop. The CLI ships
+  `fluxon check <file.fx>` today, but it is **lex + parse only**: it catches
+  syntax errors without running, yet syntactically valid code referencing an
+  unknown name still exits 0. A real **static/semantic check** (unbound names,
+  arity, type-shape) is still to do.
 - **`fluxon fmt`** — canonical form is the language's philosophy, so a formatter
-  is mandatory.
-- **`fluxon check`** — parse + static check without running (fast feedback for
-  the AI agent loop).
+  is mandatory. Still to do.
 - **Module ecosystem:** `use ./file` exists; instead of versioned packages, for
   now a firm "batteries-included is enough" stance — this is the language's
   distinguishing strength.
@@ -107,14 +108,19 @@ What separates a real language from a toy is a definite answer to any input:
 
 ---
 
-## Phase 5 — Distribution and v0.1
+## Phase 5 — Distribution and v0.1 *(beta starting)*
 
-- **Install:** `curl | sh` + a Homebrew formula, binaries on GitHub Releases.
+- **Install / packaging**
+  ([#164](https://github.com/Firdavs9512/fluxon-lang/issues/164)): `curl | sh` +
+  binaries on GitHub Releases, then `crates.io` (`cargo install fluxon`), a
+  Homebrew tap, Snap, and a PPA.
 - **Documentation site + interactive playground** (compiled to WASM it runs in
   the browser too).
-- **English translation**
-  ([#58](https://github.com/Firdavs9512/fluxon-lang/issues/58)) — for an
-  external audience.
+- **English translation** ([#58](https://github.com/Firdavs9512/fluxon-lang/issues/58))
+  — mostly done: the docs, the CI/templates, and most runtime comments are in
+  English. A few leftovers remain (e.g. the `runtime/examples/public/index.html`
+  static demo is still Uzbek, and a handful of test names/comments in
+  `http_mod.rs`); finish these before calling the task complete.
 - **Versioning the spec:** `fluxon-agent.md` is frozen as v0.1, breaking changes
   only with a version bump. A "real language" means a promise that code written
   today still works tomorrow.
