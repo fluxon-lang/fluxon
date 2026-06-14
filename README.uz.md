@@ -160,11 +160,41 @@ CLI'da `fluxon run`, `fluxon check` (lex + parse, hozircha semantik tekshiruvsiz
 (Postgres/MySQL backendlari, semantik/statik tekshiruv, `fluxon fmt`, paketlash,
 LSP) [`docs/ROADMAP.md`](docs/ROADMAP.md) da kuzatiladi.
 
-Ishga tushirish:
+---
+
+## O'rnatish
+
+**Linux / macOS** — bitta qator (eng so'nggi release binary'sini yuklab oladi,
+checksum'ini tekshiradi va PATH'ga o'rnatadi):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.ps1 | iex
+```
+
+Aniq versiyani o'rnatish uchun `FLUXON_VERSION=v0.1.0` (Windows'da
+`$env:FLUXON_VERSION`). Qo'lda yuklamoqchimisiz? Platformangiz uchun arxivni
+[releases sahifasi](https://github.com/fluxon-lang/fluxon/releases)dan oling.
+
+So'ng faylni ishga tushiring:
+
+```sh
+fluxon run hello.fx        # .fx faylni ishga tushirish
+fluxon repl                # interaktiv REPL
+fluxon --help              # barcha buyruqlar
+```
+
+**Manbadan** (Rust toolchain kerak):
 
 ```sh
 cd runtime
 cargo run -- run examples/demo.fx
+# yoki binary'ni o'rnatish:  cargo install --path runtime
 ```
 
 ---

@@ -158,11 +158,41 @@ The CLI ships `fluxon run`, `fluxon check` (lex + parse, no semantic check yet),
 (Postgres/MySQL backends, semantic/static checking, `fluxon fmt`, packaging, an
 LSP) is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-Run it:
+---
+
+## Install
+
+**Linux / macOS** — one line (downloads the latest release binary, verifies its
+checksum, and installs it onto your PATH):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.ps1 | iex
+```
+
+Pin a specific version with `FLUXON_VERSION=v0.1.0` (or `$env:FLUXON_VERSION` on
+Windows). Prefer a manual download? Grab the archive for your platform from the
+[releases page](https://github.com/fluxon-lang/fluxon/releases).
+
+Then run a file:
+
+```sh
+fluxon run hello.fx        # run a .fx file
+fluxon repl                # interactive REPL
+fluxon --help              # all commands
+```
+
+**From source** (Rust toolchain required):
 
 ```sh
 cd runtime
 cargo run -- run examples/demo.fx
+# or install the binary:  cargo install --path runtime
 ```
 
 ---
