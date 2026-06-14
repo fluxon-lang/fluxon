@@ -1,33 +1,33 @@
-# io demo — interaktiv terminal: prompt/o'qish/yangi qatorsiz chiqarish.
+# io demo — interactive terminal: prompt/read/output without a newline.
 #
-# `log` har doim stderr'ga `\n` qo'shadi; interaktiv CLI (REPL, agent, wizard)
-# uchun `io` kerak:
-#   io.prompt msg   — msg'ni \n SIZ chiqarib, bitta satr o'qiydi → str
-#   io.read_line    — stdin'dan bitta satr → str (EOF → nil)
-#   io.print s      — \n SIZ chiqarish (prompt qurish uchun)
+# `log` always appends `\n` to stderr; for an interactive CLI (REPL, agent, wizard)
+# you need `io`:
+#   io.prompt msg   — prints msg WITHOUT \n, reads a single line -> str
+#   io.read_line    — a single line from stdin -> str (EOF -> nil)
+#   io.print s      — print WITHOUT \n (to build a prompt)
 #
-# Ishga tushirish:  fluxon run examples/io_repl.fx
-# Sinash (quvur):   printf 'Aziza\n5\n' | fluxon run examples/io_repl.fx
+# Running:        fluxon run examples/io_repl.fx
+# Testing (pipe): printf 'Aziza\n5\n' | fluxon run examples/io_repl.fx
 
-# --- Bir martalik wizard: ism + yosh so'raymiz ---
-ism = io.prompt "Isming: "
-io.print "Salom, "
-io.print ism
+# --- One-shot wizard: ask for name + age ---
+name = io.prompt "Your name: "
+io.print "Hello, "
+io.print name
 io.print "!\n"
 
-yosh = io.prompt "Yoshing: "
-log "Demak sen ${yosh} yoshdasan."
+age = io.prompt "Your age: "
+log "So you are ${age} years old."
 
-# --- REPL tsikli: cheksiz loop `each i in inf` (i = 0,1,2,...) ---
-# `while`/`for` yo'q; `inf` faqat `each` iteratori sifatida ma'noli.
-# EOF (nil) yoki "exit" yozilsa `stop` bilan chiqamiz.
-log "--- echo REPL (chiqish uchun Ctrl-D yoki 'exit') ---"
+# --- REPL loop: infinite loop `each i in inf` (i = 0,1,2,...) ---
+# No `while`/`for`; `inf` is only meaningful as an `each` iterator.
+# On EOF (nil) or typing "exit" we leave with `stop`.
+log "--- echo REPL (Ctrl-D or 'exit' to quit) ---"
 each i in inf
-  satr = io.prompt "echo> "
-  if satr == nil
-    log "xayr!"
+  line = io.prompt "echo> "
+  if line == nil
+    log "bye!"
     stop
-  if satr == "exit"
-    log "xayr!"
+  if line == "exit"
+    log "bye!"
     stop
-  log "siz: ${satr}"
+  log "you: ${line}"

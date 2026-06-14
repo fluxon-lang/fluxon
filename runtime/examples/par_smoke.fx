@@ -1,15 +1,15 @@
-# par primitivi smoke-test (issue #137)
-# Eslatma: list ichidagi lambda elementlar QAVS bilan ajraladi — `(\-> ...)`.
+# par primitive smoke-test (issue #137)
+# Note: lambda elements inside a list are separated with PARENS — `(\-> ...)`.
 
-# Oddiy fan-out: uchta mustaqil hisob parallel
+# Simple fan-out: three independent computations in parallel
 results = par [
   (\-> 1 + 1)
-  (\-> str.up "salom")
+  (\-> str.up "hello")
   (\-> [1 2 3].len)
 ]
 log results
 
-# Closure tashqi o'zgaruvchini ushlaydi (parallel o'qish)
+# Closure captures an outer variable (parallel read)
 base = 10
 sums = par [
   (\-> base + 1)
@@ -17,20 +17,20 @@ sums = par [
 ]
 log sums
 
-# Xato bo'lsa qisman muvaffaqiyat: bittasi fail, qolganlar ishlaydi
+# On error, partial success: one fails, the rest still run
 mixed = par [
   (\-> 42)
-  (\-> fail "qasddan xato")
+  (\-> fail "intentional error")
   (\-> "ok")
 ]
 log mixed
 
-# Nested HOF lambda body ichida ham ishlaydi (qavs ichi to'liq ifoda)
+# Nested HOF works inside a lambda body too (full expression inside parens)
 nested = par [
   (\-> [1 2 3].map \x -> x + 1)
 ]
 log nested
 
-# Bo'sh ro'yxat
+# Empty list
 empty = par []
 log empty

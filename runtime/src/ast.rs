@@ -1,13 +1,13 @@
-// Ba'zi AST maydonlari (use/tbl tafsilotlari) yadro interpreterda hali
-// o'qilmaydi — ular batteries (db/http) fazasida ishlatiladi. Shu sababli
-// dead-code ogohlantirishlarini bu modulda o'chiramiz.
+// Some AST fields (use/tbl details) are not yet read by the core interpreter —
+// they are used in the batteries (db/http) phase. For that reason we silence
+// dead-code warnings in this module.
 #![allow(dead_code)]
 
-// Fluxon AST — parser quradigan daraxt.
+// Fluxon AST — the tree the parser builds.
 //
-// Fluxon'da statement va expression farqi yumshoq: ko'p narsa expression
-// (if/match qiymat qaytaradi), lekin ba'zilari faqat statement (bind, fn e'lon,
-// each). Shuning uchun ikkala tushunchani ham saqlaymiz.
+// In Fluxon the statement/expression distinction is soft: most things are
+// expressions (if/match return a value), but a few are statements only (bind,
+// fn declaration, each). So we keep both notions.
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -16,14 +16,14 @@ pub enum Expr {
     Bool(bool),
     Nil,
     Sym(String),
-    // String interpolatsiya: matn bo'laklari va ifoda bo'laklari aralash.
+    // String interpolation: a mix of text pieces and expression pieces.
     Str(Vec<StrPiece>),
     Ident(String),
     List(Vec<Expr>),
-    // Map: kalit (string) -> qiymat. Spread bo'laklarini ham qo'llab-quvvatlaymiz.
+    // Map: key (string) -> value. We also support spread pieces.
     Map(Vec<MapEntry>),
 
-    // Operatorlar
+    // Operators
     Unary {
         op: UnOp,
         expr: Box<Expr>,
@@ -34,24 +34,24 @@ pub enum Expr {
         rhs: Box<Expr>,
     },
 
-    // a.b  yoki  a.0 (member/index nuqta orqali)
+    // a.b  or  a.0 (member/index via dot)
     Field {
         target: Box<Expr>,
         name: String,
     },
-    // a[k] (dinamik indeks)
+    // a[k] (dynamic index)
     Index {
         target: Box<Expr>,
         key: Box<Expr>,
     },
 
-    // Qavssiz chaqirish: callee arg1 arg2 ...
+    // Parenthesis-free call: callee arg1 arg2 ...
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
 
-    // \a b -> tana   (lambda). Tana bir ifoda yoki blok bo'lishi mumkin.
+    // \a b -> body   (lambda). The body may be one expression or a block.
     Lambda {
         params: Vec<String>,
         body: Vec<Stmt>,
@@ -60,24 +60,24 @@ pub enum Expr {
     // error-propagate: expr!
     Try(Box<Expr>),
 
-    // try/catch — xatoni ushlab qoladi (issue #125). `body` ishga tushadi; agar
-    // `fail` yoki runtime xato ko'tarilsa, `catch_body` ishlaydi va `catch_var`
-    // (bo'lsa) xato map'iga ({message, status}) bog'lanadi. Qiymat sifatida
-    // muvaffaqiyatda body, xatoda catch_body oxirgi ifodasini qaytaradi.
+    // try/catch — catches an error (issue #125). `body` runs; if a `fail` or a
+    // runtime error is raised, `catch_body` runs and `catch_var` (if present) is
+    // bound to the error map ({message, status}). As a value it returns the last
+    // expression of body on success, of catch_body on error.
     TryCatch {
         body: Vec<Stmt>,
         catch_var: Option<String>,
         catch_body: Vec<Stmt>,
     },
 
-    // fail [status] msg — ifoda sifatida ham (masalan `x ?? (fail "...")`).
-    // Hech qachon qiymat qaytarmaydi; oqimni uzadi.
+    // fail [status] msg — also as an expression (e.g. `x ?? (fail "...")`).
+    // Never returns a value; it breaks the flow.
     Fail {
         status: Option<Box<Expr>>,
         message: Box<Expr>,
     },
 
-    // if/elif/else — expression sifatida (qiymat qaytaradi)
+    // if/elif/else — as an expression (returns a value)
     If(Box<IfExpr>),
     // match — expression
     Match(Box<MatchExpr>),
@@ -86,7 +86,7 @@ pub enum Expr {
         start: Box<Expr>,
         end: Box<Expr>,
     },
-    // inf — cheksiz iterator. Faqat `each i in inf` da ma'noli (i = 0,1,2,...).
+    // inf — infinite iterator. Only meaningful in `each i in inf` (i = 0,1,2,...).
     Inf,
 }
 
@@ -99,9 +99,9 @@ pub enum StrPiece {
 #[derive(Debug, Clone)]
 pub enum MapEntry {
     Pair { key: String, value: Expr },
-    // {...m}  -> boshqa mapni yoyish
+    // {...m}  -> spread another map
     Spread(Expr),
-    // {[k]:v} -> dinamik (hisoblangan) kalit
+    // {[k]:v} -> dynamic (computed) key
     Dynamic { key: Expr, value: Expr },
 }
 
@@ -132,7 +132,7 @@ pub enum BinOp {
 
 #[derive(Debug, Clone)]
 pub struct IfExpr {
-    // (shart, blok) juftliklari: birinchisi `if`, qolganlari `elif`.
+    // (condition, block) pairs: the first is `if`, the rest are `elif`.
     pub arms: Vec<(Expr, Vec<Stmt>)>,
     pub else_block: Option<Vec<Stmt>>,
 }
@@ -163,16 +163,16 @@ pub enum Stmt {
         name: String,
         value: Expr,
     },
-    // target <- expr  (mutable bind yoki qayta tayinlash). target oddiy ident
-    // (`x <- v`) yoki member field (`req.ctx <- v`, issue #68) bo'lishi mumkin.
-    // Field-target faqat `req.ctx` kabi shared ctx cell'ga yozish uchun ishlatiladi
-    // (interp::assign_field) — oddiy Map immutable bo'lib qoladi.
+    // target <- expr  (mutable bind or reassignment). target may be a plain ident
+    // (`x <- v`) or a member field (`req.ctx <- v`, issue #68). A field-target is
+    // only used to write into a shared ctx cell like `req.ctx`
+    // (interp::assign_field) — a plain Map stays immutable.
     Assign {
         target: Box<Expr>,
         value: Expr,
     },
 
-    // fn nom params... -> body
+    // fn name params... -> body
     FnDecl {
         name: String,
         params: Vec<String>,
@@ -190,7 +190,7 @@ pub enum Stmt {
     Ret(Option<Expr>),
     Skip,
     Stop,
-    // fail [status] "xabar"
+    // fail [status] "message"
     Fail {
         status: Option<Expr>,
         message: Expr,
@@ -201,30 +201,30 @@ pub enum Stmt {
         items: Vec<UseItem>,
     },
 
-    // tbl nom ... (schema e'loni; yadro versiyada e'tiborga olinmaydi, lekin
-    // parse qilinadi — DB battery kelganda ishlatiladi)
+    // tbl name ... (schema declaration; ignored by the core version, but still
+    // parsed — used when the DB battery arrives)
     Tbl {
         name: String,
         columns: Vec<TblColumn>,
-        // index/uniq e'lonlari: single-ustun (`status sym index`) promotion
-        // qilingani ham, multi-ustun qavsli qator (`uniq(a b)`) ham shu yerga
-        // tushadi. Auto-migration shu ro'yxatdan CREATE/DROP INDEX hisoblaydi.
+        // index/uniq declarations: both single-column ones promoted from a column
+        // (`status sym index`) and multi-column parenthesized rows (`uniq(a b)`)
+        // land here. Auto-migration computes CREATE/DROP INDEX from this list.
         indexes: Vec<TblIndex>,
     },
 
-    // exp NAME = expr  (eksport qilingan qiymat)
+    // exp NAME = expr  (exported value)
     ExpBind {
         name: String,
         value: Expr,
     },
 
-    // Yakka ifoda statement sifatida (chaqiruv, if-as-statement, ...)
+    // A bare expression as a statement (call, if-as-statement, ...)
     Expr(Expr),
 }
 
 #[derive(Debug, Clone)]
 pub struct UseItem {
-    pub path: String, // "http" yoki "./tools"
+    pub path: String, // "http" or "./tools"
     pub alias: Option<String>,
 }
 
@@ -235,8 +235,8 @@ pub struct TblColumn {
     pub modifiers: Vec<String>,
 }
 
-// tbl ichidagi index/unikal e'loni. `columns` bir yoki ko'p ustun
-// (`index(a b)` → ikkita). `unique` — `uniq`/`uniq(...)` bo'lsa true.
+// An index/unique declaration inside a tbl. `columns` is one or more columns
+// (`index(a b)` -> two). `unique` is true for `uniq`/`uniq(...)`.
 #[derive(Debug, Clone)]
 pub struct TblIndex {
     pub columns: Vec<String>,

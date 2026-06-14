@@ -1,6 +1,6 @@
-# fib_server.fx — CPU-og'ir rekursiv handler (Arc contention benchmark).
-# GET /fib/:n -> fib(n) hisoblaydi. Og'ir rekursiya har chaqiruvda global
-# `fib` Arc<FnValue> ni klonlaydi -> 8 thread atomik refcount'da urishadi.
+# fib_server.fx — CPU-heavy recursive handler (Arc contention benchmark).
+# GET /fib/:n -> computes fib(n). The heavy recursion clones the global
+# `fib` Arc<FnValue> on every call -> 8 threads contend on the atomic refcount.
 use http
 
 fn fib n

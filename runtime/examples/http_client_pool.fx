@@ -1,13 +1,13 @@
-# Reusable HTTP klient pool misoli.
+# Reusable HTTP client pool example.
 #
-# 1-terminalda lokal serverni ishga tushiring:
+# In terminal 1, start the local server:
 #   cargo run -- run examples/server.fx
 #
-# Ketma-ket sinov:
+# Sequential test:
 #   cargo run -- run examples/http_client_pool.fx
 #
-# Parallel sinov (shu sodda Fluxon klient API bir nechta parallel chaqiruvda ham
-# o'zgarmaydi; har jarayon ichida http.get global Hyper client poolini ishlatadi):
+# Parallel test (this simple Fluxon client API does not change even under several
+# parallel calls; within each process http.get uses the global Hyper client pool):
 #   for i in 1 2 3 4; do cargo run --quiet -- run examples/http_client_pool.fx & done; wait
 
 use http
@@ -19,8 +19,8 @@ fn get_health label
   log "${label}: status=${resp.status} ok=${resp.body.ok}"
   resp
 
-log "ketma-ket http.get chaqiruvlari"
+log "sequential http.get calls"
 each i in 1..3
   get_health "seq-${i}"
 
-log "parallel sinov uchun yuqoridagi for ... & ... wait komandasi bilan shu faylni bir nechta nusxada ishga tushiring"
+log "for a parallel test, run this file in several copies with the for ... & ... wait command above"

@@ -1,5 +1,5 @@
-# reviews.fluxon — sharhlar
-# POST sharh (reyting 1-5 tekshiriladi), mahsulot sharhlari ro'yxati + o'rtacha.
+# reviews.fluxon — product reviews
+# POST a review (rating 1-5 is validated), list a product's reviews + average.
 use http db
 
 # POST /products/:id/reviews  body: {customer_id, rating, body}
@@ -23,7 +23,7 @@ http.on :post "/products/:id/reviews" \req ->
       }
       rep 201 review
 
-# GET /products/:id/reviews — sharhlar + o'rtacha reyting.
+# GET /products/:id/reviews — reviews + average rating.
 http.on :get "/products/:id/reviews" \req ->
   pid = req.params.id
   reviews = db.q "select * from reviews where product=$1 order by created desc" [pid]

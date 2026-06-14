@@ -1,8 +1,8 @@
-# 06 — reg battery (funksiya registri, dinamik dispatch).
-# Ishga: ./target/release/fluxon run tests-fx/06_reg.fx
+# 06 - reg battery (function registry, dynamic dispatch).
+# Run: ./target/release/fluxon run tests-fx/06_reg.fx
 #
-# reg — funksiyani STRING nomi bilan saqlash/chaqirish. Asosiy foydalanish:
-# AI agent tool-loop'lari (model tool nomini tanlaydi, kod reg.call bilan bajaradi).
+# reg - store/call a function by its STRING name. Main use:
+# AI agent tool-loops (the model picks a tool name, the code runs it via reg.call).
 
 fails <- 0
 fn ok label -> log "ok  ${label}"
@@ -10,8 +10,8 @@ fn bad label
   log "FAIL ${label}"
   fails <- fails + 1
 
-# --- reg.add + reg.call: nom bilan saqlash va chaqirish ---
-# closure args (map) oladi — agent tool argumentlari shu naqshda keladi.
+# --- reg.add + reg.call: store by name and call ---
+# the closure takes args (a map) - agent tool arguments arrive in this shape.
 reg.add "calc" \args -> args.a + args.b
 out = reg.call "calc" {a:2 b:3}
 if out == 5
@@ -19,48 +19,48 @@ if out == 5
 else
   bad "reg.call calc got=${out}"
 
-# string natija (interpolatsiya closure ichida)
-reg.add "greet" \args -> "salom ${args.nom}"
-g = reg.call "greet" {nom:"Aziza"}
-if g == "salom Aziza"
+# string result (interpolation inside the closure)
+reg.add "greet" \args -> "hello ${args.name}"
+g = reg.call "greet" {name:"Aziza"}
+if g == "hello Aziza"
   ok "reg.call greet = ${g}"
 else
   bad "reg.call greet got=${g}"
 
-# --- reg.has: nom ro'yxatda bormi (bool) ---
+# --- reg.has: is the name in the registry (bool) ---
 if reg.has "calc"
   ok "reg.has calc = true"
 else
-  bad "reg.has calc false bo'ldi"
+  bad "reg.has calc was false"
 
-if (reg.has "yoq") == false
-  ok "reg.has yoq = false"
+if (reg.has "nope") == false
+  ok "reg.has nope = false"
 else
-  bad "reg.has yoq true bo'ldi"
+  bad "reg.has nope was true"
 
-# --- reg.names: ro'yxatdagi nomlar (alifbo tartibida, barqaror) ---
+# --- reg.names: names in the registry (alphabetical, stable) ---
 ns = reg.names
 if ns.len == 2 & ns.0 == "calc" & ns.1 == "greet"
   ok "reg.names = ${ns}"
 else
   bad "reg.names got=${ns}"
 
-# --- reg.add ustiga yozadi (tool yangilash holati) ---
+# --- reg.add overwrites (tool-update case) ---
 reg.add "calc" \args -> args.a * args.b
 out2 = reg.call "calc" {a:4 b:5}
 if out2 == 20
-  ok "reg.add ustiga yozdi: calc = ${out2}"
+  ok "reg.add overwrote: calc = ${out2}"
 else
-  bad "reg.add ustiga yozmadi got=${out2}"
+  bad "reg.add did not overwrite got=${out2}"
 
-# nom soni o'zgarmadi (ustiga yozish yangi yozuv qo'shmaydi)
+# the name count is unchanged (overwriting does not add a new entry)
 if reg.names.len == 2
-  ok "reg.names ustiga yozgach ham 2 ta"
+  ok "reg.names still 2 after overwrite"
 else
-  bad "reg.names ustiga yozgach ${reg.names.len} ta"
+  bad "reg.names ${reg.names.len} after overwrite"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 06_reg: HAMMASI O'TDI ==="
+  log "=== 06_reg: ALL PASSED ==="
 else
-  log "=== 06_reg: ${fails} TEST YIQILDI ==="
+  log "=== 06_reg: ${fails} TESTS FAILED ==="

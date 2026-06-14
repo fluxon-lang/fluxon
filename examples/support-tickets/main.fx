@@ -1,16 +1,16 @@
-# Asosiy fayl — routerlar va serverni ulaydi
+# Main file — wires up the routers and the server
 
 use http cron env
 use ./tickets
 use ./report
 
-# Routerlar
+# Routers
 http.on :post "/tickets" \req -> tickets.create req
 http.on :get "/tickets" \req -> tickets.list req
 http.on :get "/tickets/:id" \req -> tickets.get req
 http.on :post "/tickets/:id/reply" \req -> tickets.reply req
 
-# Har kuni 08:00 da hisobot
+# Daily report at 08:00
 cron.dy 8 0 report.daily_report
 
 # Server

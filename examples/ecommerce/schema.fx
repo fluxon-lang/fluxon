@@ -1,5 +1,5 @@
-# schema.fluxon — barcha jadval sxemalari (tbl)
-# E-commerce backend uchun ma'lumotlar modeli.
+# schema.fluxon — all table schemas (tbl)
+# Data model for the e-commerce backend.
 use db
 
 tbl products

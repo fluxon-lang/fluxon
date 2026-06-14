@@ -1,10 +1,10 @@
-# 07 — cron battery (rejalashtirilgan fon vazifalari).
-# Ishga: ./target/release/fluxon run tests-fx/07_cron.fx
+# 07 - cron battery (scheduled background tasks).
+# Run: ./target/release/fluxon run tests-fx/07_cron.fx
 #
-# cron — standart Unix 5-maydonli cron ifoda (tirnoqsiz). `cron.on` ro'yxatga
-# oladi (bloklamaydi). Bu test PARSE + REGISTRATSIYA to'g'riligini tekshiradi
-# (tirnoqsiz/tirnoqli/lambda/murakkab ifoda). Vazifa IJROSI vaqtga bog'liq —
-# u native test (cron_mod) va cron_demo.fx qo'lda smoke'da tekshiriladi.
+# cron - standard Unix 5-field cron expression (unquoted). `cron.on` registers
+# (does not block). This test checks PARSE + REGISTRATION correctness
+# (unquoted/quoted/lambda/complex expression). Task EXECUTION is time-dependent -
+# that is checked by a native test (cron_mod) and a manual cron_demo.fx smoke test.
 
 fails <- 0
 fn ok label -> log "ok  ${label}"
@@ -13,41 +13,41 @@ fn bad label
   fails <- fails + 1
 
 fn job
-  log "ish bajarildi"
+  log "job done"
 
-# --- Tirnoqsiz 5-maydon + nomli funksiya ---
-# `*` bu yerda ko'paytirish EMAS — parser cron ifodani tanib str'ga yig'adi.
-# cron.on nil qaytaradi; xato bo'lmasa registratsiya o'tdi.
+# --- Unquoted 5-field + named function ---
+# `*` here is NOT multiplication - the parser recognizes the cron expr and collects it into a str.
+# cron.on returns nil; if there is no error the registration succeeded.
 r1 = cron.on 0 * * * * job
 if r1 == nil
-  ok "cron.on tirnoqsiz 5-maydon"
+  ok "cron.on unquoted 5-field"
 else
-  bad "cron.on tirnoqsiz got=${r1}"
+  bad "cron.on unquoted got=${r1}"
 
-# --- Murakkab ifoda: step / list / range aralash ---
+# --- Complex expression: step / list / range mixed ---
 r2 = cron.on */15 9 1,15 * 1-5 job
 if r2 == nil
-  ok "cron.on murakkab ifoda (*/15 9 1,15 * 1-5)"
+  ok "cron.on complex expression (*/15 9 1,15 * 1-5)"
 else
-  bad "cron.on murakkab got=${r2}"
+  bad "cron.on complex got=${r2}"
 
-# --- Inline lambda (parametrsiz) ---
+# --- Inline lambda (no parameters) ---
 r3 = cron.on 30 9 * * * \->
-  log "lambda ish"
+  log "lambda job"
 if r3 == nil
   ok "cron.on inline lambda"
 else
   bad "cron.on lambda got=${r3}"
 
-# --- Tirnoqli variant (inson qulayligi; AI docs'da yo'q) ---
+# --- Quoted variant (human convenience; not in the AI docs) ---
 r4 = cron.on "0 0 * * 0" job
 if r4 == nil
-  ok "cron.on tirnoqli variant"
+  ok "cron.on quoted variant"
 else
-  bad "cron.on tirnoqli got=${r4}"
+  bad "cron.on quoted got=${r4}"
 
-# --- Yakun ---
+# --- End ---
 if fails == 0
-  log "=== 07_cron: HAMMASI O'TDI ==="
+  log "=== 07_cron: ALL PASSED ==="
 else
-  log "=== 07_cron: ${fails} TEST YIQILDI ==="
+  log "=== 07_cron: ${fails} TESTS FAILED ==="

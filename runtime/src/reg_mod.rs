@@ -1,20 +1,19 @@
-// Fluxon reg battery — funksiya registri (dinamik dispatch).
+// Fluxon reg battery — function registry (dynamic dispatch).
 //
-// Funksiyani STRING nomi bilan saqlash/chaqirish imkonini beradi. Asosiy
-// foydalanish — AI agent tool-loop'lari: model "qaysi tool'ni" string nomi
-// bilan tanlaydi, kod esa `reg.call name args` orqali uni bajaradi (`match`-switch
-// EMAS — tool'lar runtime'da qo'shiladi).
+// Lets you store/call a function by its STRING name. The main use is AI agent
+// tool-loops: the model picks "which tool" by string name, and the code runs it via
+// `reg.call name args` (NOT a `match`-switch — tools are added at runtime).
 //
-// Til API (docs/fluxon-agent.md):
-//   reg.add "calc" \args -> args.a + args.b   # nom bilan ro'yxatga olish
-//   out = reg.call "calc" {a:2 b:3}           # nom bilan chaqirish -> 5
+// Language API (docs/fluxon-agent.md):
+//   reg.add "calc" \args -> args.a + args.b   # register by name
+//   out = reg.call "calc" {a:2 b:3}           # call by name -> 5
 //   reg.has "calc"                            # bool
-//   reg.names                                 # ro'yxatdagi nomlar (list)
+//   reg.names                                 # the registered names (list)
 //
-// Saqlangan qiymat — Value::Fn (closure) yoki Value::Native. Closure top-level'da
-// e'lon qilingani uchun `Parent::Root` ushlaydi -> `http.serve`/`ws.serve`
-// muzlatgandan keyin ham (boshqa thread'da) muzlatilgan global'lardan to'g'ri
-// o'qiydi. Value: Send+Sync bo'lgani uchun registr thread'lar aro xavfsiz.
+// The stored value is a Value::Fn (closure) or a Value::Native. Since the closure is
+// declared at top-level it holds `Parent::Root` -> even after `http.serve`/`ws.serve`
+// has frozen (on another thread) it reads the frozen globals correctly. Since Value is
+// Send+Sync, the registry is safe across threads.
 
 use std::collections::HashMap;
 
@@ -23,11 +22,11 @@ use parking_lot::Mutex;
 use crate::interp::{Flow, Interp};
 use crate::value::Value;
 
-// reg battery holati — jarayonga bitta (Interp ichida Arc). Top-level kod
-// `reg.add` bilan to'ldiradi; `reg.call` istalgan thread'dan (http/ws handler
-// ichidan ham) o'qiydi. http `routes`/ws `WsState` bilan bir xil model.
+// reg battery state — one per process (an Arc inside Interp). Top-level code fills it
+// with `reg.add`; `reg.call` reads it from any thread (including inside an http/ws
+// handler). Same model as http `routes`/ws `WsState`.
 pub struct RegState {
-    // nom -> funksiya (Value::Fn yoki Value::Native).
+    // name -> function (Value::Fn or Value::Native).
     fns: Mutex<HashMap<String, Value>>,
 }
 
@@ -40,81 +39,81 @@ impl RegState {
 }
 
 impl Interp {
-    // reg.* dispatch — `eval_call` Field{Ident("reg"), name}'ni shu yerga
-    // yo'naltiradi. `reg.names` argumentsiz ham keladi (Field, Call emas) —
-    // u ham shu funksiyaga (bo'sh argv bilan) tushadi.
+    // reg.* dispatch — `eval_call` routes Field{Ident("reg"), name} here. `reg.names`
+    // also arrives without arguments (a Field, not a Call) — it too lands in this
+    // function (with an empty argv).
     pub fn reg_dispatch(&self, func: &str, args: Vec<Value>) -> Result<Value, Flow> {
         match func {
-            // reg.add "nom" fn — funksiyani nom bilan saqlaydi. Qaytadi: nil.
-            // Mavjud nom ustiga yozadi (qayta ro'yxatga olish — tool yangilash).
+            // reg.add "name" fn — stores the function under the name. Returns: nil.
+            // Overwrites an existing name (re-registration — updating a tool).
             "add" => {
                 let mut it = args.into_iter();
                 let name = match it.next() {
                     Some(Value::Str(s)) => s,
                     Some(other) => {
                         return Err(Flow::err(format!(
-                            "reg.add: birinchi argument nom (str) bo'lishi kerak, {} berildi",
+                            "reg.add: first argument must be a name (str), got {}",
                             other.type_name()
                         )));
                     }
-                    None => return Err(Flow::err("reg.add: nom va funksiya argumentlari kerak")),
+                    None => return Err(Flow::err("reg.add: name and function arguments required")),
                 };
                 let f = match it.next() {
                     Some(f @ (Value::Fn(_) | Value::Native(_))) => f,
                     Some(other) => {
                         return Err(Flow::err(format!(
-                            "reg.add: ikkinchi argument funksiya bo'lishi kerak, {} berildi",
+                            "reg.add: second argument must be a function, got {}",
                             other.type_name()
                         )));
                     }
-                    None => return Err(Flow::err("reg.add: funksiya argumenti kerak")),
+                    None => return Err(Flow::err("reg.add: function argument required")),
                 };
                 self.reg.fns.lock().insert(name, f);
                 Ok(Value::Nil)
             }
-            // reg.call "nom" args -> funksiyani nom bilan chaqiradi va natijasini
-            // qaytaradi. Nom topilmasa fail. Funksiyani lock TASHQARISIDA chaqiramiz
-            // (apply uzoq ishlashi va reg'ga qayta kirishi mumkin -> deadlock'siz).
+            // reg.call "name" args -> calls the function by name and returns its result.
+            // Fails if the name is not found. We call the function OUTSIDE the lock (apply
+            // can run long and may re-enter reg -> so no deadlock).
             "call" => {
                 let mut it = args.into_iter();
                 let name = match it.next() {
                     Some(Value::Str(s)) => s,
                     Some(other) => {
                         return Err(Flow::err(format!(
-                            "reg.call: birinchi argument nom (str) bo'lishi kerak, {} berildi",
+                            "reg.call: first argument must be a name (str), got {}",
                             other.type_name()
                         )));
                     }
-                    None => return Err(Flow::err("reg.call: nom argumenti kerak")),
+                    None => return Err(Flow::err("reg.call: name argument required")),
                 };
                 let f = match self.reg.fns.lock().get(&name) {
                     Some(f) => f.clone(),
-                    None => return Err(Flow::err(format!("reg.call: '{}' ro'yxatda yo'q", name))),
+                    None => return Err(Flow::err(format!("reg.call: '{}' not registered", name))),
                 };
                 let rest: Vec<Value> = it.collect();
                 self.apply(f, rest)
             }
-            // reg.has "nom" -> bool. Nom ro'yxatda bormi.
+            // reg.has "name" -> bool. Whether the name is registered.
             "has" => {
                 let name = match args.into_iter().next() {
                     Some(Value::Str(s)) => s,
                     Some(other) => {
                         return Err(Flow::err(format!(
-                            "reg.has: argument nom (str) bo'lishi kerak, {} berildi",
+                            "reg.has: argument must be a name (str), got {}",
                             other.type_name()
                         )));
                     }
-                    None => return Err(Flow::err("reg.has: nom argumenti kerak")),
+                    None => return Err(Flow::err("reg.has: name argument required")),
                 };
                 Ok(Value::Bool(self.reg.fns.lock().contains_key(&name)))
             }
-            // reg.names -> ro'yxatdagi nomlar (list, alifbo tartibida — barqaror chiqish).
+            // reg.names -> the registered names (list, alphabetical — stable output).
             "names" => {
                 let mut names: Vec<String> = self.reg.fns.lock().keys().cloned().collect();
                 names.sort();
                 Ok(Value::List(names.into_iter().map(Value::Str).collect()))
             }
-            other => Err(Flow::err(format!("reg.{} funksiyasi yo'q", other))),
+            other => Err(Flow::err(format!("reg.{} function does not exist", other))),
         }
     }
 }
@@ -125,10 +124,10 @@ mod tests {
     use crate::value::NativeFn;
     use std::sync::Arc;
 
-    // Value/Flow Debug derive qilmaydi (unwrap/{:?} ishlatib bo'lmaydi) —
-    // natijani qo'lda match qilamiz. Quyidagi yordamchilar shuni ixchamlashtiradi.
+    // Value/Flow do not derive Debug (unwrap/{:?} cannot be used) — we match the result
+    // by hand. The helpers below make that concise.
 
-    // Test yordamchisi: berilgan natijani qaytaradigan native funksiya.
+    // Test helper: a native function that returns the given result.
     fn native_const(name: &str, v: i64) -> Value {
         let name = name.to_string();
         Value::Native(Arc::new(NativeFn {
@@ -137,12 +136,12 @@ mod tests {
         }))
     }
 
-    // Flow xato matnini ajratib oladi (Ok bo'lsa panic).
+    // Extracts the Flow error text (panics if Ok).
     fn err_msg(r: Result<Value, Flow>) -> String {
         match r {
             Err(Flow::Error(m)) | Err(Flow::Fail { message: m, .. }) => m,
-            Err(_) => panic!("kutilmagan oqim turi"),
-            Ok(_) => panic!("xato kutilgandi, Ok keldi"),
+            Err(_) => panic!("unexpected flow kind"),
+            Ok(_) => panic!("expected an error, got Ok"),
         }
     }
 
@@ -178,7 +177,7 @@ mod tests {
     fn call_unknown_errors() {
         let it = Interp::new();
         let m = err_msg(it.reg_dispatch("call", vec![Value::Str("yoq".into())]));
-        assert!(m.contains("ro'yxatda yo'q"), "matn: {m}");
+        assert!(m.contains("not registered"), "text: {m}");
     }
 
     #[test]
@@ -198,12 +197,12 @@ mod tests {
                     .iter()
                     .map(|v| match v {
                         Value::Str(s) => s.clone(),
-                        _ => panic!("nom str emas"),
+                        _ => panic!("name is not a str"),
                     })
                     .collect();
                 assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
             }
-            _ => panic!("names list qaytarmadi"),
+            _ => panic!("names did not return a list"),
         }
     }
 
@@ -211,6 +210,6 @@ mod tests {
     fn add_rejects_non_fn() {
         let it = Interp::new();
         let m = err_msg(it.reg_dispatch("add", vec![Value::Str("x".into()), Value::Int(5)]));
-        assert!(m.contains("funksiya"), "matn: {m}");
+        assert!(m.contains("function"), "text: {m}");
     }
 }

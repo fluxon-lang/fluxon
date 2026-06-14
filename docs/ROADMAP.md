@@ -1,122 +1,121 @@
-# Fluxon Roadmap — haqiqiy ishlaydigan dasturlash tiliga yo'l
+# Fluxon Roadmap — the path to a real, working programming language
 
-> Holat: 2026-yil iyun. Runtime'da 267 ta yashil test, spec'dagi barcha
-> batareyalar implementatsiya qilingan. Hozirgi fokus — **Faza 0**.
+> Status: June 2026. 267 green tests in the runtime, all batteries in the spec
+> implemented. The current focus is **Phase 0**.
 
-Mantiq oddiy: Faza 0–1 tilni *ishonchli* qiladi, Faza 2 ishonchlilikni
-*avtomatik ushlab turadi*, Faza 3 uni *foydali* qiladi, Faza 4 *tez*,
-Faza 5 *ommaga ochiq*. Fazalarni qisman parallel olib borish mumkin, lekin
-0–1 tugamasdan 3–5 ga kirishilmaydi — poydevordagi panic'lar ustiga
-ekotizim qurib bo'lmaydi.
+The logic is simple: Phases 0–1 make the language *reliable*, Phase 2 *keeps*
+that reliability *automatically*, Phase 3 makes it *useful*, Phase 4 *fast*,
+Phase 5 *publicly available*. The phases can run partly in parallel, but you
+don't enter 3–5 before 0–1 are done — you can't build an ecosystem on top of
+panics in the foundation.
 
 ---
 
-## Faza 0 — Barqarorlik: ochiq bug'larni yopish *(hozirgi faza)*
+## Phase 0 — Stability: closing open bugs *(current phase)*
 
-To'liq kod-revyudan chiqqan ochiq bug'lar, ahamiyat bo'yicha uch to'lqinda:
+Open bugs that came out of the full code review, in three waves by importance:
 
-### 1-to'lqin — crash/DoS (server'ni yiqitadigan)
+### Wave 1 — crash/DoS (can take the server down)
 
-- [#87](https://github.com/Firdavs9512/fluxon-lang/issues/87) `json.dec` buzuq JSON'da panic — request body bilan DoS
-- [#91](https://github.com/Firdavs9512/fluxon-lang/issues/91) http request body o'lcham chegarasi yo'q — xotira DoS
-- [#90](https://github.com/Firdavs9512/fluxon-lang/issues/90) chuqurlik limiti yo'q — cheksiz rekursiya stack overflow abort
-- [#89](https://github.com/Firdavs9512/fluxon-lang/issues/89) integer arifmetika overflow panic / jim wrap
+- [#87](https://github.com/Firdavs9512/fluxon-lang/issues/87) `json.dec` panics on malformed JSON — DoS via request body
+- [#91](https://github.com/Firdavs9512/fluxon-lang/issues/91) no http request body size limit — memory DoS
+- [#90](https://github.com/Firdavs9512/fluxon-lang/issues/90) no depth limit — unbounded recursion stack overflow abort
+- [#89](https://github.com/Firdavs9512/fluxon-lang/issues/89) integer arithmetic overflow panic / silent wrap
 - [#88](https://github.com/Firdavs9512/fluxon-lang/issues/88) `extract_from_table` Unicode char-boundary panic
-- [#92](https://github.com/Firdavs9512/fluxon-lang/issues/92) http klient + ai timeout yo'q — handler thread abadiy qotadi
+- [#92](https://github.com/Firdavs9512/fluxon-lang/issues/92) no http client + ai timeout — the handler thread hangs forever
 
-### 2-to'lqin — xavfsizlik
+### Wave 2 — security
 
-- [#97](https://github.com/Firdavs9512/fluxon-lang/issues/97) `rand` kriptografik emas — token/session-ID bashorat qilinadi
-- [#96](https://github.com/Firdavs9512/fluxon-lang/issues/96) cross-origin redirect'da `Authorization` header begona host'ga ketadi
-- [#103](https://github.com/Firdavs9512/fluxon-lang/issues/103) db tx xatosida iflos connection ROLLBACK'siz poolga qaytadi
+- [#97](https://github.com/Firdavs9512/fluxon-lang/issues/97) `rand` is not cryptographic — token/session IDs are predictable
+- [#96](https://github.com/Firdavs9512/fluxon-lang/issues/96) on a cross-origin redirect the `Authorization` header leaks to a foreign host
+- [#103](https://github.com/Firdavs9512/fluxon-lang/issues/103) on a db tx error a dirty connection returns to the pool without ROLLBACK
 
-### 3-to'lqin — jim noto'g'rilik (xato bermasdan noto'g'ri ishlaydi)
+### Wave 3 — silent incorrectness (works wrong without raising an error)
 
-- [#94](https://github.com/Firdavs9512/fluxon-lang/issues/94) `uniq(a, b)` ko'p-ustunli cheklovni jim yo'qotadi
-- [#95](https://github.com/Firdavs9512/fluxon-lang/issues/95) ai: ko'p `tool_use` blokida faqat oxirgisi qoladi
-- [#93](https://github.com/Firdavs9512/fluxon-lang/issues/93) / [#98](https://github.com/Firdavs9512/fluxon-lang/issues/98) / [#99](https://github.com/Firdavs9512/fluxon-lang/issues/99) parser-lexer jim xatolari (`!x`, `m.0.1`, `1..n+1`)
-- [#104](https://github.com/Firdavs9512/fluxon-lang/issues/104) `db.up` bo'sh where — malformed SQL
-- [#101](https://github.com/Firdavs9512/fluxon-lang/issues/101) takror header'lar yo'qoladi
-- [#105](https://github.com/Firdavs9512/fluxon-lang/issues/105) queue: handler'siz ish busy-loop, tugashda ishlar jim yo'qoladi
+- [#94](https://github.com/Firdavs9512/fluxon-lang/issues/94) `uniq(a, b)` silently drops the multi-column constraint
+- [#95](https://github.com/Firdavs9512/fluxon-lang/issues/95) ai: with multiple `tool_use` blocks only the last one is kept
+- [#93](https://github.com/Firdavs9512/fluxon-lang/issues/93) / [#98](https://github.com/Firdavs9512/fluxon-lang/issues/98) / [#99](https://github.com/Firdavs9512/fluxon-lang/issues/99) parser-lexer silent errors (`!x`, `m.0.1`, `1..n+1`)
+- [#104](https://github.com/Firdavs9512/fluxon-lang/issues/104) `db.up` empty where — malformed SQL
+- [#101](https://github.com/Firdavs9512/fluxon-lang/issues/101) repeated headers are lost
+- [#105](https://github.com/Firdavs9512/fluxon-lang/issues/105) queue: handler-less jobs busy-loop, and jobs are silently lost on shutdown
 - [#100](https://github.com/Firdavs9512/fluxon-lang/issues/100) query string percent-decoding
 
-**Chiqish mezoni:** ochiq `bug` label'li issue = 0, va har bir fix
-regression test bilan kelgan.
+**Exit criterion:** open issues with the `bug` label = 0, and every fix shipped
+with a regression test.
 
 ---
 
-## Faza 1 — Til yadrosini qotirish (xatosiz emas, *bashoratli* qilish)
+## Phase 1 — Hardening the language core (not bug-free, but *predictable*)
 
-Haqiqiy tilni o'yinchoqdan ajratadigan narsa — har qanday kirishda aniq javob:
+What separates a real language from a toy is a definite answer to any input:
 
-- **Hech qachon panic qilmaslik kafolati.** Runtime'dagi har bir panic yo'li
-  Fluxon-darajadagi xatoga (`err`) aylanadi. Tekshirish uchun `cargo-fuzz`
-  bilan lexer / parser / `json.dec` fuzz qilinadi — #87/#88/#90 sinfidagi
-  bug'larni issue kutmasdan topadi.
-- **Diagnostika sifati.** Har xato satr:ustun + kod parchasi + "balki shuni
-  nazarda tutdingizmi" ko'rinishida. AI agent uchun bu ayniqsa muhim — xato
-  xabari qancha aniq bo'lsa, agent shuncha tez o'zini tuzatadi (tilning
-  asosiy falsafasiga to'g'ri keladi).
-- **Stack trace.** Runtime xatoda Fluxon-darajadagi chaqiruv zanjiri ko'rinadi.
-- **Spec ↔ runtime auditi.** `docs/fluxon-agent.md` dagi har bir jumla uchun
-  test bormi? Farq topilsa yo spec, yo runtime tuzatiladi
-  ([#81](https://github.com/Firdavs9512/fluxon-lang/issues/81) — spec
-  "Postgres" deydi, runtime SQLite — shu sinfdagi ish).
-- Avvalgi real-loyiha sinovlarida topilgan til kamchiliklarini yopish:
-  `str` kutubxonasi bo'shliqlari, dynamic indexing, time arifmetikasi.
+- **A guarantee never to panic.** Every panic path in the runtime turns into a
+  Fluxon-level error (`err`). To verify, the lexer / parser / `json.dec` are
+  fuzzed with `cargo-fuzz` — finding bugs of the #87/#88/#90 class without
+  waiting for an issue.
+- **Diagnostic quality.** Every error shows line:column + a code snippet +
+  "did you maybe mean this". This matters especially for AI agents — the more
+  precise the error message, the faster the agent fixes itself (which matches
+  the core philosophy of the language).
+- **Stack trace.** A runtime error shows the Fluxon-level call chain.
+- **Spec ↔ runtime audit.** Is there a test for every sentence in
+  `docs/fluxon-agent.md`? When a discrepancy is found, either the spec or the
+  runtime is fixed
+  ([#81](https://github.com/Firdavs9512/fluxon-lang/issues/81) — the spec
+  says "Postgres", the runtime is SQLite — work of this class).
+- Close the language gaps found in earlier real-project tests:
+  `str` library gaps, dynamic indexing, time arithmetic.
 
 ---
 
-## Faza 2 — Ishonchlilik infratuzilmasi
+## Phase 2 — Reliability infrastructure
 
-- **Fuzzing CI'da doimiy** (nightly job): lexer, parser, json, http request
+- **Continuous fuzzing in CI** (nightly job): lexer, parser, json, http request
   parsing.
-- **`.fx` e2e suite kengaytirish** (`runtime/tests-fx/`) — har battery uchun
-  "yomon kun" stsenariylari: tarmoq uzilishi, DB lock, katta payload.
-- **Benchmark suite + regression alert** — keyinroq VM'ga o'tishda asos.
-- **Dogfooding harness.** AI agentga (arzon model bilan) real backend
-  topshiriqlar berib Fluxon'da yozdirish — har relizda. Bu usul shu paytgacha
-  eng ko'p haqiqiy bug topgan (`research/` dagi validation-tests metodikasi).
+- **Expand the `.fx` e2e suite** (`runtime/tests-fx/`) — "bad day" scenarios for
+  each battery: network drop, DB lock, large payload.
+- **Benchmark suite + regression alert** — a basis for the later move to a VM.
+- **Dogfooding harness.** Give an AI agent (with a cheap model) real backend
+  tasks and have it write them in Fluxon — every release. This method has found
+  the most real bugs so far (the validation-tests methodology in `research/`).
 
 ---
 
-## Faza 3 — Production-ready backend tili
+## Phase 3 — Production-ready backend language
 
-- **Postgres** haqiqiy qo'llab-quvvatlash (hozir `Err` stub) — "backend
-  tili" da'vosi uchun shart. Fluxon `db.*` kodi backend-neytral, foydalanuvchi
-  kodi o'zgarmaydi.
-- **Deploy hikoyasi:** bitta binary, graceful shutdown, `$PORT`/secrets
-  konvensiyasi, structured logging (stdout vs stderr ajratish `io` da
-  boshlangan).
-- **`fluxon fmt`** — canonical form tilning falsafasi, demak formatter
-  majburiy.
-- **`fluxon check`** — ishga tushirmasdan parse + statik tekshiruv (AI agent
-  loop'i uchun tezkor feedback).
-- **Modul ekotizimi:** `use ./fayl` bor; versiyalangan paketlar o'rniga
-  hozircha qat'iy "batteries-included yetadi" pozitsiyasi — bu tilning
-  farqlovchi kuchi.
-
----
-
-## Faza 4 — Performans
-
-- Tree-walking interpreter'dan **bytecode VM** ga o'tish — lekin faqat
-  Faza 2 benchmark'lari "qayerda sekin"ni ko'rsatgandan keyin. Arc
-  contention tajribasi ko'rsatdiki, profiling'siz taxmin qilib bo'lmaydi.
-- HTTP yo'lida har-request-thread o'rniga to'liq async yoki thread-pool.
+- **Postgres** real support (currently an `Err` stub) — required for the
+  "backend language" claim. Fluxon `db.*` code is backend-neutral, the user code
+  doesn't change.
+- **Deploy story:** single binary, graceful shutdown, `$PORT`/secrets
+  convention, structured logging (the stdout vs stderr split started in `io`).
+- **`fluxon fmt`** — canonical form is the language's philosophy, so a formatter
+  is mandatory.
+- **`fluxon check`** — parse + static check without running (fast feedback for
+  the AI agent loop).
+- **Module ecosystem:** `use ./file` exists; instead of versioned packages, for
+  now a firm "batteries-included is enough" stance — this is the language's
+  distinguishing strength.
 
 ---
 
-## Faza 5 — Tarqatish va v0.1
+## Phase 4 — Performance
 
-- **Install:** `curl | sh` + Homebrew formula, GitHub Releases'da
-  binary'lar.
-- **Hujjatlar sayti + interaktiv playground** (WASM'ga kompilyatsiya
-  qilinsa browser'da ham ishlaydi).
-- **Inglizcha tarjima**
-  ([#58](https://github.com/Firdavs9512/fluxon-lang/issues/58)) — tashqi
-  auditoriya uchun.
-- **Spec'ni versiyalash:** `fluxon-agent.md` v0.1 deb muzlatiladi, breaking
-  change faqat versiya bilan. "Haqiqiy til" degani — bugun yozilgan kod
-  ertaga ham ishlaydi degan va'da.
-- **Editor tooling:** syntax highlighting (VS Code extension), keyin LSP.
+- Move from the tree-walking interpreter to a **bytecode VM** — but only after
+  the Phase 2 benchmarks show "where it's slow". The Arc contention experience
+  showed that you can't guess without profiling.
+- On the HTTP path, full async or a thread pool instead of a thread per request.
+
+---
+
+## Phase 5 — Distribution and v0.1
+
+- **Install:** `curl | sh` + a Homebrew formula, binaries on GitHub Releases.
+- **Documentation site + interactive playground** (compiled to WASM it runs in
+  the browser too).
+- **English translation**
+  ([#58](https://github.com/Firdavs9512/fluxon-lang/issues/58)) — for an
+  external audience.
+- **Versioning the spec:** `fluxon-agent.md` is frozen as v0.1, breaking changes
+  only with a version bump. A "real language" means a promise that code written
+  today still works tomorrow.
+- **Editor tooling:** syntax highlighting (VS Code extension), then an LSP.

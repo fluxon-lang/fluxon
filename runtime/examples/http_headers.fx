@@ -1,29 +1,29 @@
-# Custom javob header'lari (issue #16) — rep'ning ixtiyoriy 3-argument map'i.
+# Custom response headers (issue #16) — rep's optional 3rd argument map.
 #
-# Header nomida defis o'rniga `_` yoziladi (Fluxon map kalitida defis bo'lolmaydi);
-# runtime uni `-` ga aylantiradi: content_type → Content-Type. Nom case-insensitive.
-# Bu o'qish bilan simmetrik — req.headers'da ham `-` → `_`.
+# In the header name write `_` instead of a hyphen (a Fluxon map key cannot contain
+# a hyphen); the runtime converts it to `-`: content_type -> Content-Type. The name
+# is case-insensitive. This is symmetric with reading — req.headers also maps `-` -> `_`.
 #
-# Server bloklaydi; ishga tushirish: cargo run -- run examples/http_headers.fx
-# keyin boshqa terminalda: curl -i http://127.0.0.1:8080/html
+# The server blocks; running it: cargo run -- run examples/http_headers.fx
+# then in another terminal: curl -i http://127.0.0.1:8080/html
 use http
 
-# 1) Maxsus Content-Type — HTML qaytarish (body str bo'lsa default text/plain).
+# 1) Custom Content-Type — return HTML (a str body defaults to text/plain).
 http.on :get "/html" \req ->
-  rep 200 "<h1>Salom Fluxon</h1>" {content_type:"text/html"}
+  rep 200 "<h1>Hello Fluxon</h1>" {content_type:"text/html"}
 
-# 2) Redirect — Location header (302). URL qisqartiruvchi naqshi.
+# 2) Redirect — Location header (302). URL-shortener pattern.
 http.on :get "/go" \req ->
   rep 302 nil {location:"https://example.com"}
 
-# 3) Cookie/sessiya o'rnatish. Bir nechta cookie — list qiymat (har biri
-#    alohida Set-Cookie qatori; RFC 7230 vergulli ro'yxatni man qiladi).
+# 3) Set a cookie/session. Multiple cookies — a list value (each one a
+#    separate Set-Cookie line; RFC 7230 forbids a comma-separated list).
 http.on :get "/login" \req ->
   rep 200 {ok:true} {set_cookie:["session=abc123" "theme=dark"]}
 
-# 4) CSV eksport — maxsus Content-Type + yuklab olish nomi.
+# 4) CSV export — custom Content-Type + download filename.
 http.on :get "/export" \req ->
-  rep 200 "id,nom\n1,Ali\n2,Vali" {
+  rep 200 "id,name\n1,Ali\n2,Vali" {
     content_type:"text/csv"
     content_disposition:"attachment; filename=\"data.csv\""
   }

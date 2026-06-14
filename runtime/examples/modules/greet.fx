@@ -1,10 +1,10 @@
-# greet — kichik modul. Faqat `exp` qilingan nomlar tashqaridan ko'rinadi.
+# greet — a small module. Only `exp` names are visible from outside.
 
-# Modul-private (eksport qilinmagan): tashqaridan ko'rinmaydi.
-prefix = "Salom"
+# Module-private (not exported): not visible from outside.
+prefix = "Hello"
 
-# Eksport qilingan qiymat.
-exp lang = "o'zbekcha"
+# Exported value.
+exp lang = "english"
 
-# Eksport qilingan funksiya — modul-darajadagi `prefix`ga (closure) kira oladi.
+# Exported function — can reach the module-level `prefix` (closure).
 exp fn hello nom -> "${prefix}, ${nom}!"

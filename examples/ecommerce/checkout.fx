@@ -1,8 +1,8 @@
-# checkout.fluxon — savatchani buyurtmaga aylantirish
-# MUHIM: har item uchun zaxira tekshiriladi, jami DB narxidan hisoblanadi
-# (mijoz narxiga ishonilmaydi), zaxira kamaytiriladi, savat :converted
-# bo'ladi, order + order_items yaratiladi. Bironta item yetishmasa — butun
-# checkout toza rad etiladi (hech narsa o'zgartirilmaydi).
+# checkout.fluxon — convert a cart into an order
+# IMPORTANT: stock is checked for each item, the total is computed from DB
+# prices (the customer's price is not trusted), stock is decremented, the cart
+# becomes :converted, and order + order_items are created. If any item is short,
+# the entire checkout is cleanly rejected (nothing is changed).
 use http db
 
 # POST /checkout  body: {customer_id: int}
@@ -19,7 +19,7 @@ http.on :post "/checkout" \req ->
       if rows.len == 0
         rep 400 {error:"cart is empty"}
       else
-        # 1-bosqich: zaxirani tekshiramiz. Yetishmaganlarni yig'amiz.
+        # Step 1: check stock. Collect any shortages.
         shortages <- []
         each r in rows
           if r.stock < r.qty
@@ -31,22 +31,22 @@ http.on :post "/checkout" \req ->
             }
 
         if shortages.len > 0
-          # Hech narsa o'zgartirmaymiz — toza rad etamiz.
+          # Change nothing — reject cleanly.
           rep 409 {error:"out of stock" items:shortages}
         else
-          # 2-bosqich: jamini DB narxlaridan hisoblaymiz (mijozga ishonmaymiz).
+          # Step 2: compute the total from DB prices (do not trust the customer).
           total <- 0.0
           each r in rows
             total <- total + (r.price * r.qty)
 
-          # 3-bosqich: buyurtmani yaratamiz.
+          # Step 3: create the order.
           order = db.ins "orders" {
             customer:cust
             total:total
             status::placed
           }
 
-          # 4-bosqich: order_items yaratamiz va zaxirani kamaytiramiz.
+          # Step 4: create order_items and decrement stock.
           each r in rows
             db.ins "order_items" {
               order:order.id
@@ -56,14 +56,14 @@ http.on :post "/checkout" \req ->
             }
             db.up "products" {stock: r.stock - r.qty} {id:r.product}
 
-          # 5-bosqich: savatni :converted ga o'tkazamiz.
+          # Step 5: mark the cart as :converted.
           db.up "carts" {status::converted} {id:cart.id}
 
-          # Yakuniy buyurtma + tarkibi.
+          # Final order + its contents.
           items = db.q "select * from order_items where order=$1" [order.id]
           rep 201 {order:order items:items}
 
-# GET /orders/:customer_id — mijoz buyurtmalari tarixi.
+# GET /orders/:customer_id — a customer's order history.
 http.on :get "/orders/:customer_id" \req ->
   orders = db.q "select * from orders where customer=$1 order by created desc" [req.params.customer_id]
   rep 200 {orders:orders}

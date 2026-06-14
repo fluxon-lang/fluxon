@@ -1,39 +1,39 @@
-// http.static end-to-end testi (issue #134).
+// http.static end-to-end test (issue #134).
 //
-// `fluxon` binary'ni subprocess sifatida ishga tushirib, real HTTP so'rovlar
-// bilan static fayl tarqatishni tekshiramiz:
-//   - prefiks ostidagi fayl to'g'ri mazmun + Content-Type bilan keladi
-//   - katalog so'ralganda index.html beriladi
-//   - path traversal (`../`, percent-encoded ham) bloklanadi (404)
-//   - aniq route static'dan ustun (route prioriteti)
-//   - SPA rejimida topilmagan yo'l index.html'ga tushadi
-//   - middleware (http.before) static yo'lni ham himoya qiladi
+// We run the `fluxon` binary as a subprocess and check static file serving with
+// real HTTP requests:
+//   - a file under the prefix comes back with correct content + Content-Type
+//   - when a directory is requested, index.html is served
+//   - path traversal (`../`, percent-encoded too) is blocked (404)
+//   - an explicit route wins over static (route priority)
+//   - in SPA mode an unfound path falls back to index.html
+//   - middleware (http.before) also protects a static path
 //
-// Pattern http_cors_e2e.rs dan: vaqtinchalik .fx fayl + subprocess + raw HTTP/1.1.
+// Pattern from http_cors_e2e.rs: temporary .fx file + subprocess + raw HTTP/1.1.
 
 use std::io::Write;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-// Test uchun static papka yasaydi: index.html, app.css, sub/ ichida fayl,
-// va papkadan TASHQARIDA secret.txt (traversal nishoni).
+// Creates a static folder for the test: index.html, app.css, a file inside sub/,
+// and secret.txt OUTSIDE the folder (the traversal target).
 fn make_static_dir(tag: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("fluxon_static_e2e_{}", tag));
     let public = root.join("public");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(public.join("sub")).expect("test papka yaratish");
-    std::fs::write(public.join("index.html"), "<h1>bosh sahifa</h1>").expect("index.html");
+    std::fs::write(public.join("index.html"), "<h1>home page</h1>").expect("index.html");
     std::fs::write(public.join("app.css"), "body{color:red}").expect("app.css");
-    std::fs::write(public.join("sub").join("ichki.txt"), "ichki matn").expect("ichki.txt");
-    std::fs::write(root.join("secret.txt"), "MAXFIY").expect("secret.txt");
+    std::fs::write(public.join("sub").join("inner.txt"), "inner text").expect("inner.txt");
+    std::fs::write(root.join("secret.txt"), "SECRET").expect("secret.txt");
     root
 }
 
-// Skriptni vaqtinchalik faylga yozib, fluxon serverini ishga tushiradi.
+// Writes the script to a temporary file and starts the fluxon server.
 fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("fluxon_static_test_{}.fx", port));
     let mut f = std::fs::File::create(&path).expect("temp fx yaratish");
-    f.write_all(script.as_bytes()).expect("temp fx yozish");
+    f.write_all(script.as_bytes()).expect("write temp fx");
     drop(f);
 
     let bin = env!("CARGO_BIN_EXE_fluxon");
@@ -45,7 +45,7 @@ fn spawn_server(port: u16, script: &str) -> (Child, std::path::PathBuf) {
     (child, path)
 }
 
-// Port LISTEN bo'lguncha kutadi (server boot). Maks ~3s.
+// Waits until the port is LISTENing (server boot). Max ~3s.
 async fn wait_port(port: u16) {
     for _ in 0..60 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -59,7 +59,7 @@ async fn wait_port(port: u16) {
     panic!("port {} ochilmadi", port);
 }
 
-// Child drop bo'lganda jarayonni o'ldirish guard'i.
+// Guard that kills the process when Child is dropped.
 struct Killer(Child);
 impl Drop for Killer {
     fn drop(&mut self) {
@@ -68,8 +68,8 @@ impl Drop for Killer {
     }
 }
 
-// Raw HTTP/1.1 GET — yo'l XOM yuboriladi (hyper klienti `..`ni normalize
-// qilmasin deb): traversal testlari aynan xom baytlarni talab qiladi.
+// Raw HTTP/1.1 GET -- the path is sent RAW (so the hyper client does not
+// normalize `..`): the traversal tests require exactly the raw bytes.
 async fn http_get(port: u16, path: &str) -> String {
     http_get_with_header(port, path, None).await
 }
@@ -89,11 +89,11 @@ async fn http_get_with_header(port: u16, path: &str, header: Option<&str>) -> St
     );
     stream.write_all(req.as_bytes()).await.expect("http yozish");
     let mut resp = Vec::new();
-    stream.read_to_end(&mut resp).await.expect("http o'qish");
+    stream.read_to_end(&mut resp).await.expect("http read");
     String::from_utf8_lossy(&resp).to_string()
 }
 
-// Oddiy mount + aniq route (prioritet testi uchun /assets/api.json route ham bor).
+// Plain mount + explicit route (there is also an /assets/api.json route for the priority test).
 const BASIC_SCRIPT: &str = r#"
 http.static "/assets" "DIR/public"
 
@@ -114,34 +114,30 @@ async fn static_fayl_mazmun_va_content_type() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // CSS fayl — mazmun + kengaytmadan Content-Type.
+    // CSS file -- content + Content-Type from the extension.
     let resp = http_get(port, "/assets/app.css").await;
-    assert!(resp.contains("200"), "200 kutilgan: {}", resp);
+    assert!(resp.contains("200"), "expected 200: {}", resp);
     assert!(
         resp.contains("body{color:red}"),
-        "css mazmuni kutilgan: {}",
+        "expected css content: {}",
         resp
     );
     assert!(
         resp.to_lowercase().contains("content-type: text/css"),
-        "text/css kutilgan: {}",
+        "expected text/css: {}",
         resp
     );
 
-    // Ichki papkadagi fayl ham ishlaydi.
-    let resp = http_get(port, "/assets/sub/ichki.txt").await;
-    assert!(resp.contains("ichki matn"), "ichki fayl kutilgan: {}", resp);
+    // A file in a subfolder also works.
+    let resp = http_get(port, "/assets/sub/inner.txt").await;
+    assert!(resp.contains("inner text"), "expected inner file: {}", resp);
 
-    // Katalog so'ralganda index.html.
+    // When a directory is requested, index.html.
     let resp = http_get(port, "/assets").await;
-    assert!(
-        resp.contains("bosh sahifa"),
-        "index.html kutilgan: {}",
-        resp
-    );
+    assert!(resp.contains("home page"), "expected index.html: {}", resp);
     assert!(
         resp.to_lowercase().contains("content-type: text/html"),
-        "text/html kutilgan: {}",
+        "expected text/html: {}",
         resp
     );
 
@@ -160,8 +156,8 @@ async fn static_traversal_bloklanadi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Xom `../`, percent-encoded `%2e%2e` va `..%2f` — hammasi 404, MAXFIY
-    // mazmun hech qachon chiqmaydi.
+    // Raw `../`, percent-encoded `%2e%2e` and `..%2f` -- all 404, SECRET content
+    // is never exposed.
     for p in [
         "/assets/../secret.txt",
         "/assets/%2e%2e/secret.txt",
@@ -170,12 +166,12 @@ async fn static_traversal_bloklanadi() {
     ] {
         let resp = http_get(port, p).await;
         assert!(
-            !resp.contains("MAXFIY"),
-            "traversal mazmun chiqarmasligi kerak ({}): {}",
+            !resp.contains("SECRET"),
+            "traversal should not expose content ({}): {}",
             p,
             resp
         );
-        assert!(resp.contains("404"), "404 kutilgan ({}): {}", p, resp);
+        assert!(resp.contains("404"), "expected 404 ({}): {}", p, resp);
     }
 
     let _ = std::fs::remove_file(&path);
@@ -186,7 +182,7 @@ async fn static_traversal_bloklanadi() {
 async fn static_aniq_route_ustun() {
     let port = 8443;
     let root = make_static_dir("prio");
-    // Static papkada ham api.json bor — lekin route yutishi kerak.
+    // The static folder also has api.json -- but the route should win.
     std::fs::write(
         root.join("public").join("api.json"),
         "{\"source\":\"file\"}",
@@ -202,7 +198,7 @@ async fn static_aniq_route_ustun() {
     let resp = http_get(port, "/assets/api.json").await;
     assert!(
         resp.contains("\"source\":\"route\""),
-        "aniq route static fayldan ustun bo'lishi kerak: {}",
+        "an explicit route should win over a static file: {}",
         resp
     );
 
@@ -210,7 +206,7 @@ async fn static_aniq_route_ustun() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// SPA mount root'da: topilmagan yo'l index.html'ga tushadi, API route ishlaydi.
+// SPA mounted at root: an unfound path falls back to index.html, the API route works.
 const SPA_SCRIPT: &str = r#"
 http.static "/" "DIR/public" {spa: true}
 
@@ -231,24 +227,20 @@ async fn static_spa_fallback() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Mavjud fayl — o'zi keladi.
+    // An existing file -- comes back as itself.
     let resp = http_get(port, "/app.css").await;
-    assert!(resp.contains("body{color:red}"), "css kutilgan: {}", resp);
+    assert!(resp.contains("body{color:red}"), "expected css: {}", resp);
 
-    // Frontend route (fayl yo'q) — index.html fallback.
+    // Frontend route (no file) -- index.html fallback.
     let resp = http_get(port, "/profil/42").await;
-    assert!(resp.contains("200"), "spa fallback 200 kutilgan: {}", resp);
-    assert!(
-        resp.contains("bosh sahifa"),
-        "index.html kutilgan: {}",
-        resp
-    );
+    assert!(resp.contains("200"), "spa fallback expected 200: {}", resp);
+    assert!(resp.contains("home page"), "expected index.html: {}", resp);
 
-    // API route static'dan ustun.
+    // The API route wins over static.
     let resp = http_get(port, "/api/health").await;
-    assert!(resp.contains("\"ok\":true"), "api route kutilgan: {}", resp);
+    assert!(resp.contains("\"ok\":true"), "expected api route: {}", resp);
 
-    // POST static'ka tushmaydi (faqat GET/HEAD) — 404.
+    // POST does not reach static (only GET/HEAD) -- 404.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
@@ -256,11 +248,11 @@ async fn static_spa_fallback() {
     let req = "POST /app.css HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     stream.write_all(req.as_bytes()).await.expect("yozish");
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await.expect("o'qish");
+    stream.read_to_end(&mut buf).await.expect("read");
     let resp = String::from_utf8_lossy(&buf).to_string();
     assert!(
         resp.contains("404"),
-        "POST static'ka 404 kutilgan: {}",
+        "POST to static expected 404: {}",
         resp
     );
 
@@ -268,13 +260,13 @@ async fn static_spa_fallback() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// Middleware static yo'lni ham himoya qiladi: /himoya/* ostida auth talab.
+// Middleware also protects a static path: auth required under /protected/*.
 const MW_SCRIPT: &str = r#"
-http.before "/himoya/*" \req ->
+http.before "/protected/*" \req ->
   if !req.headers.x_token
-    fail 401 "auth kerak"
+    fail 401 "auth required"
 
-http.static "/himoya" "DIR/public"
+http.static "/protected" "DIR/public"
 
 http.serve PORT
 "#;
@@ -290,32 +282,37 @@ async fn static_middleware_himoya_qiladi() {
     let _killer = Killer(child);
     wait_port(port).await;
 
-    // Token'siz — middleware fail 401, fayl mazmuni chiqmaydi.
-    let resp = http_get(port, "/himoya/app.css").await;
-    assert!(resp.contains("401"), "401 kutilgan: {}", resp);
+    // Without a token -- middleware fail 401, file content is not exposed.
+    let resp = http_get(port, "/protected/app.css").await;
+    assert!(resp.contains("401"), "expected 401: {}", resp);
     assert!(
         !resp.contains("body{color:red}"),
-        "auth'siz fayl mazmuni chiqmasligi kerak: {}",
+        "file content should not be exposed without auth: {}",
         resp
     );
 
-    // Token'siz YO'Q fayl ham 401 — 404 emas (codex P2): aks holda status
-    // farqi (401=bor, 404=yo'q) himoyalangan fayl nomlarini oshkor qilardi.
-    let resp = http_get(port, "/himoya/yoq-fayl.css").await;
+    // Without a token a MISSING file is also 401 -- not 404 (codex P2): otherwise
+    // the status difference (401=exists, 404=missing) would leak protected file names.
+    let resp = http_get(port, "/protected/missing-file.css").await;
     assert!(
         resp.contains("401"),
-        "yo'q fayl ham auth'siz 401 bo'lishi kerak (nom sizmasin): {}",
+        "a missing file should also be 401 without auth (no name leak): {}",
         resp
     );
 
-    // Token bilan — fayl keladi.
-    let resp = http_get_with_header(port, "/himoya/app.css", Some("X-Token: sir")).await;
-    assert!(resp.contains("200"), "token bilan 200 kutilgan: {}", resp);
-    assert!(resp.contains("body{color:red}"), "css kutilgan: {}", resp);
+    // With a token -- the file comes back.
+    let resp = http_get_with_header(port, "/protected/app.css", Some("X-Token: secret")).await;
+    assert!(resp.contains("200"), "with token expected 200: {}", resp);
+    assert!(resp.contains("body{color:red}"), "expected css: {}", resp);
 
-    // Token bilan yo'q fayl — endi haqiqiy 404.
-    let resp = http_get_with_header(port, "/himoya/yoq-fayl.css", Some("X-Token: sir")).await;
-    assert!(resp.contains("404"), "token bilan yo'q fayl 404: {}", resp);
+    // With a token, a missing file -- now a real 404.
+    let resp =
+        http_get_with_header(port, "/protected/missing-file.css", Some("X-Token: secret")).await;
+    assert!(
+        resp.contains("404"),
+        "a missing file with a token must 404: {}",
+        resp
+    );
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir_all(&root);
@@ -323,15 +320,12 @@ async fn static_middleware_himoya_qiladi() {
 
 #[tokio::test]
 async fn static_yoq_katalog_xato_beradi() {
-    // Mavjud bo'lmagan katalog — server start'dayoq xato bilan tugaydi
-    // (fail fast), jim 404 emas.
+    // A nonexistent directory -- the server exits with an error right at start
+    // (fail fast), not a silent 404.
     let port = 8446;
-    let script = format!(
-        "http.static \"/x\" \"/yoq/katalog/aslo\"\nhttp.serve {}\n",
-        port
-    );
+    let script = format!("http.static \"/x\" \"/no/such/dir\"\nhttp.serve {}\n", port);
     let path = std::env::temp_dir().join(format!("fluxon_static_test_{}.fx", port));
-    std::fs::write(&path, &script).expect("temp fx yozish");
+    std::fs::write(&path, &script).expect("write temp fx");
 
     let bin = env!("CARGO_BIN_EXE_fluxon");
     let out = Command::new(bin)
@@ -341,12 +335,12 @@ async fn static_yoq_katalog_xato_beradi() {
         .expect("fluxon ishga tushirish");
     assert!(
         !out.status.success(),
-        "yo'q katalog bilan start muvaffaqiyatsiz bo'lishi kerak"
+        "start with a missing directory should fail"
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("http.static"),
-        "xato xabarida http.static bo'lishi kerak: {}",
+        "the error message should contain http.static: {}",
         err
     );
 
@@ -355,8 +349,8 @@ async fn static_yoq_katalog_xato_beradi() {
 
 #[tokio::test]
 async fn static_head_faylni_oqimasdan_javob_beradi() {
-    // HEAD — tana yo'q, lekin Content-Length haqiqiy fayl hajmi (metadata'dan,
-    // fayl o'qilmasdan — codex P2). GET bilan bir xil Content-Type.
+    // HEAD -- no body, but Content-Length is the real file size (from metadata,
+    // without reading the file -- codex P2). Same Content-Type as GET.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let port = 8447;
     let root = make_static_dir("head");
@@ -373,25 +367,25 @@ async fn static_head_faylni_oqimasdan_javob_beradi() {
     let req = "HEAD /assets/app.css HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     stream.write_all(req.as_bytes()).await.expect("yozish");
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await.expect("o'qish");
+    stream.read_to_end(&mut buf).await.expect("read");
     let resp = String::from_utf8_lossy(&buf).to_string();
     let low = resp.to_lowercase();
 
-    assert!(resp.contains("200"), "HEAD 200 kutilgan: {}", resp);
-    // "body{color:red}" — 15 bayt: hajm header'da, mazmun esa yo'q.
+    assert!(resp.contains("200"), "HEAD expected 200: {}", resp);
+    // "body{color:red}" -- 15 bytes: the size is in the header, but the content is absent.
     assert!(
         low.contains("content-length: 15"),
-        "haqiqiy Content-Length kutilgan: {}",
+        "expected real Content-Length: {}",
         resp
     );
     assert!(
         low.contains("content-type: text/css"),
-        "text/css kutilgan: {}",
+        "expected text/css: {}",
         resp
     );
     assert!(
         !resp.contains("body{color:red}"),
-        "HEAD javobida tana bo'lmasligi kerak: {}",
+        "a HEAD response should have no body: {}",
         resp
     );
 

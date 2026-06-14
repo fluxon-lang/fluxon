@@ -1,35 +1,35 @@
 ---
-name: Bug haqida xabar
-about: Runtime'da xato yoki kutilmagan xatti-harakat
+name: Bug report
+about: An error or unexpected behavior in the runtime
 title: ''
 labels: bug
 assignees: ''
 ---
 
-## Nima bo'ldi
+## What happened
 
-<!-- Xatoni qisqa tasvirlang. -->
+<!-- Briefly describe the bug. -->
 
-## Qayta ishlab chiqarish
+## Reproduction
 
-Iloji bo'lsa **kichik `.fx` kod** bering:
+If possible, provide a **minimal `.fx` snippet**:
 
 ```fx
-# bu yerga
+# here
 ```
 
-Ishga tushirish: `cargo run -- run <fayl>.fx`
+Run with: `cargo run -- run <file>.fx`
 
-## Kutilgan natija
+## Expected result
 
-<!-- Nima bo'lishi kerak edi. -->
+<!-- What should have happened. -->
 
-## Haqiqiy natija
+## Actual result
 
-<!-- Nima bo'ldi (xato xabari / output to'liq). -->
+<!-- What happened (full error message / output). -->
 
-## Muhit
+## Environment
 
 - OS:
-- Rust versiyasi (`rustc --version`):
+- Rust version (`rustc --version`):
 - Commit / branch:

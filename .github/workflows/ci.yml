@@ -1,25 +1,25 @@
 name: CI
 
-# Har bir o'zgarishdan keyin ishga tushadi: master'ga push va har qanday PR.
+# Runs after every change: pushes to master and any PR.
 on:
   push:
     branches: ["**"]
   pull_request:
 
-# Bir branch'da yangi push bo'lsa, eski (tugamagan) run'larni bekor qiladi —
-# CI navbatini tejaydi.
+# When a branch gets a new push, cancel the older (unfinished) runs —
+# saves the CI queue.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # Runtime kodi shu papkada (root emas).
+  # The runtime code lives in this folder (not the root).
   WORKDIR: runtime
 
 jobs:
-  # Asosiy job: kompilyatsiya + testlar. BU MAJBURIY — til yadrosi ishlashini
-  # tasdiqlaydi. Linux va macOS'da ishga tushadi.
+  # Main job: compilation + tests. THIS IS REQUIRED — it confirms the language
+  # core works. Runs on Linux and macOS.
   build-test:
     name: Build & Test (${{ matrix.os }})
     strategy:
@@ -33,43 +33,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust toolchain o'rnatish (stable)
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      # Cargo registry, git va build artefaktlarini cache'laydi — qayta
-      # build'larni sezilarli tezlashtiradi.
+      # Caches the Cargo registry, git, and build artifacts — significantly
+      # speeds up subsequent builds.
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: runtime
 
-      # Cargo.lock commit qilingan (binary loyiha) — --locked bilan aynan
-      # o'sha versiyalarni ishlatamiz, CI takrorlanuvchi bo'ladi.
+      # Cargo.lock is committed (binary project) — with --locked we use exactly
+      # those versions, making CI reproducible.
       - name: Build
         run: cargo build --locked --verbose
 
       - name: Test
         run: cargo test --locked --verbose
 
-      # Smoke-test: haqiqiy .fx faylni ishga tushiramiz. Bu til faqat
-      # kompilyatsiya bo'libgina qolmay, dasturni bajara olishini tasdiqlaydi.
-      # server.fx HTTP server ochib bloklanadi, shuning uchun demo.fx ishlatamiz.
-      - name: Smoke-test (demo.fx ishga tushirish)
+      # Smoke test: we run a real .fx file. This confirms the language not only
+      # compiles but can actually execute a program.
+      # server.fx opens an HTTP server and blocks, so we use demo.fx instead.
+      - name: Smoke test (run demo.fx)
         run: cargo run --locked --quiet -- run examples/demo.fx
 
-      # .fx integratsiya to'plami: tilning O'ZIDA yozilgan e2e testlar. Core
-      # (lexer/parser/interp/builtins) o'zgarganda foydalanuvchi darajasidagi
-      # buzilishlarni ushlaydi — Rust testlar qamramagan regressiyalar uchun.
-      # run_all.sh debug binary'ni FLUXON_BIN orqali oladi (alohida release build
-      # shart emas); http testi `curl` ishlatadi (runner'larda standart bor).
-      - name: Fluxon .fx integratsiya testlari (tests-fx/run_all.sh)
+      # .fx integration suite: e2e tests written IN the language itself. Catches
+      # user-level breakages when the core (lexer/parser/interp/builtins) changes
+      # — for regressions the Rust tests don't cover.
+      # run_all.sh picks up the debug binary via FLUXON_BIN (no separate release
+      # build needed); the http test uses `curl` (present by default on runners).
+      - name: Fluxon .fx integration tests (tests-fx/run_all.sh)
         env:
           FLUXON_BIN: target/debug/fluxon
         run: bash tests-fx/run_all.sh
 
-  # Sifat tekshiruvi: format + clippy lint. Hozircha NON-BLOCKING
-  # (continue-on-error) — kod faol ishlab chiqilmoqda; CI'ni qizil qilmasdan
-  # ogohlantirish beradi. Kod barqarorlashgach -D warnings majburiy qilinadi.
+  # Quality check: format + clippy lint. Currently NON-BLOCKING
+  # (continue-on-error) — the code is under active development; it warns without
+  # turning CI red. Once the code stabilizes, -D warnings will be enforced.
   lint:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust toolchain o'rnatish (fmt + clippy bilan)
+      - name: Install Rust toolchain (with fmt + clippy)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -89,7 +89,7 @@ jobs:
         with:
           workspaces: runtime
 
-      - name: Format tekshiruvi (cargo fmt --check)
+      - name: Format check (cargo fmt --check)
         continue-on-error: true
         run: cargo fmt --check
 

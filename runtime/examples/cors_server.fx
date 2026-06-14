@@ -1,24 +1,24 @@
-# CORS namoyishi (issue #135) — brauzer frontend'i bilan ishlovchi API.
-# Ishga tushirish:  fluxon run examples/cors_server.fx
-# Sinash (boshqa terminalda):
-#   # preflight (brauzer haqiqiy so'rovdan oldin shuni yuboradi):
+# CORS demonstration (issue #135) — an API that works with a browser frontend.
+# Running it:  fluxon run examples/cors_server.fx
+# Testing (in another terminal):
+#   # preflight (the browser sends this before the real request):
 #   curl -s -i -X OPTIONS localhost:8080/api/notes -H 'Origin: https://app.example.com'
-#   # oddiy so'rov — javobda Access-Control-Allow-Origin bo'ladi:
+#   # a simple request — the response will contain Access-Control-Allow-Origin:
 #   curl -s -i localhost:8080/api/notes -H 'Origin: https://app.example.com'
 
 use http
 
-# Bitta deklaratsiya: preflight + barcha javobga CORS header avtomatik.
-# Dev uchun hammaga ochiq:
+# One declaration: preflight + CORS header on every response automatically.
+# Open to everyone for dev:
 http.cors "*"
-# Prod uchun aniq origin'lar + cookie/Authorization:
+# For prod, explicit origins + cookie/Authorization:
 #   http.cors ["https://app.example.com"] {creds: true}
 
 http.on :get "/api/notes" \req ->
-  rep 200 {notes: ["birinchi" "ikkinchi"]}
+  rep 200 {notes: ["first" "second"]}
 
 http.on :post "/api/notes" \req ->
   rep 201 {received: req.body}
 
-log "CORS server 8080-portda ishga tushmoqda..."
+log "CORS server starting on port 8080..."
 http.serve 8080

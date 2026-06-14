@@ -1,18 +1,18 @@
-// Fluxon runtime — buyruq qatori interfeysi.
+// Fluxon runtime — command-line interface.
 //
-// Foydalanish:
-//   fluxon run <fayl.fx>     — Fluxon faylini bajaradi
-//   fluxon <fayl.fx>         — xuddi shu (qisqartma)
-//   fluxon check <fayl.fx>   — faqat lex+parse (bajarmaydi); parse xato -> exit 2
-//   fluxon test [yo'l]       — test fayllarini ishga tushiradi (standart: tests/);
-//                              yo'l fayl yoki katalog bo'lishi mumkin
-//   fluxon repl              — interaktiv REPL (read-eval-print); argumentsiz
-//                              `fluxon` ham xuddi shu REPL'ni ochadi
-//   fluxon --version         — build qilingan package versiyasini chiqaradi
-//   fluxon --help            — foydalanish yo'riqnomasini chiqaradi
+// Usage:
+//   fluxon run <file.fx>     — runs a Fluxon file
+//   fluxon <file.fx>         — same (shorthand)
+//   fluxon check <file.fx>   — lex+parse only (does not run); parse error -> exit 2
+//   fluxon test [path]       — runs test files (default: tests/);
+//                              path may be a file or a directory
+//   fluxon repl              — interactive REPL (read-eval-print); with no args
+//                              `fluxon` also opens this REPL
+//   fluxon --version         — prints the built package version
+//   fluxon --help            — prints the usage guide
 
-// mimalloc — parallel'da system malloc'dan ancha kam contention beradi.
-// Interpreter qisqa umrli scope allokatsiyalarini ko'p qiladi (tree-walking).
+// mimalloc — gives much less contention than the system malloc under parallelism.
+// The interpreter makes many short-lived scope allocations (tree-walking).
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -37,15 +37,15 @@ mod ws_mod;
 
 use std::process::ExitCode;
 
-// Buyruq turi: `run` kodni bajaradi, `check` faqat sintaksisni tekshiradi.
-// Exit kodlari ataylab farqli: faylni o'qib bo'lmasa/runtime xato -> 1,
-// foydalanish/parse xato -> 2 (chaqiruvchi qaysi bosqichda yiqilganini biladi).
+// Command type: `run` executes code, `check` only validates the syntax.
+// Exit codes are intentionally distinct: file unreadable/runtime error -> 1,
+// usage/parse error -> 2 (the caller knows at which stage it failed).
 enum Command {
     Run(String),
     Check(String),
-    // test: yo'l ixtiyoriy — berilmasa standart `tests/` katalogi ishlatiladi.
+    // test: path is optional — if omitted, the default `tests/` directory is used.
     Test(Option<String>),
-    // repl: interaktiv read-eval-print sessiyasi (argument yo'q).
+    // repl: interactive read-eval-print session (no argument).
     Repl,
     Version,
     Help,
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
     };
 
     match cmd {
-        // run: LEX -> PARSE -> BAJAR. Xato (parse yoki runtime) -> exit 1.
+        // run: LEX -> PARSE -> EXECUTE. Error (parse or runtime) -> exit 1.
         Command::Run(path) => {
             let src = match read_source(&path) {
                 Ok(s) => s,
@@ -71,14 +71,14 @@ fn main() -> ExitCode {
             match run_source_at(&src, std::path::Path::new(&path)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("Fluxon xato: {}", e);
+                    eprintln!("Fluxon error: {}", e);
                     ExitCode::from(1)
                 }
             }
         }
-        // check: faqat LEX + PARSE (interp YO'Q -> side-effect yo'q). Forge
-        // eval-gate QATLAM 1: AI yozgan blok sintaktik to'g'rimi, bajarmasdan.
-        // Parse/lex xato -> exit 2 (runtime exit 1 dan farqli).
+        // check: LEX + PARSE only (NO interp -> no side effects). Forge
+        // eval-gate LAYER 1: is the AI-written block syntactically valid, without running it.
+        // Parse/lex error -> exit 2 (distinct from runtime exit 1).
         Command::Check(path) => {
             let src = match read_source(&path) {
                 Ok(s) => s,
@@ -87,14 +87,14 @@ fn main() -> ExitCode {
             match check_source(&src) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("Fluxon xato: {}", e);
+                    eprintln!("Fluxon error: {}", e);
                     ExitCode::from(2)
                 }
             }
         }
-        // test: bitta fayl o'qimaydi — o'zi fayllarni topib ishga tushiradi.
+        // test: does not read a single file — it discovers files and runs them.
         Command::Test(path) => run_tests(path.as_deref()),
-        // repl: stdin'dan o'qib, har blokni bajaradi (interaktiv sessiya).
+        // repl: reads from stdin and runs each block (interactive session).
         Command::Repl => run_repl(),
         Command::Version => {
             println!("fluxon {}", env!("CARGO_PKG_VERSION"));
@@ -108,13 +108,13 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "Foydalanish: fluxon run <fayl.fx>  |  fluxon check <fayl.fx>  |  fluxon test [yo'l]  |  fluxon repl  |  fluxon --version  |  fluxon --help"
+    "Usage: fluxon run <file.fx>  |  fluxon check <file.fx>  |  fluxon test [path]  |  fluxon repl  |  fluxon --version  |  fluxon --help"
 }
 
-// Faylni o'qiydi; xatoda xabarni chiqarib, chiqish kodini (1) qaytaradi.
+// Reads a file; on error prints the message and returns the exit code (1).
 fn read_source(path: &str) -> Result<String, ExitCode> {
     std::fs::read_to_string(path).map_err(|e| {
-        eprintln!("Faylni o'qib bo'lmadi '{}': {}", path, e);
+        eprintln!("Could not read file '{}': {}", path, e);
         ExitCode::from(1)
     })
 }
@@ -128,18 +128,18 @@ fn parse_args(args: &[String]) -> Option<Command> {
         Some("--version" | "-V") => Some(Command::Version),
         Some("--help" | "-h") => Some(Command::Help),
         Some(p) if !p.starts_with('-') => Some(Command::Run(p.to_string())),
-        // Argumentsiz `fluxon` — interaktiv REPL (odam tilni tez sinab ko'rsin).
+        // `fluxon` with no args — interactive REPL (so a human can try the language quickly).
         None => Some(Command::Repl),
         _ => None,
     }
 }
 
-// `fluxon test [yo'l]` — issue #136. Yo'l berilmasa joriy katalogdagi `tests/`
-// ishlatiladi; fayl berilsa faqat o'sha fayl, katalog berilsa ichidagi barcha
-// .fx fayllar (rekursiv, nom bo'yicha tartibda). Har fayl alohida interp bilan
-// bajariladi: xatosiz tugasa PASS, xato (assert yiqilishi ham) bo'lsa FAIL —
-// keyingi fayllar baribir ishlaydi. Exit: hammasi o'tsa 0, FAIL bor -> 1,
-// yo'l/fayl topilmasa 2 (run/check exit konvensiyasiga mos).
+// `fluxon test [path]` — issue #136. If no path is given, the `tests/` directory
+// in the current directory is used; a file given runs only that file, a directory
+// runs all .fx files inside (recursive, ordered by name). Each file runs in its own
+// interp: finishing without error is PASS, an error (including an assert failure) is
+// FAIL — the remaining files run regardless. Exit: 0 if all pass, 1 if any FAIL,
+// 2 if the path/file is not found (matches the run/check exit convention).
 fn run_tests(path: Option<&str>) -> ExitCode {
     let target = std::path::Path::new(path.unwrap_or("tests"));
     let files = match collect_test_files(target) {
@@ -152,7 +152,7 @@ fn run_tests(path: Option<&str>) -> ExitCode {
 
     let (passed, failed) = run_test_files(&files);
     println!(
-        "YAKUN: {} PASS, {} FAIL ({} fayl)",
+        "SUMMARY: {} PASS, {} FAIL ({} files)",
         passed,
         failed,
         files.len()
@@ -164,14 +164,14 @@ fn run_tests(path: Option<&str>) -> ExitCode {
     }
 }
 
-// Test fayllar ro'yxatini tuzadi. Fayl -> o'zi; katalog -> ichidagi .fx'lar.
-// Bo'sh ro'yxat ham xato: "test o'tdi" deb jim chiqish chalg'ituvchi bo'lardi.
+// Builds the list of test files. File -> itself; directory -> the .fx files inside.
+// An empty list is also an error: silently reporting "tests passed" would mislead.
 fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
     let files = if target.is_file() {
-        // .fx bo'lmagan fayl (codex P2): Fluxon sifatida parse qilib FAIL/exit 1
-        // berish chalg'ituvchi — bu discovery xatosi (exit 2), test natijasi emas.
+        // A non-.fx file (codex P2): parsing it as Fluxon and giving FAIL/exit 1
+        // would mislead — this is a discovery error (exit 2), not a test result.
         if target.extension().is_none_or(|e| e != "fx") {
-            return Err(format!("'{}' .fx fayl emas", target.display()));
+            return Err(format!("'{}' is not a .fx file", target.display()));
         }
         vec![target.to_path_buf()]
     } else if target.is_dir() {
@@ -180,35 +180,32 @@ fn collect_test_files(target: &std::path::Path) -> Result<Vec<std::path::PathBuf
         v.sort();
         v
     } else {
-        return Err(format!("Test yo'li topilmadi: '{}'", target.display()));
+        return Err(format!("Test path not found: '{}'", target.display()));
     };
     if files.is_empty() {
-        return Err(format!(
-            "'{}' ichida .fx test fayli topilmadi",
-            target.display()
-        ));
+        return Err(format!("no .fx test file found in '{}'", target.display()));
     }
     Ok(files)
 }
 
-// IO xatolari yutilmaydi (codex P2): o'qib bo'lmaydigan ichki katalog jim
-// o'tkazilsa, "hammasi o'tdi" hisoboti aslida topilmagan testlarni yashirardi.
+// IO errors are not swallowed (codex P2): if an unreadable subdirectory were
+// silently skipped, an "all passed" report would actually hide undiscovered tests.
 fn collect_fx_files(
     dir: &std::path::Path,
     out: &mut Vec<std::path::PathBuf>,
 ) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("'{}' katalogini o'qib bo'lmadi: {}", dir.display(), e))?;
+        .map_err(|e| format!("could not read directory '{}': {}", dir.display(), e))?;
     for entry in entries {
         let entry =
-            entry.map_err(|e| format!("'{}' ichini o'qib bo'lmadi: {}", dir.display(), e))?;
+            entry.map_err(|e| format!("could not read inside '{}': {}", dir.display(), e))?;
         let p = entry.path();
-        // file_type() symlink'ni KUZATMAYDI — halqali symlink (tests/x -> tests/)
-        // cheksiz rekursiyaga olib bormasin. Symlink'langan .fx fayl baribir
-        // kiradi (pastdagi is_file symlink'ni kuzatadi), symlink-katalog esa yo'q.
+        // file_type() does NOT follow the symlink — so a looping symlink (tests/x -> tests/)
+        // cannot cause infinite recursion. A symlinked .fx file still gets included
+        // (the is_file below follows the symlink), but a symlinked directory does not.
         let ft = entry
             .file_type()
-            .map_err(|e| format!("'{}' turini aniqlab bo'lmadi: {}", p.display(), e))?;
+            .map_err(|e| format!("could not determine type of '{}': {}", p.display(), e))?;
         if ft.is_dir() {
             collect_fx_files(&p, out)?;
         } else if p.extension().is_some_and(|e| e == "fx") && p.is_file() {
@@ -218,16 +215,16 @@ fn collect_fx_files(
     Ok(())
 }
 
-// Fayllarni ketma-ket bajaradi, (PASS, FAIL) sonini qaytaradi. Assert
-// hisoblagichi har fayldan oldin reset qilinadi — "N assert" fayl o'zinikini
-// ko'rsatadi (fayllar bitta protsessda ketma-ket ishlaydi).
+// Runs the files sequentially, returns the (PASS, FAIL) counts. The assert
+// counter is reset before each file — so "N asserts" reflects that file's own
+// count (the files run sequentially in a single process).
 fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     let mut passed = 0usize;
     let mut failed = 0usize;
     for f in files {
         builtins::assert_passed_reset();
         let result = std::fs::read_to_string(f)
-            .map_err(|e| format!("faylni o'qib bo'lmadi: {}", e))
+            .map_err(|e| format!("could not read file: {}", e))
             .and_then(|src| run_source_at(&src, f));
         match result {
             Ok(()) => {
@@ -247,25 +244,25 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     (passed, failed)
 }
 
-// Sintaksisni tekshiradi: lex + parse, lekin interp'ni o't kazib yuboradi —
-// kod BAJARILMAYDI (side-effect yo'q). Muvaffaqiyatda Ok(()), aks holda xato matni.
+// Checks the syntax: lex + parse, but skips interp — the code is NOT executed
+// (no side effects). On success Ok(()), otherwise the error text.
 fn check_source(src: &str) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     parser::parse(toks)?;
     Ok(())
 }
 
-// Manbani bajaradi. `path` — faylning yo'li; `use ./fayl` modullari shu faylning
-// katalogiga nisbatan hal qilinadi.
+// Runs the source. `path` is the file's path; `use ./file` modules are resolved
+// relative to this file's directory.
 fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
-    // Arc<Interp>: http.serve handler'larni server thread'larida apply qiladi,
-    // shuning uchun interp thread'lar orasida ulashiladigan bo'lishi kerak.
+    // Arc<Interp>: http.serve applies handlers on server threads, so the interp
+    // must be shareable across threads.
     let interp = interp::Interp::new_arc();
-    // `use ./fayl` uchun base — top-level faylning katalogi.
+    // base for `use ./file` — the directory of the top-level file.
     if let Some(dir) = path.parent() {
-        // parent() bo'sh ("") bo'lsa joriy katalog (default) qoladi.
+        // If parent() is empty (""), the current directory (default) stays.
         if !dir.as_os_str().is_empty() {
             interp.set_base(dir);
         }
@@ -273,50 +270,50 @@ fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     interp.run(&prog)
 }
 
-// Path'siz qulay wrapper — testlar uchun (modul yo'llari joriy katalogga nisbatan).
+// Convenience wrapper without a path — for tests (module paths relative to the current dir).
 #[cfg(test)]
 fn run_source(src: &str) -> Result<(), String> {
     run_source_at(src, std::path::Path::new("."))
 }
 
-// `fluxon repl` — interaktiv read-eval-print (issue #138). Odam tilni o'rganishi
-// va bir-ikki qator kodni faylsiz sinab ko'rishi uchun. Bitta interp obyekti
-// butun sessiya davomida yashaydi: `x = 1` keyingi qatorda ko'rinadi.
+// `fluxon repl` — interactive read-eval-print (issue #138). So a human can learn
+// the language and try a line or two of code without a file. A single interp object
+// lives for the whole session: `x = 1` is visible on the next line.
 //
-// Ko'p qatorli blok: indentatsiyali konstruksiya (if/each/fn/...) bir necha
-// qatorga cho'ziladi. Qaysi qatorda blok tugashini xato-matnini tahlil qilib
-// emas, balki yig'ilgan buferni qayta parse qilib aniqlaymiz — parse o'tsa
-// blok to'liq (eval); parse xato bo'lsa ko'proq qator kutamiz, lekin foydalanuvchi
-// BO'SH qator kiritsa (blokni majburan yopsa) xatoni ko'rsatib buferni tozalaymiz.
-// Bu lex/parse xato xabarlarining ichki matniga bog'lanmaslik uchun (mo'rt bo'lardi).
+// Multi-line block: an indented construct (if/each/fn/...) spans several lines.
+// We detect where the block ends not by analyzing the error text, but by re-parsing
+// the accumulated buffer — if parse passes the block is complete (eval); if parse
+// fails we wait for more lines, but if the user enters an EMPTY line (forcing the
+// block closed) we show the error and clear the buffer. This avoids coupling to the
+// inner text of lex/parse error messages (which would be brittle).
 fn run_repl() -> ExitCode {
     use std::io::Write;
 
     let interp = interp::Interp::new_arc();
-    // REPL'da `use ./fayl` joriy ishchi katalogga nisbatan hal qilinsin.
+    // In the REPL, resolve `use ./file` relative to the current working directory.
     interp.set_base(std::path::Path::new("."));
 
     println!(
-        "Fluxon {} REPL — chiqish: :q yoki Ctrl-D, yordam: :help",
+        "Fluxon {} REPL — exit: :q or Ctrl-D, help: :help",
         env!("CARGO_PKG_VERSION")
     );
 
     let stdin = std::io::stdin();
-    // Yig'iladigan bufer (ko'p qatorli blok uchun) — qatorlar `\n` bilan ulanadi.
+    // Accumulating buffer (for a multi-line block) — lines are joined with `\n`.
     let mut buf = String::new();
 
     loop {
-        // Bo'sh buferda asosiy prompt, davom etayotgan blokda `...` prompt.
+        // Main prompt on an empty buffer, `...` prompt while a block continues.
         let prompt = if buf.is_empty() { "fx> " } else { "... " };
         print!("{}", prompt);
-        // print! satr oxirisiz — prompt ko'rinishi uchun majburan flush qilamiz.
+        // print! has no trailing newline — force a flush so the prompt is visible.
         let _ = std::io::stdout().flush();
 
         let mut line = String::new();
         match stdin.read_line(&mut line) {
             Ok(0) => {
-                // EOF (Ctrl-D). Yarim yig'ilgan blok bo'lsa oxirgi marta urinib
-                // ko'ramiz, keyin yangi qatorda chiqamiz.
+                // EOF (Ctrl-D). If a partially accumulated block exists, try it one
+                // last time, then exit on a new line.
                 println!();
                 if !buf.trim().is_empty() {
                     repl_eval(&interp, &buf);
@@ -325,15 +322,15 @@ fn run_repl() -> ExitCode {
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("REPL o'qish xatosi: {}", e);
+                eprintln!("REPL read error: {}", e);
                 return ExitCode::from(1);
             }
         }
 
-        // read_line oxirgi `\n` ni saqlaydi — trailing'ni olib, bo'shlikni tekshiramiz.
+        // read_line keeps the trailing `\n` — strip the trailing newline, then check for emptiness.
         let trimmed = line.trim_end_matches(['\n', '\r']);
 
-        // REPL buyruqlari faqat bufer bo'sh bo'lganda (blok o'rtasida emas).
+        // REPL commands only when the buffer is empty (not in the middle of a block).
         if buf.is_empty() {
             match trimmed.trim() {
                 ":q" | ":quit" | ":exit" => return ExitCode::SUCCESS,
@@ -341,13 +338,13 @@ fn run_repl() -> ExitCode {
                     print_repl_help();
                     continue;
                 }
-                "" => continue, // bo'sh prompt — hech narsa qilmaymiz
+                "" => continue, // empty prompt — do nothing
                 _ => {}
             }
         }
 
-        // Bo'sh qator + yig'ilayotgan blok: foydalanuvchi blokni majburan yopdi —
-        // hozir bor narsani eval qilamiz (parse hali xato bo'lsa xato ko'rinadi).
+        // Empty line + an accumulating block: the user forced the block closed —
+        // we eval what we have now (if parse still fails, the error is shown).
         let force_eval = !buf.is_empty() && trimmed.trim().is_empty();
 
         if !buf.is_empty() {
@@ -355,11 +352,11 @@ fn run_repl() -> ExitCode {
         }
         buf.push_str(trimmed);
 
-        // Indentatsiyali (ko'p qatorli) blokni darhol eval QILMAYMIZ — `else`/`catch`
-        // yoki davomi keyingi qatorda kelishi mumkin (masalan `if`+body parse bo'ladi,
-        // ammo `else` hali yo'q). Bunday blokni faqat bo'sh qator (force_eval) yopadi.
-        // Indentatsiyasiz bir-qatorli ifoda esa parse o'tishi bilan darhol eval bo'ladi
-        // (oddiy `1 + 2` uchun bo'sh qator talab qilmaymiz).
+        // We do NOT immediately eval an indented (multi-line) block — `else`/`catch`
+        // or a continuation may come on the next line (e.g. `if`+body parses, but
+        // `else` is not there yet). Such a block is closed only by an empty line (force_eval).
+        // An unindented single-line expression, however, is evaluated as soon as it parses
+        // (we do not require an empty line for a simple `1 + 2`).
         let ready = if force_eval {
             true
         } else if is_multiline_block(&buf) {
@@ -375,35 +372,35 @@ fn run_repl() -> ExitCode {
     }
 }
 
-// Bufer indentatsiyali blokmi (biror qator bo'shliq bilan boshlanadimi)? Shunday
-// bo'lsa REPL davomini kutadi (else/catch/qo'shimcha body kelishi mumkin) va faqat
-// bo'sh qator blokni yopadi. Birinchi qator hech qachon indentatsiyali bo'lmaydi —
-// shuning uchun keyingi qatorlardan birortasi indentatsiyali bo'lsa yetadi.
+// Is the buffer an indented block (does any line start with whitespace)? If so,
+// the REPL waits for a continuation (else/catch/extra body may come) and only an
+// empty line closes the block. The first line is never indented — so it is enough
+// if any of the following lines is indented.
 fn is_multiline_block(buf: &str) -> bool {
     buf.lines()
         .any(|l| l.starts_with(' ') || l.starts_with('\t'))
 }
 
-// Bufer mazmunini bajaradi va natijani chop etadi. Xato bo'lsa stderr'ga
-// "Fluxon xato: ..." ko'rinishida — sessiya tugamaydi (keyingi promptga o'tadi).
+// Runs the buffer contents and prints the result. On error, "Fluxon error: ..."
+// to stderr — the session does not end (it moves on to the next prompt).
 fn repl_eval(interp: &interp::Interp, src: &str) {
     match interp.run_repl_chunk(&match lex_parse(src) {
         Ok(prog) => prog,
         Err(e) => {
-            eprintln!("Fluxon xato: {}", e);
+            eprintln!("Fluxon error: {}", e);
             return;
         }
     }) {
-        // Nil natijani (e'lon, log, assign) chop etmaymiz — shovqin bo'lardi.
-        // Boshqa qiymatni `repr` bilan (string'lar tirnoqli) ko'rsatamiz.
+        // We do not print a Nil result (declaration, log, assign) — it would be noise.
+        // Any other value we show via `repr` (strings quoted).
         Ok(value::Value::Nil) => {}
         Ok(v) => println!("{}", v.repr()),
-        Err(e) => eprintln!("Fluxon xato: {}", e),
+        Err(e) => eprintln!("Fluxon error: {}", e),
     }
 }
 
-// REPL uchun lex+parse — `run_source_at` ichidagi bilan bir xil, lekin AST'ni
-// qaytaradi (REPL chunk'iga uzatish uchun).
+// lex+parse for the REPL — same as inside `run_source_at`, but returns the AST
+// (to pass to the REPL chunk).
 fn lex_parse(src: &str) -> Result<ast::Program, String> {
     let toks = lexer::lex(src)?;
     parser::parse(toks)
@@ -411,12 +408,12 @@ fn lex_parse(src: &str) -> Result<ast::Program, String> {
 
 fn print_repl_help() {
     println!(
-        "REPL buyruqlari:\n  \
-         :help, :h    — bu yordam\n  \
-         :q, :quit    — chiqish (Ctrl-D ham)\n\
-         Bir qator kod yozing va Enter bosing. if/each/fn kabi bloklar bir necha\n\
-         qatorga cho'zilsa, blok tugaguncha kiritishda davom eting; bo'sh qator\n\
-         blokni yopadi. Natija (nil bo'lmasa) avtomatik chop etiladi."
+        "REPL commands:\n  \
+         :help, :h    — this help\n  \
+         :q, :quit    — exit (also Ctrl-D)\n\
+         Type one line of code and press Enter. If blocks like if/each/fn span\n\
+         multiple lines, keep typing until the block is complete; an empty line\n\
+         closes the block. The result (unless nil) is printed automatically."
     );
 }
 
@@ -424,48 +421,48 @@ fn print_repl_help() {
 mod tests {
     use super::*;
 
-    // Kichik yordamchi: manbani bajaradi, xato bo'lsa panic.
+    // Small helper: runs the source, panics on error.
     fn run(src: &str) {
-        run_source(src).unwrap_or_else(|e| panic!("xato: {}", e));
+        run_source(src).unwrap_or_else(|e| panic!("error: {}", e));
     }
 
-    // Issue #139: darajali log — `log.debug/info/warn/err` va bare `log` (=info)
-    // dispatch'ga ulangan va xatosiz ishlaydi (stderr'ga chiqaradi, nil qaytaradi).
-    // Filtr/format $LOG_LEVEL/$LOG_FORMAT bilan; format mantig'i builtins::log_tests
-    // da unit-test qilingan. Bu yerda faqat sintaksis/dispatch tekshiriladi.
+    // Issue #139: leveled log — `log.debug/info/warn/err` and bare `log` (=info)
+    // are wired into dispatch and work without error (writes to stderr, returns nil).
+    // Filter/format via $LOG_LEVEL/$LOG_FORMAT; the format logic is unit-tested in
+    // builtins::log_tests. Here only syntax/dispatch is checked.
     #[test]
     fn log_darajalari() {
         run(r#"
 log "bare = info"
 log.debug "tafsilot"
-log.info "ma'lumot"
+log.info "info"
 log.warn "ogohlantirish"
-log.err "xato"
+log.err "error"
 log.info "interpolatsiya ${1 + 1}"
 "#);
     }
 
-    // Issue #139: `log` qiymat sifatida (callback/saqlash) ishlashda davom etadi —
-    // eski global `log` Native bilan moslik (info-darajali shim). PR #163 review.
+    // Issue #139: `log` continues to work as a value (callback/storage) —
+    // compatible with the old global `log` Native (an info-level shim). PR #163 review.
     #[test]
     fn log_qiymat_sifatida_callback() {
         run(r#"
-fn call f -> f "qiymat orqali"
+fn call f -> f "by value"
 call log
 [1, 2, 3].map log
 g = log
-g "saqlangan funksiya"
+g "saved function"
 "#);
     }
 
-    // Issue #137: par — til-darajasidagi parallel fan-out. Lambdalar ro'yxatini
-    // har birini alohida thread'da chaqiradi, hammasini kutadi, natijalar
-    // (kirish tartibida) har biri {ok:...} yoki {err:...}.
-    // Eslatma: list ichidagi lambda elementlar QAVS bilan ajraladi — `(\-> ...)`.
-    // Lexer list/map ichida Newline token chiqarmaydi (`paren_depth>0`), shuning
-    // uchun qavssiz `[\-> a  \-> b]` da birinchi body ikkinchisini argument deb
-    // yutardi; qavs body chegarasini aniqlaydi va nested HOF (`\-> xs.map \x ->`)
-    // ham buzilmaydi (issue #137 PR review, P2).
+    // Issue #137: par — language-level parallel fan-out. Takes a list of lambdas,
+    // calls each one on its own thread, waits for all, results (in input order) are
+    // each {ok:...} or {err:...}.
+    // Note: lambda elements inside a list are separated by PARENS — `(\-> ...)`.
+    // The lexer does not emit a Newline token inside a list/map (`paren_depth>0`), so
+    // without parens `[\-> a  \-> b]` the first body would swallow the second as an
+    // argument; the parens delimit the body and a nested HOF (`\-> xs.map \x ->`)
+    // is not broken either (issue #137 PR review, P2).
     #[test]
     fn par_asosiy_fan_out() {
         run(r#"
@@ -474,83 +471,83 @@ r = par [
   (\-> str.up "hi")
   (\-> [1 2 3].len)
 ]
-((r.len) == 3) | (fail "par 3 natija qaytarishi kerak")
-((r.0.ok) == 2) | (fail "1-natija {ok:2} bo'lishi kerak")
-((r.1.ok) == "HI") | (fail "2-natija {ok:HI} bo'lishi kerak")
-((r.2.ok) == 3) | (fail "3-natija {ok:3} bo'lishi kerak")
+((r.len) == 3) | (fail "par 3 results should be returned")
+((r.0.ok) == 2) | (fail "1st result should be {ok:2}")
+((r.1.ok) == "HI") | (fail "2nd result should be {ok:HI}")
+((r.2.ok) == 3) | (fail "3rd result should be {ok:3}")
 "#);
     }
 
-    // Issue #137: qisman muvaffaqiyat — bitta lambda fail qilsa qolganlari
-    // to'xtamaydi; xato {err:xabar} bo'lib qaytadi, tartib saqlanadi.
+    // Issue #137: partial success — if one lambda fails the others do not stop;
+    // the error comes back as {err:message}, order is preserved.
     #[test]
     fn par_qisman_muvaffaqiyat() {
         run(r#"
 r = par [
   (\-> 42)
-  (\-> fail "qasddan")
-  (\-> "uchinchi")
+  (\-> fail "on purpose")
+  (\-> "third")
 ]
-((r.0.ok) == 42) | (fail "1-natija ok bo'lishi kerak")
-((r.1.err) == "qasddan") | (fail "2-natija err bo'lishi kerak")
-((r.2.ok) == "uchinchi") | (fail "3-natija ok bo'lishi kerak")
+((r.0.ok) == 42) | (fail "1st result ok should be set")
+((r.1.err) == "on purpose") | (fail "2nd result should be err")
+((r.2.ok) == "third") | (fail "3rd result ok should be set")
 "#);
     }
 
-    // Issue #137: closure tashqi (sikl/scope) o'zgaruvchini parallel o'qiy oladi.
+    // Issue #137: a closure can read an outer (loop/scope) variable in parallel.
     #[test]
     fn par_closure_capture() {
         run(r#"
 base = 100
 r = par [(\-> base + 1) (\-> base + 2)]
-((r.0.ok) == 101) | (fail "closure capture 1 buzildi")
-((r.1.ok) == 102) | (fail "closure capture 2 buzildi")
+((r.0.ok) == 101) | (fail "closure capture 1 broke")
+((r.1.ok) == 102) | (fail "closure capture 2 broke")
 "#);
     }
 
-    // Issue #137: lambda body ichida nested paren-free HOF (`xs.map \x -> ...`)
-    // qavs ichida to'liq o'qiladi — P2 regressiyasi yo'q.
+    // Issue #137: a nested paren-free HOF inside a lambda body (`xs.map \x -> ...`)
+    // is read in full inside the parens — no P2 regression.
     #[test]
     fn par_nested_hof() {
         run(r#"
 r = par [(\-> [1 2 3].map \x -> x + 1)]
-((r.0.ok.0) == 2) | (fail "nested HOF 1-element buzildi")
-((r.0.ok.2) == 4) | (fail "nested HOF 3-element buzildi")
+((r.0.ok.0) == 2) | (fail "nested HOF 1-element broke")
+((r.0.ok.2) == 4) | (fail "nested HOF 3-element broke")
 "#);
     }
 
-    // Issue #137: bo'sh ro'yxat -> bo'sh natija (thread ochilmaydi).
+    // Issue #137: empty list -> empty result (no thread is spawned).
     #[test]
     fn par_bosh_royxat() {
         run(r#"
 r = par []
-((r.len) == 0) | (fail "par [] bo'sh ro'yxat qaytarishi kerak")
+((r.len) == 0) | (fail "par [] should return an empty list")
 "#);
     }
 
-    // Issue #137: lambda bo'lmagan element aniq xato beradi (thread ochilmasdan).
+    // Issue #137: a non-lambda element gives a clear error (without spawning a thread).
     #[test]
     fn par_lambda_bolmagan_element_xato() {
         let e = run_source("par [42]").unwrap_err();
         assert!(
-            e.contains("funksiya bo'lishi kerak"),
-            "par lambda bo'lmagan elementda aniq xato kutiladi, keldi: {}",
+            e.contains("must be a function"),
+            "a clear error is expected for a non-lambda par element, got: {}",
             e
         );
     }
 
-    // Issue #137 (PR review P2): ikki par lambda bir xil CACHE'LANMAGAN modulni
-    // parallel `use ./m` qilsa, ikkalasi ham {ok:...} qaytishi kerak — soxta
-    // "sikllik import" emas. module_loading/current_base thread-local bo'lgani
-    // uchun parallel import bir-birini sikl deb ko'rmaydi va base buzilmaydi.
+    // Issue #137 (PR review P2): if two par lambdas `use ./m` the same UNCACHED
+    // module in parallel, both must return {ok:...} — not a false "circular import".
+    // Because module_loading/current_base are thread-local, parallel imports do not
+    // see each other as a cycle and the base is not corrupted.
     #[test]
     fn par_parallel_modul_import_soxta_sikl_yoq() {
         let dir = std::env::temp_dir().join(format!("fluxon_par_mod_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join("m.fx"), "exp fn greet n -> \"salom ${n}\"\n").unwrap();
+        std::fs::write(dir.join("m.fx"), "exp fn greet n -> \"hello ${n}\"\n").unwrap();
         let main = dir.join("main.fx");
-        // Har lambda alohida thread'da MODULNI BIRINCHI MARTA import qiladi
-        // (cache bo'sh) — Codex reproduksiyasi.
+        // Each lambda imports the MODULE FOR THE FIRST TIME on its own thread
+        // (cache empty) — Codex reproduction.
         std::fs::write(
             &main,
             r#"
@@ -561,31 +558,31 @@ r = par [
   (\-> load 1)
   (\-> load 2)
 ]
-((r.0.ok) == "salom 1") | (fail "par modul import 1 buzildi: ${r.0}")
-((r.1.ok) == "salom 2") | (fail "par modul import 2 buzildi: ${r.1}")
+((r.0.ok) == "hello 1") | (fail "par module import 1 broke: ${r.0}")
+((r.1.ok) == "hello 2") | (fail "par module import 2 broke: ${r.1}")
 "#,
         )
         .unwrap();
         let src = std::fs::read_to_string(&main).unwrap();
         let res = run_source_at(&src, &main);
         let _ = std::fs::remove_dir_all(&dir);
-        res.unwrap_or_else(|e| panic!("par parallel modul import xatosi: {}", e));
+        res.unwrap_or_else(|e| panic!("par parallel module import error: {}", e));
     }
 
-    // Issue #137: foydalanuvchi `par` nomli o'zgaruvchi e'lon qilsa u ustun
-    // (boshqa dispatch-battery'lar bilan izchil shadowing).
+    // Issue #137: if the user declares a variable named `par`, it wins
+    // (shadowing consistent with the other dispatch batteries).
     #[test]
     fn par_ozgaruvchi_sifatida_shadow() {
         run(r#"
 fn id v -> v
 par = (id 7)
-(par == 7) | (fail "par o'zgaruvchi sifatida shadow bo'lmadi")
+(par == 7) | (fail "par did not shadow as a variable")
 "#);
     }
 
-    // Issue #137 (PR review P1): par'ni db.tx ichidan chaqirish aniq xato beradi —
-    // yangi thread'lar CURRENT_TX TLS'ni meros qilmaydi, jim ravishda tx
-    // tashqarisida ishlash o'rniga rad etiladi. (DB test — DB_TEST_LOCK.)
+    // Issue #137 (PR review P1): calling par from inside db.tx gives a clear error —
+    // the new threads do not inherit the CURRENT_TX TLS, so instead of silently
+    // running outside the tx, it is rejected. (DB test — DB_TEST_LOCK.)
     #[test]
     fn par_db_tx_ichida_rad_etiladi() {
         with_db_test("par_in_tx", || {
@@ -600,90 +597,90 @@ db.tx \->
             )
             .unwrap_err();
             assert!(
-                e.contains("db.tx ichida ishlatib bo'lmaydi"),
-                "par db.tx ichida aniq xato kutiladi, keldi: {}",
+                e.contains("cannot be used inside db.tx"),
+                "a clear error is expected for par inside db.tx, got: {}",
                 e
             );
         });
     }
 
-    // Issue #139: foydalanuvchi `log` nomli o'zgaruvchi e'lon qilsa, u ustun
-    // (battery'ni soyalaydi) — eski shadowing invarianti buzilmaydi.
+    // Issue #139: if the user declares a variable named `log`, it wins
+    // (shadows the battery) — the old shadowing invariant is not broken.
     #[test]
     fn log_ozgaruvchi_sifatida_shadow() {
         run(r#"
 fn log_id v -> v
 log = (log_id 42)
-(log == 42) | (fail "log o'zgaruvchi sifatida shadow bo'lmadi")
+(log == 42) | (fail "log did not shadow as a variable")
 "#);
     }
 
-    // Issue #93: `log !x` da `!` callee'ga postfix Try bo'lib yopishar edi —
-    // `Call(Try(log), [x])` — inkor jim yo'qolardi. Endi bo'shliqdan keyingi
-    // `!` prefiks not sifatida argument boshlaydi.
+    // Issue #93: in `log !x` the `!` used to stick to the callee as a postfix Try —
+    // `Call(Try(log), [x])` — the negation silently disappeared. Now a `!` after
+    // whitespace starts an argument as a prefix not.
     #[test]
     fn chaqiruv_argumentida_prefiks_not() {
         run(r#"
 x = false
-(!x) | (fail "qavsli prefiks not buzildi")
+(!x) | (fail "parenthesized prefix not broke")
 fn id v -> v
-((id !x) == true) | (fail "chaqiruv argumentidagi !x inkor qilinmadi")
+((id !x) == true) | (fail "in call argument !x was not negated")
 y = true
-((id !y) == false) | (fail "chaqiruv argumentidagi !y inkor qilinmadi")
+((id !y) == false) | (fail "in call argument !y was not negated")
 fn second a b -> b
-((second x !y) == false) | (fail "ikkinchi argumentdagi prefiks not buzildi")
+((second x !y) == false) | (fail "prefix not in the second argument broke")
 "#);
     }
 
-    // Issue #93 (regressiya himoyasi): tutash `!` avvalgidek postfix Try —
-    // qiymatga yopishadi va muvaffaqiyatda o'tkazgich bo'lib qoladi.
+    // Issue #93 (regression guard): an attached `!` is still a postfix Try as before —
+    // it sticks to the value and stays a passthrough on success.
     #[test]
     fn tutash_bang_postfix_try_qoladi() {
         run(r#"
 fn safe v -> v
 a = (safe 5)!
-(a == 5) | (fail "postfix try o'tkazgichi buzildi")
+(a == 5) | (fail "postfix try passthrough broke")
 "#);
     }
 
-    // Issue #125: try/catch — `fail` ko'tarilgan xatoni ushlab, qiymat sifatida
-    // davom ettiradi. catch o'zgaruvchisi {message, status} map'iga bog'lanadi.
+    // Issue #125: try/catch — catches an error raised by `fail` and continues
+    // as a value. The catch variable binds to a {message, status} map.
     #[test]
     fn try_catch_fail_statusli_ushlaydi() {
         run(r#"
 r = try
-  fail 422 "noto'g'ri ma'lumot"
+  fail 422 "invalid data"
 catch e
-  (e.message == "noto'g'ri ma'lumot") | (fail "catch message buzildi")
-  (e.status == 422) | (fail "catch status buzildi")
+  (e.message == "invalid data") | (fail "catch message broke")
+  (e.status == 422) | (fail "catch status broke")
   "fallback"
-(r == "fallback") | (fail "catch tanasining qiymati qaytmadi")
+(r == "fallback") | (fail "catch body value did not return")
 "#);
     }
 
-    // Statussiz fail va runtime xato — ikkalasi ham ushlanadi; statussizda
-    // e.status nil bo'ladi.
+    // Status-less fail and a runtime error — both are caught; without a status
+    // e.status is nil.
     #[test]
     fn try_catch_runtime_xato_va_statussiz() {
         run(r#"
 r = try
   fail "boom"
 catch e
-  (e.status == nil) | (fail "statussiz fail'da status nil bo'lishi kerak")
+  (e.status == nil) | (fail "status should be nil for fail without status should be")
   e.message
-(r == "boom") | (fail "statussiz fail message ushlanmadi")
+(r == "boom") | (fail "fail message without status was not caught")
 
-# runtime xato (nolga bo'lish) ham ushlanadi
+# runtime errors (divide by zero) are caught too
 r2 = try
   1 / 0
 catch e
-  (e.status == nil) | (fail "runtime xato status nil bo'lishi kerak")
+  (e.status == nil) | (fail "runtime error status should be nil should be")
   "ushlandi"
-(r2 == "ushlandi") | (fail "runtime xato ushlanmadi")
+(r2 == "ushlandi") | (fail "runtime error was not caught")
 "#);
     }
 
-    // Muvaffaqiyatda body oxirgi ifodasi qaytadi; catch ishlamaydi.
+    // On success the body's last expression returns; catch does not run.
     #[test]
     fn try_catch_muvaffaqiyatda_body_qiymati() {
         run(r#"
@@ -691,11 +688,11 @@ r = try
   40 + 2
 catch
   0
-(r == 42) | (fail "muvaffaqiyatda body qiymati qaytmadi")
+(r == 42) | (fail "body value on success did not return")
 "#);
     }
 
-    // ret/skip/stop oqim-signallari try'dan o'tib ketadi — catch ularni ushlamaydi.
+    // ret/skip/stop flow signals pass through try — catch does not catch them.
     #[test]
     fn try_catch_oqim_signallarini_ushlamaydi() {
         run(r#"
@@ -704,7 +701,7 @@ fn f
     ret "early"
   catch
     ret "caught"
-((f()) == "early") | (fail "ret try ichidan ushlandi (noto'g'ri)")
+((f()) == "early") | (fail "ret from inside try was caught (wrong)")
 
 total <- 0
 each i in 1..5
@@ -715,12 +712,12 @@ each i in 1..5
       stop
     total <- total + i
   catch
-    fail "skip/stop ushlanmasligi kerak"
-(total == 7) | (fail "skip/stop try ichida buzildi: ${total}")
+    fail "skip/stop should not be caught"
+(total == 7) | (fail "skip/stop try ichida broke: ${total}")
 "#);
     }
 
-    // Ichma-ich try va catch ichidan qayta fail (re-raise) tashqi try'ga boradi.
+    // Nested try, and a re-fail (re-raise) from inside catch goes to the outer try.
     #[test]
     fn try_catch_ichmaich_va_qayta_fail() {
         run(r#"
@@ -731,53 +728,49 @@ r = try
     fail "outer: ${e.message}"
 catch e
   e.message
-(r == "outer: inner") | (fail "ichma-ich try yoki qayta fail buzildi")
+(r == "outer: inner") | (fail "nested try or re-fail broke")
 "#);
     }
 
-    // Issue #90: cheksiz rekursiya stack overflow ABORT o'rniga graceful
-    // runtime xato qaytarishi kerak (HTTP handler'da butun server o'lmasin).
+    // Issue #90: infinite recursion must return a graceful runtime error instead
+    // of a stack overflow ABORT (so an HTTP handler does not kill the whole server).
     #[test]
     fn cheksiz_rekursiya_graceful_xato() {
         let e = run_source("fn f n -> f (n + 1)\nf 0").unwrap_err();
-        assert!(
-            e.contains("rekursiya juda chuqur"),
-            "kutilmagan xato: {}",
-            e
-        );
+        assert!(e.contains("recursion too deep"), "unexpected error: {}", e);
     }
 
-    // Issue #90: limit xatosidan keyin chuqurlik hisoblagichi to'liq qaytadi —
-    // xuddi shu thread'da keyingi bajarish toza boshlanadi (RAII guard).
+    // Issue #90: after a limit error the depth counter fully resets —
+    // the next execution on the same thread starts clean (RAII guard).
     #[test]
     fn rekursiya_limitdan_keyin_tiklanish() {
         assert!(run_source("fn f n -> f (n + 1)\nf 0").is_err());
         run(r#"
 fn g x -> x + 1
-((g 1) == 2) | (fail "limitdan keyin chaqiriq buzildi")
+((g 1) == 2) | (fail "call after the limit broke")
 "#);
     }
 
-    // Issue #90: ~2000 ichma-ich qavs parser'da stack overflow abort qilardi.
-    // Endi limit (256) dan oshganda aniq parse xatosi; 200 daraja esa ishlaydi.
+    // Issue #90: ~2000 nested parens used to abort the parser with a stack overflow.
+    // Now exceeding the limit (256) is a clear parse error; 200 levels still work.
     #[test]
     fn chuqur_qavs_parse_limiti() {
         let deep = format!("x = {}1{}", "(".repeat(300), ")".repeat(300));
         let e = check_source(&deep).unwrap_err();
-        assert!(e.contains("chuqur"), "kutilmagan xato: {}", e);
+        assert!(e.contains("too deep"), "unexpected error: {}", e);
 
         let ok = format!("x = {}1{}", "(".repeat(200), ")".repeat(200));
-        check_source(&ok).unwrap_or_else(|e| panic!("200 daraja o'tishi kerak: {}", e));
+        check_source(&ok).unwrap_or_else(|e| panic!("200 levels should pass: {}", e));
     }
 
-    // Issue #89: int arifmetika overflow'da panic (debug) / jim wrap (release)
-    // o'rniga ikkala rejimda ham bir xil Fluxon xatosi qaytadi.
+    // Issue #89: on int arithmetic overflow, instead of a panic (debug) / silent
+    // wrap (release), both modes return the same Fluxon error.
     #[test]
     fn int_overflow_xato_panic_emas() {
-        // + overflow (debug'da panic berardi)
+        // + overflow (used to panic in debug)
         let e = run_source("log (9223372036854775806 + 2)").unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
-        // i64::MIN / -1 — Rust'da release'da ham panic berardi
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
+        // i64::MIN / -1 — used to panic even in release in Rust
         let e = run_source(
             r#"
 a = 0 - 9223372036854775807 - 1
@@ -785,8 +778,8 @@ log (a / (0 - 1))
 "#,
         )
         .unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
-        // i64::MIN % -1 — xuddi shu oila
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
+        // i64::MIN % -1 — same family
         let e = run_source(
             r#"
 a = 0 - 9223372036854775807 - 1
@@ -794,8 +787,8 @@ log (a % (0 - 1))
 "#,
         )
         .unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
-        // unar minus ham: -(i64::MIN) sig'maydi
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
+        // unary minus too: -(i64::MIN) does not fit
         let e = run_source(
             r#"
 a = 0 - 9223372036854775807 - 1
@@ -803,27 +796,27 @@ log (-a)
 "#,
         )
         .unwrap_err();
-        assert!(e.contains("son chegaradan oshdi"), "kutilmagan xato: {}", e);
-        // * va - ham checked
+        assert!(e.contains("number out of range"), "unexpected error: {}", e);
+        // * and - are checked too
         assert!(run_source("log (4611686018427387904 * 2)").is_err());
         assert!(run_source("log (0 - 9223372036854775807 - 2)").is_err());
-        // Oddiy arifmetika avvalgidek ishlaydi
+        // Ordinary arithmetic works as before
         run(r#"
-((2 + 3) == 5) | (fail "yig'indi buzildi")
-((7 / 2) == 3) | (fail "bo'lish buzildi")
-((7 % 2) == 1) | (fail "mod buzildi")
-((-(5)) == (0 - 5)) | (fail "unar minus buzildi")
+((2 + 3) == 5) | (fail "sum broke")
+((7 / 2) == 3) | (fail "division broke")
+((7 % 2) == 1) | (fail "mod broke")
+((-(5)) == (0 - 5)) | (fail "unary minus broke")
 "#);
     }
 
-    // Issue #89: range oxiri i64::MAX bo'lganda `i += 1` toshib ketardi —
-    // endi oxirgi elementdan keyin to'xtaydi.
+    // Issue #89: when the range end was i64::MAX, `i += 1` used to overflow —
+    // now it stops after the last element.
     #[test]
     fn range_i64_max_chegarasida_toxtaydi() {
         run(r#"
 m = 9223372036854775806
 r = m..(m + 1)
-(r.len == 2) | (fail "range uzunligi noto'g'ri: ${r.len}")
+(r.len == 2) | (fail "range length wrong: ${r.len}")
 "#);
     }
 
@@ -840,122 +833,126 @@ each i in 0..10
 "#);
     }
 
-    // Issue #99: `..` arifmetikadan PAST, lekin pipe/taqqoslashdan YUQORI
-    // bog'lanadi. `1..n+1` = `1..(n+1)` (AI uchun tabiiy), avval `(1..n)+1`
-    // bo'lib runtime xato berardi. Pipe esa butun range'ni o'raydi.
+    // Issue #99: `..` binds LOWER than arithmetic, but HIGHER than pipe/comparison.
+    // `1..n+1` = `1..(n+1)` (natural for AI), it used to be `(1..n)+1` and gave a
+    // runtime error. Pipe, on the other hand, wraps the whole range.
     #[test]
     fn range_ustuvorligi() {
         run(r#"
 n = 3
-# end tomon: +1 butun range'ga emas, faqat n'ga qo'llanadi
-(1..n+1 == [1 2 3 4]) | (fail "1..n+1 noto'g'ri")
-# end tomon: -1
-(0..n-1 == [0 1 2]) | (fail "0..n-1 noto'g'ri")
-# har ikki tomon arifmetika bilan
-(2*1..2+1 == [2 3]) | (fail "2*1..2+1 noto'g'ri")
-# each loop ichida ham xatosiz ishlaydi
+# end side: +1 applies only to n, not the whole range
+(1..n+1 == [1 2 3 4]) | (fail "1..n+1 wrong")
+# end side: -1
+(0..n-1 == [0 1 2]) | (fail "0..n-1 wrong")
+# arithmetic on both sides
+(2*1..2+1 == [2 3]) | (fail "2*1..2+1 wrong")
+# works inside an each loop too, without error
 sum <- 0
 each i in 1..n+1
   sum <- sum + i
-(sum == 10) | (fail "each 1..n+1 yig'indisi noto'g'ri: ${sum}")
+(sum == 10) | (fail "each 1..n+1 sum wrong: ${sum}")
 "#);
     }
 
-    // Issue #99 (review): pipe range'dan PASTROQ bog'lanadi, shuning uchun
-    // `1..3 |> f` = `(1..3) |> f` — qurilgan range f'ga uzatiladi, qavssiz.
+    // Issue #99 (review): pipe binds LOWER than range, so
+    // `1..3 |> f` = `(1..3) |> f` — the built range is passed to f, without parens.
     #[test]
     fn range_pipe_butun_diapazonni_uzatadi() {
         run(r#"
 fn total xs
   xs.reduce 0 \acc x -> acc + x
-# pipe butun range'ga (1..3 = [1 2 3]) qo'llanadi, end tomonga emas
-(1..3 |> total == 6) | (fail "pipe range noto'g'ri")
+# pipe applies to the whole range (1..3 = [1 2 3]), not the end side
+(1..3 |> total == 6) | (fail "pipe range wrong")
 "#);
     }
 
-    // Inline if (ternary ekvivalenti): `if shart a else b` bir qiymat qaytaradi.
-    // Issue #66 — ixcham shartli ifoda (leading-zero formatlash kabi joylar uchun).
+    // Inline if (ternary equivalent): `if cond a else b` returns a single value.
+    // Issue #66 — a compact conditional expression (for places like leading-zero formatting).
     #[test]
     fn inline_if_ifoda() {
         run(r#"
-# Issue'dagi asosiy misol: leading-zero formatlash
+# the main example from the issue: leading-zero formatting
 h = 5
 pad = if h < 10 ("0" + str.str h) else (str.str h)
-(pad == "05") | (fail "inline if qiymat bermadi: ${pad}")
+(pad == "05") | (fail "inline if value did not give: ${pad}")
 
-# shart yolg'on bo'lganda else tarmog'i
+# else branch when the condition is false
 x = 20
 pad2 = if x < 10 ("0" + str.str x) else (str.str x)
-(pad2 == "20") | (fail "else tarmog'i ishlamadi: ${pad2}")
+(pad2 == "20") | (fail "else branch did not work: ${pad2}")
 
-# qavssiz oddiy tarmoqlar
-y = if h > 3 "katta" else "kichik"
-(y == "katta") | (fail "qavssiz tarmoq ishlamadi: ${y}")
+# simple branches without parens
+y = if h > 3 "big" else "small"
+(y == "big") | (fail "branch without parens did not work: ${y}")
 
-# else-if zanjiri (ichma-ich inline if)
-g = if h == 0 "nol" else if h < 0 "manfiy" else "musbat"
-(g == "musbat") | (fail "else-if zanjiri ishlamadi: ${g}")
+# else-if chain (nested inline if)
+g = if h == 0 "zero" else if h < 0 "negative" else "positive"
+(g == "positive") | (fail "else-if chain did not work: ${g}")
 
-# chaqiruvli shart qavs ichida
+# a call as the condition, inside parens
 s = "hi"
-r = if (str.len s) > 0 "to'la" else "bo'sh"
-(r == "to'la") | (fail "qavsli shart ishlamadi: ${r}")
+r = if (str.len s) > 0 "full" else "empty"
+(r == "full") | (fail "parenthesized condition did not work: ${r}")
 
-# katta ifoda ichida ishlatish
+# using it inside a larger expression
 n = 7
 msg = "son " + (if n % 2 == 0 "juft" else "toq")
-(msg == "son toq") | (fail "ichki inline if ishlamadi: ${msg}")
+(msg == "son toq") | (fail "inner inline if did not work: ${msg}")
 "#);
     }
 
-    // rep'ning ixtiyoriy 3-argument headers map'i (issue #16). rep shunchaki
-    // {__resp:true status body headers} map qaytaradi — Fluxon'da kalitlarini
-    // o'qib tekshiramiz (haqiqiy header yozish http_mod testlarida).
+    // rep's optional 3rd-argument headers map (issue #16). rep simply returns a
+    // {__resp:true status body headers} map — we read and check its keys in Fluxon
+    // (actual header writing is in the http_mod tests).
     #[test]
     fn rep_headers_argumenti() {
         run(r#"
-# 2-argument (eski shakl) — headers kaliti yo'q
+# 2-argument (old form) — no headers key
 r = rep 200 {ok:true}
-(r.status == 200) | (fail "rep status buzildi: ${r.status}")
-(r.headers == nil) | (fail "headers'siz rep'da headers kaliti paydo bo'ldi")
+(r.status == 200) | (fail "rep status broke: ${r.status}")
+(r.headers == nil) | (fail "headers key appeared in rep without headers")
 
-# 3-argument — headers map qo'shiladi. Defis o'rniga `_` (map kalitida defis
-# bo'lolmaydi; runtime yozishda `_` → `-` qiladi). O'qish ham `_` bilan.
+# 3-argument — a headers map is added. Use `_` instead of a dash (a map key
+# cannot contain a dash; on write the runtime turns `_` into `-`). Read with `_` too.
 r2 = rep 200 "<h1>Salom</h1>" {content_type:"text/html"}
-(r2.headers.content_type == "text/html") | (fail "headers o'qilmadi")
+(r2.headers.content_type == "text/html") | (fail "headers could not be read")
 
-# body map + alohida headers — to'qnashmaydi
+# body map + separate headers — they do not collide
 r3 = rep 200 {data:1} {set_cookie:"s=abc"}
-(r3.body.data == 1) | (fail "body map buzildi")
-(r3.headers.set_cookie == "s=abc") | (fail "set-cookie o'qilmadi")
+(r3.body.data == 1) | (fail "body map broke")
+(r3.headers.set_cookie == "s=abc") | (fail "set-cookie could not be read")
 "#);
     }
 
-    // 3-argument map bo'lmasa rep aniq xato beradi (jim e'tiborsizlik emas).
+    // If the 3rd argument is not a map, rep gives a clear error (not silent disregard).
     #[test]
     fn rep_headers_nomap_xato() {
         let e = run_source(r#"x = rep 200 "body" "notmap""#).unwrap_err();
-        assert!(e.contains("3-argument headers"), "kutilmagan xato: {}", e);
+        assert!(
+            e.contains("3rd argument must be headers"),
+            "unexpected error: {}",
+            e
+        );
     }
 
-    // Inline shakl qo'shilgach ham blok shakli (chaqiruvli shart bilan) ishlashi
-    // kerak — regressiya tekshiruvi.
+    // Even after the inline form was added, the block form (with a call condition)
+    // must still work — regression check.
     #[test]
     fn blok_if_inline_qoshilgach_ishlaydi() {
         run(r#"
 s = "hi"
-out <- "yo'q"
+out <- "none"
 if str.len s > 0
-  out <- "to'la"
+  out <- "full"
 else
-  out <- "bo'sh"
-(out == "to'la") | (fail "blok if buzildi: ${out}")
+  out <- "empty"
+(out == "full") | (fail "block if broke: ${out}")
 "#);
     }
 
-    // Argumentsiz (nullary) chaqiruv: `f()`. Qavssiz chaqirish argument bilan
-    // aniqlangani uchun 0-arity funksiyani chaqirishning yagona yo'li shu.
-    // `f` (qavssiz) funksiya QIYMATI, `f()` esa CHAQIRUV.
+    // Argument-less (nullary) call: `f()`. Since a paren-free call is defined by its
+    // argument, this is the only way to call a 0-arity function.
+    // `f` (paren-free) is the function VALUE, `f()` is a CALL.
     #[test]
     fn nullary_call() {
         run(r#"
@@ -964,22 +961,22 @@ fn new_id
 
 a = new_id()
 b = new_id()
-(str.len a == 8) | (fail "new_id() chaqirilmadi: ${a}")
-(a != b) | (fail "har chaqiruv yangi qiymat bermadi")
+(str.len a == 8) | (fail "new_id() was not called: ${a}")
+(a != b) | (fail "each call did not give a new value")
 
-# qavssiz: funksiya qiymati (chaqirilmaydi) — boolean truthy
+# paren-free: the function value (not called) — boolean truthy
 f = new_id
-(f != nil) | (fail "qavssiz nom funksiya qiymati bo'lishi kerak")
+(f != nil) | (fail "bare name should be a function value")
 
-# lambda nullary
+# nullary lambda
 g = \->
   ret 42
-(g() == 42) | (fail "lambda nullary chaqiruv ishlamadi: ${g()}")
+(g() == 42) | (fail "lambda nullary call did not work: ${g()}")
 "#);
     }
 
-    // Argumentsiz rekursiya: `tick()` o'zini chaqiradi. Ilgari dummy argument
-    // (`tick n`) kiritishga majbur edik — endi shart emas.
+    // Argument-less recursion: `tick()` calls itself. We used to be forced to add a
+    // dummy argument (`tick n`) — now it is not required.
     #[test]
     fn nullary_recursion() {
         run(r#"
@@ -989,12 +986,12 @@ fn tick
   if n < 3
     tick()
   ret n
-(tick() == 3) | (fail "nullary rekursiya ishlamadi: ${n}")
+(tick() == 3) | (fail "nullary recursion did not work: ${n}")
 "#);
     }
 
-    // `f(x)` (argument bilan qavsli chaqiruv) RAD ETILADI — canonical shakl `f x`.
-    // Bo'sh `()` faqat nullary uchun; bir ish = bir yo'l.
+    // `f(x)` (a parenthesized call with an argument) is REJECTED — the canonical form is `f x`.
+    // Empty `()` is only for nullary; one task = one way.
     #[test]
     fn paren_call_with_arg_errors() {
         let err = run_source(
@@ -1004,8 +1001,8 @@ fn g x
 g(5)
 "#,
         )
-        .expect_err("f(x) qavsli argument xato berishi kerak");
-        assert!(err.contains("argumentsiz"), "kutilmagan xato: {}", err);
+        .expect_err("f(x) with parenthesized argument should error");
+        assert!(err.contains("argument-less"), "unexpected error: {}", err);
     }
 
     #[test]
@@ -1019,61 +1016,62 @@ log "evens=${evens} doubled=${doubled} total=${total}"
 "#);
     }
 
-    // list.index pozitsiya beradi (topilmasa -1), list.find predikatga mos
-    // birinchi elementni (topilmasa nil). has bool, index pozitsiya — juftlik.
+    // list.index gives the position (-1 if not found), list.find gives the first
+    // element matching the predicate (nil if not found). has is bool, index is the
+    // position — a pair.
     #[test]
     fn list_index_and_find() {
         run(r#"
 names = ["catalog_manager" "order_extractor" "billing"]
-(names.index "order_extractor" == 1) | (fail "index topmadi: ${names.index "order_extractor"}")
-(names.index "yoq" == -1) | (fail "yo'q element -1 bermadi")
+(names.index "order_extractor" == 1) | (fail "index did not find: ${names.index "order_extractor"}")
+(names.index "yoq" == -1) | (fail "none element -1 did not give")
 
 nums = [3 1 4 1 5 9]
 (nums.index 4 == 2) | (fail "int index: ${nums.index 4}")
 
-# find: predikatga mos birinchi element
+# find: the first element matching the predicate
 big = nums.find \x -> x > 4
-(big == 5) | (fail "find mos elementni bermadi: ${big}")
+(big == 5) | (fail "find did not return the matching element: ${big}")
 none = nums.find \x -> x > 99
-(none == nil) | (fail "find topmaganda nil bermadi: ${none}")
+(none == nil) | (fail "find should return nil when nothing matches: ${none}")
 
-# index'ni solishtirish uchun ishlatish (issue manbasi: blok tartibi)
+# using index for comparison (issue source: block order)
 a = names.index "catalog_manager"
 b = names.index "billing"
-(a < b) | (fail "indeks solishtirish ishlamadi: ${a} ${b}")
+(a < b) | (fail "index comparison did not work: ${a} ${b}")
 "#);
     }
 
-    // Issue #127: list.sort — argumentsiz tabiiy tartib (son/matn), komparator
-    // bilan ixtiyoriy tartib. Asl list o'zgarmaydi (immutable qiymatlar).
+    // Issue #127: list.sort — natural order without an argument (number/string),
+    // arbitrary order with a comparator. The original list is unchanged (immutable values).
     #[test]
     fn list_sort() {
         run(r#"
 nums = [3 1 4 1 5]
 s = nums.sort
-(s == [1 1 3 4 5]) | (fail "tabiiy sort: ${s}")
-(nums == [3 1 4 1 5]) | (fail "sort asl list'ni o'zgartirdi: ${nums}")
+(s == [1 1 3 4 5]) | (fail "natural sort: ${s}")
+(nums == [3 1 4 1 5]) | (fail "sort modified the original list: ${nums}")
 
-# komparator: son qaytaradi (manfiy: a oldin) — kamayish tartibi
+# comparator: returns a number (negative: a first) — descending order
 d = nums.sort \a b -> b - a
-(d == [5 4 3 1 1]) | (fail "komparator sort: ${d}")
+(d == [5 4 3 1 1]) | (fail "comparator sort: ${d}")
 
-# matnlar leksikografik
+# strings sort lexicographically
 names = ["banan" "olma" "anor"].sort
 (names == ["anor" "banan" "olma"]) | (fail "str sort: ${names}")
 
-# int/flt aralash son tartibi
+# mixed int/flt numeric order
 mixed = [2 1.5 1].sort
-(mixed == [1 1.5 2]) | (fail "aralash son sort: ${mixed}")
+(mixed == [1 1.5 2]) | (fail "mixed number sort: ${mixed}")
 
-# chekka holatlar
-([].sort == []) | (fail "bo'sh list sort")
-([7].sort == [7]) | (fail "bitta element sort")
+# edge cases
+([].sort == []) | (fail "empty list sort")
+([7].sort == [7]) | (fail "single element sort")
 "#);
     }
 
-    // Issue #127: komparatorli sort stable — teng elementlar asl tartibda qoladi
-    // (bir nechta manbadan yig'ilgan map-yozuvlarni maydon bo'yicha saralash).
+    // Issue #127: sort with a comparator is stable — equal elements keep their
+    // original order (sorting map records gathered from several sources by a field).
     #[test]
     fn list_sort_stable_va_maplar() {
         run(r#"
@@ -1084,84 +1082,88 @@ ns = sorted.map \x -> x.n
 "#);
     }
 
-    // Issue #127: sort xato yo'llari — aralash tiplar komparatorsiz, komparator
-    // son qaytarmasa, zip argumenti list bo'lmasa.
+    // Issue #127: sort error paths — mixed types without a comparator, a comparator
+    // that does not return a number, a zip argument that is not a list.
     #[test]
     fn list_sort_zip_xatolari() {
         let e = run_source(r#"x = [1 "a"].sort"#).unwrap_err();
-        assert!(e.contains("taqqoslab bo'lmaydi"), "kutilmagan xato: {}", e);
+        assert!(e.contains("cannot compare"), "unexpected error: {}", e);
 
         let e = run_source(r#"x = [1 2].sort \a b -> "x""#).unwrap_err();
-        assert!(e.contains("son qaytarishi kerak"), "kutilmagan xato: {}", e);
+        assert!(
+            e.contains("must return a number"),
+            "unexpected error: {}",
+            e
+        );
 
         let e = run_source("x = [1 2].zip 5").unwrap_err();
-        assert!(e.contains("list bo'lishi kerak"), "kutilmagan xato: {}", e);
+        assert!(e.contains("must be a list"), "unexpected error: {}", e);
     }
 
-    // Issue #127: reverse/uniq/flat/zip — sof list metodlari.
+    // Issue #127: reverse/uniq/flat/zip — pure list methods.
     #[test]
     fn list_reverse_uniq_flat_zip() {
         run(r#"
-([1 2 3].reverse == [3 2 1]) | (fail "reverse ishlamadi")
-([1 2 1 3 2].uniq == [1 2 3]) | (fail "uniq ishlamadi")
+([1 2 3].reverse == [3 2 1]) | (fail "reverse did not work")
+([1 2 1 3 2].uniq == [1 2 3]) | (fail "uniq did not work")
 
-# flat bir daraja tekislaydi; list bo'lmagan element o'z holicha qoladi
-([[1 2] [3] 4].flat == [1 2 3 4]) | (fail "flat ishlamadi")
+# flat flattens one level; a non-list element stays as-is
+([[1 2] [3] 4].flat == [1 2 3 4]) | (fail "flat did not work")
 
-# zip qisqasi tugaganda to'xtaydi
+# zip stops when the shorter one runs out
 z = [1 2 3].zip ["a" "b"]
-(z == [[1 "a"] [2 "b"]]) | (fail "zip ishlamadi: ${z}")
+(z == [[1 "a"] [2 "b"]]) | (fail "zip did not work: ${z}")
 "#);
     }
 
-    // Issue #127: any/all predikat metodlari — filter+len aylanma yo'l o'rniga.
+    // Issue #127: any/all predicate methods — instead of the filter+len workaround.
     #[test]
     fn list_any_all() {
         run(r#"
 nums = [1 2 3]
 a1 = nums.any \x -> x > 2
-a1 | (fail "any mos elementda true bermadi")
+a1 | (fail "any did not return true on a match")
 a2 = nums.any \x -> x > 9
-(a2 == false) | (fail "any mos kelmasa false bermadi")
+(a2 == false) | (fail "any did not return false without a match")
 
 b1 = nums.all \x -> x > 0
-b1 | (fail "all hammasi mosda true bermadi")
+b1 | (fail "all did not return true when all match")
 b2 = nums.all \x -> x > 1
-(b2 == false) | (fail "all nomos elementda false bermadi")
+(b2 == false) | (fail "all did not return false on a mismatch")
 
-# bo'sh list: any false, all true (vacuous)
+# empty list: any false, all true (vacuous)
 e1 = [].any \x -> x
-(e1 == false) | (fail "bo'sh any false emas")
+(e1 == false) | (fail "empty any false not")
 e2 = [].all \x -> x
-e2 | (fail "bo'sh all true emas")
+e2 | (fail "empty all true not")
 "#);
     }
 
-    // Hisoblangan indeks: `xs.(ifoda)` va `xs[ifoda]` ikkalasi ham ishlashi kerak.
-    // Issue #64 — pagination/oxirgi element olish uchun literal emas, ifoda-indeks.
+    // Computed index: both `xs.(expr)` and `xs[expr]` must work.
+    // Issue #64 — an expression index, not a literal, for pagination/getting the last element.
     #[test]
     fn hisoblangan_indeks() {
         run(r#"
 xs = ["a" "b" "c"]
 i = xs.len - 1
 
-# .(ifoda) shakli — oxirgi elementni hisoblangan indeks bilan ol
+# .(expr) form — get the last element with a computed index
 last = xs.(i)
-(last == "c") | (fail ".(i) oxirgi elementni bermadi: ${last}")
+(last == "c") | (fail ".(i) oxirgi elementni did not give: ${last}")
 
-# ichida to'liq ifoda
-(xs.(xs.len - 1) == "c") | (fail "xs.(xs.len - 1) ishlamadi")
+# a full expression inside
+(xs.(xs.len - 1) == "c") | (fail "xs.(xs.len - 1) did not work")
 
-# bracket shakli ham bir xil natija beradi
-(xs[i] == "c") | (fail "xs[i] ishlamadi")
+# the bracket form gives the same result
+(xs[i] == "c") | (fail "xs[i] did not work")
 
-# map'ni hisoblangan kalit (str) bilan indekslash
+# indexing a map with a computed key (str)
 m = {name: "Ali" age: 30}
 k = "name"
-(m.(k) == "Ali") | (fail "m.(k) ishlamadi: ${m.(k)}")
+(m.(k) == "Ali") | (fail "m.(k) did not work: ${m.(k)}")
 
-# chegaradan tashqari -> nil (mavjud get_index xulqi)
-(xs.(99) == nil) | (fail "chegaradan tashqari indeks nil bermadi")
+# out of bounds -> nil (existing get_index behavior)
+(xs.(99) == nil) | (fail "chegaradan tashqari indeks nil did not give")
 "#);
     }
 
@@ -1174,74 +1176,73 @@ log "keys=${u.keys} hasName=${u.has "name"} age=${u2.age}"
 "#);
     }
 
-    // Issue #129: m.merge other — ikki map'ni birlashtirish (other ustun keladi).
+    // Issue #129: m.merge other — merges two maps (other wins).
     #[test]
     fn map_merge() {
         run(r#"
-# asosiy naqsh: default config + foydalanuvchi override'i
+# the main pattern: default config + user override
 defaults = {host:"localhost" port:8080 debug:false}
 user = {port:3000 debug:true}
 cfg = defaults.merge user
 
-# other'dagi kalitlar ustun keladi
-(cfg.port == 3000) | (fail "merge: other kaliti ustun kelmadi: ${cfg.port}")
-(cfg.debug == true) | (fail "merge: debug override bo'lmadi")
-# other'da yo'q kalit asl qiymatda qoladi
-(cfg.host == "localhost") | (fail "merge: host yo'qoldi: ${cfg.host}")
-(cfg.len == 3) | (fail "merge: kalitlar soni noto'g'ri: ${cfg.len}")
+# keys from other win
+(cfg.port == 3000) | (fail "merge: other key did not win: ${cfg.port}")
+(cfg.debug == true) | (fail "merge: debug override did not happen")
+# a key not present in other keeps its original value
+(cfg.host == "localhost") | (fail "merge: host lost: ${cfg.host}")
+(cfg.len == 3) | (fail "merge: key count wrong: ${cfg.len}")
 
-# asl map'lar o'zgarmaydi (set/del bilan izchil — yangi map qaytadi)
-(defaults.port == 8080) | (fail "merge: asl map o'zgarib ketdi")
-((user.has "host") == false) | (fail "merge: other map o'zgarib ketdi")
+# the original maps are unchanged (consistent with set/del — a new map is returned)
+(defaults.port == 8080) | (fail "merge: original map changed")
+((user.has "host") == false) | (fail "merge: other map changed")
 
-# bo'sh map bilan merge — o'zini qaytaradi
-((defaults.merge {}).len == 3) | (fail "merge: bo'sh map bilan buzildi")
-(({}.merge defaults).port == 8080) | (fail "merge: bo'sh map'dan merge buzildi")
+# merge with an empty map — returns itself
+((defaults.merge {}).len == 3) | (fail "merge: with empty map broke")
+(({}.merge defaults).port == 8080) | (fail "merge: merge from empty map broke")
 "#);
     }
 
-    // map.merge map bo'lmagan argument bilan tushunarli xato qaytaradi.
+    // map.merge with a non-map argument returns an understandable error.
     #[test]
     fn map_merge_notogri_argument() {
         let e = run_source(r#"({a:1}).merge 42"#).unwrap_err();
-        assert!(e.contains("map.merge"), "kutilmagan xato matni: {}", e);
+        assert!(e.contains("map.merge"), "unexpected error text: {}", e);
     }
 
-    // Schema map qiymat pozitsiyasidagi bare tip nomi (`{a:str b:int}`) sym'ga
-    // aylanadi — docs (`ai.json {product:str qty:int}`) va'da qilgani. `str` ham
-    // modul nomi bo'lgani uchun ilgari "noma'lum nom: str" xatosini berardi.
+    // A bare type name in a schema map's value position (`{a:str b:int}`) turns into
+    // a sym — as the docs promise (`ai.json {product:str qty:int}`). Because `str` is
+    // also a module name, it used to give an "unknown name: str" error.
     #[test]
     fn schema_bare_type_names() {
         run(r#"
 schema = {product:str qty:int price:flt active:bool data:json tag:sym}
-(schema.product == :str) | (fail "product :str emas: ${schema.product}")
-(schema.qty == :int) | (fail "qty :int emas: ${schema.qty}")
-(schema.price == :flt) | (fail "price :flt emas")
-(schema.active == :bool) | (fail "active :bool emas")
-(schema.data == :json) | (fail "data :json emas")
-(schema.tag == :sym) | (fail "tag :sym emas")
+(schema.product == :str) | (fail "product :str not: ${schema.product}")
+(schema.qty == :int) | (fail "qty :int not: ${schema.qty}")
+(schema.price == :flt) | (fail "price :flt not")
+(schema.active == :bool) | (fail "active :bool not")
+(schema.data == :json) | (fail "data :json not")
+(schema.tag == :sym) | (fail "tag :sym not")
 
-# nested list ichidagi map ham ishlasin (`{items:[{product:str qty:int}]}`)
+# a map inside a nested list should work too (`{items:[{product:str qty:int}]}`)
 nested = {items:[{product:str qty:int}]}
 row = nested.items.0
-(row.product == :str) | (fail "nested product :str emas")
-(row.qty == :int) | (fail "nested qty :int emas")
+(row.product == :str) | (fail "nested product :str not")
+(row.qty == :int) | (fail "nested qty :int not")
 
-# regressiya: tip nomi BO'LMAGAN ident hamon o'zgaruvchi sifatida qidiriladi
+# regression: an ident that is NOT a type name is still resolved as a variable
 x = 5
 m = {n:x}
-(m.n == 5) | (fail "oddiy o'zgaruvchi qiymat buzildi: ${m.n}")
+(m.n == 5) | (fail "oddiy variable value broke: ${m.n}")
 
-# regressiya: str modul-chaqiruvi qiymat sifatida buzilmadi
-up = str.up "salom"
-(up == "SALOM") | (fail "str.up buzildi: ${up}")
+# regression: a str module call as a value is not broken
+up = str.up "hello"
+(up == "HELLO") | (fail "str.up broke: ${up}")
 "#);
     }
 
-    // Issue #98 — ichma-ich raqamli indeks `m.0.1`. Lexer ilgari `.1` ni
-    // ochko'zlik bilan `Flt(0.1)` deb yutardi (oldin `.` member konteksti
-    // borligini bilmasdan). Endi member-indeksdan keyingi son float
-    // boshlamaydi: `m.0.1` ≡ `(m.0).1`.
+    // Issue #98 — nested numeric index `m.0.1`. The lexer used to greedily swallow
+    // `.1` as `Flt(0.1)` (not knowing it was in a `.` member context). Now a number
+    // after a member index does not start a float: `m.0.1` ≡ `(m.0).1`.
     #[test]
     fn nested_numeric_index() {
         run(r#"
@@ -1249,14 +1250,14 @@ m = [[1 2] [3 4]]
 (m.0.1 == 2) | (fail "m.0.1 != 2: ${m.0.1}")
 (m.1.0 == 3) | (fail "m.1.0 != 3: ${m.1.0}")
 
-# uch darajali ichma-ich indeks ham
+# three-level nested index too
 deep = [[[7 8]]]
 (deep.0.0.1 == 8) | (fail "deep.0.0.1 != 8: ${deep.0.0.1}")
 
-# regressiya: oddiy float literallar buzilmadi
-(0.5 + 0.5 == 1.0) | (fail "float literal buzildi")
+# regression: ordinary float literals are not broken
+(0.5 + 0.5 == 1.0) | (fail "float literal broke")
 fs = [0.5 1.5]
-(fs.1 == 1.5) | (fail "float element buzildi: ${fs.1}")
+(fs.1 == 1.5) | (fail "float element broke: ${fs.1}")
 "#);
     }
 
@@ -1270,10 +1271,10 @@ log "total=${total}"
 "#);
     }
 
-    // if/each/match bloklari leksik jihatdan SHAFFOF: ichidagi `=` tashqi (bir xil
-    // fn'dagi) o'zgaruvchini yangilaydi — boshqa tillar kabi, klon olinmaydi. Bu
-    // accumulator pattern'ni tabiiy qiladi (avval blok ichida `=` jim yangi local
-    // yaratardi → tashqi nil qolardi).
+    // if/each/match blocks are lexically TRANSPARENT: an inner `=` updates the outer
+    // (same-fn) variable — like other languages, no clone is taken. This makes the
+    // accumulator pattern natural (before, an `=` inside a block silently created a
+    // new local -> the outer stayed nil).
     #[test]
     fn bind_in_block_updates_outer() {
         run(r#"
@@ -1283,13 +1284,13 @@ each e in [{n:"a" v:3} {n:"b" v:7} {n:"c" v:2}]
   if e.v > top
     top = e.v
     best = e
-(top == 7) | (fail "top noto'g'ri: ${top}")
-(best.n == "b") | (fail "best noto'g'ri: ${best.n}")
+(top == 7) | (fail "top wrong: ${top}")
+(best.n == "b") | (fail "best wrong: ${best.n}")
 "#);
     }
 
-    // Immutability saqlanadi: tashqi `=` (immutable) o'zgaruvchini blok ichidan
-    // `=` bilan ham qayta tayinlab bo'lmaydi (aniq xato — jim shadow EMAS).
+    // Immutability is preserved: an outer `=` (immutable) variable cannot be
+    // reassigned with `=` from inside a block either (a clear error — NOT a silent shadow).
     #[test]
     fn bind_in_block_immutable_errors() {
         let err = run_source(
@@ -1299,12 +1300,12 @@ if true
   x = 20
 "#,
         )
-        .expect_err("immutable'ni blok ichida = bilan yangilash xato berishi kerak");
-        assert!(err.contains("o'zgarmas"), "kutilmagan xato: {}", err);
+        .expect_err("updating an immutable with = inside a block should error");
+        assert!(err.contains("is immutable"), "unexpected error: {}", err);
     }
 
-    // fn/lambda CHEGARA: ichidagi `=` tashqi o'zgaruvchini emas, yangi LOCAL
-    // yaratadi (shadowing/izolyatsiya). Tashqi qiymat o'zgarmaydi.
+    // fn/lambda BOUNDARY: an inner `=` creates a new LOCAL, not the outer variable
+    // (shadowing/isolation). The outer value is unchanged.
     #[test]
     fn bind_in_fn_shadows_not_mutates() {
         run(r#"
@@ -1312,13 +1313,13 @@ x = 100
 f = \n ->
   x = 5
   x + n
-(f 1 == 6) | (fail "fn local x ishlamadi")
-(x == 100) | (fail "fn ichidagi = tashqi x ni o'zgartirdi: ${x}")
+(f 1 == 6) | (fail "fn local x did not work")
+(x == 100) | (fail "= inside fn changed outer x: ${x}")
 "#);
     }
 
-    // `<-` (assign) esa fn chegarasidan O'TADI — closure capture saqlanadi
-    // (`=` chegarada to'xtaydi, `<-` to'xtamaydi: ikkalasining aniq farqi).
+    // `<-` (assign), however, CROSSES the fn boundary — closure capture is preserved
+    // (`=` stops at the boundary, `<-` does not: the clear difference between them).
     #[test]
     fn assign_crosses_fn_boundary_capture() {
         run(r#"
@@ -1327,7 +1328,7 @@ inc = \n ->
   counter <- counter + n
 inc 5
 inc 3
-(counter == 8) | (fail "closure capture ishlamadi: ${counter}")
+(counter == 8) | (fail "closure capture did not work: ${counter}")
 "#);
     }
 
@@ -1336,9 +1337,9 @@ inc 3
         run(r#"
 fn label s
   match s
-    :new -> "yangi"
-    :done -> "tugadi"
-    _ -> "boshqa"
+    :new -> "new"
+    :done -> "done"
+    _ -> "other"
 
 log (label :new)
 log (label :x)
@@ -1356,62 +1357,62 @@ log "parts=${parts} joined=${parts.join "-"}"
 "#);
     }
 
-    // Issue #126: str.trim/replace/starts/ends/pad/repeat — har real loyihada
-    // birinchi kunda kerak bo'ladigan str funksiyalari.
+    // Issue #126: str.trim/replace/starts/ends/pad/repeat — the str functions every
+    // real project needs on day one.
     #[test]
     fn str_trim_replace_starts_ends_pad_repeat() {
         run(r#"
-(str.trim "  salom  " == "salom") | (fail "str.trim")
-(str.trim "salom" == "salom") | (fail "str.trim o'zgarmas")
+(str.trim "  hello  " == "hello") | (fail "str.trim")
+(str.trim "hello" == "hello") | (fail "str.trim unchanged")
 (str.replace "a-b-c" "-" "+" == "a+b+c") | (fail "str.replace")
-(str.replace "abc" "x" "y" == "abc") | (fail "str.replace topilmadi")
-(str.replace "abc" "" "y" == "abc") | (fail "str.replace bo'sh pattern")
+(str.replace "abc" "x" "y" == "abc") | (fail "str.replace not found")
+(str.replace "abc" "" "y" == "abc") | (fail "str.replace empty pattern")
 (str.starts "/api/users" "/api") | (fail "str.starts true")
 ((str.starts "/api" "/web") == false) | (fail "str.starts false")
 (str.ends "file.fx" ".fx") | (fail "str.ends true")
 ((str.ends "file.fx" ".rs") == false) | (fail "str.ends false")
 (str.pad "7" 3 "0" == "007") | (fail "str.pad")
-(str.pad "1234" 3 "0" == "1234") | (fail "str.pad uzun o'zgarmas")
-(str.pad "ab" 4 " " == "  ab") | (fail "str.pad bo'shliq")
+(str.pad "1234" 3 "0" == "1234") | (fail "str.pad long unchanged")
+(str.pad "ab" 4 " " == "  ab") | (fail "str.pad whitespace")
 (str.repeat "ab" 3 == "ababab") | (fail "str.repeat")
-(str.repeat "ab" 0 == "") | (fail "str.repeat nol")
+(str.repeat "ab" 0 == "") | (fail "str.repeat zero")
 "#);
     }
 
-    // str.repeat manfiy son va str.pad bo'sh to'ldiruvchi — aniq xato (jim
-    // noto'g'ri natija emas).
+    // str.repeat with a negative number and str.pad with an empty filler — a clear
+    // error (not a silent wrong result).
     #[test]
     fn str_repeat_negative_and_pad_empty_fail() {
         assert!(run_source(r#"str.repeat "a" (0 - 1)"#).is_err());
         assert!(run_source(r#"str.pad "a" 3 """#).is_err());
-        // Baytlar usize'ga sig'sa ham isize::MAX (allokatsiya chegarasi) dan
-        // oshsa — panic emas, Fluxon xatosi (PR #151 review).
+        // Even if the bytes fit in usize, exceeding isize::MAX (the allocation limit)
+        // gives a Fluxon error, not a panic (PR #151 review).
         assert!(run_source(r#"str.repeat "aa" 4611686018427387904"#).is_err());
         assert!(run_source(r#"str.pad "x" 4611686018427387904 "🙂""#).is_err());
     }
 
     #[test]
     fn time_module_fmt_and_roundtrip() {
-        // time.fmt unix int bilan deterministik: 1700000000 = 2023-11-14 22:13:20 UTC.
-        // time.now/time.ago matn formatini ("YYYY-MM-DD HH:MM:SS") tekshiramiz va
-        // fmt orqali round-trip qilamiz.
+        // time.fmt is deterministic with a unix int: 1700000000 = 2023-11-14 22:13:20 UTC.
+        // We check the time.now/time.ago text format ("YYYY-MM-DD HH:MM:SS") and
+        // round-trip it through fmt.
         run(r#"
 d = time.fmt 1700000000 "YYYY-MM-DD"
-(d == "2023-11-14") | (fail "fmt sana noto'g'ri: ${d}")
+(d == "2023-11-14") | (fail "fmt sana wrong: ${d}")
 t = time.fmt 1700000000 "HH:mm:ss"
-(t == "22:13:20") | (fail "fmt vaqt noto'g'ri: ${t}")
+(t == "22:13:20") | (fail "fmt vaqt wrong: ${t}")
 n = time.now
-(str.len n == 19) | (fail "time.now uzunligi 19 emas: ${n}")
+(str.len n == 19) | (fail "time.now uzunligi 19 not: ${n}")
 back = time.fmt n "YYYY"
-(str.len back == 4) | (fail "time.now -> fmt yil 4 raqam emas")
+(str.len back == 4) | (fail "time.now -> fmt yil 4 raqam not")
 "#);
     }
 
     #[test]
     fn time_ago_is_earlier() {
-        // time.ago hozirdan oldin: ISO matn format leksikografik = xronologik,
-        // shuning uchun DB filtri (`created > $1`) SQL'da to'g'ri ishlaydi. Bu
-        // yerda yil/oy/kun bo'laklarini taqqoslab xronologik tartibni isbotlaymiz.
+        // time.ago is before now: the ISO text format is lexicographic = chronological,
+        // so a DB filter (`created > $1`) works correctly in SQL. Here we prove the
+        // chronological order by comparing the year/month/day parts.
         run(r#"
 now = time.now
 past = time.ago 1 :day
@@ -1423,38 +1424,38 @@ py = str.int (time.fmt past "YYYYMMDDHHmmss")
 
     #[test]
     fn time_in_is_later() {
-        // time.in hozirdan keyin (TTL/expiry uchun). time.ago ning ko'zgusi:
-        // ISO matn leksikografik = xronologik, shuning uchun `expires > $now`
-        // SQL filtri to'g'ri ishlaydi. Yil/oy/...sek bo'laklarini taqqoslaymiz.
+        // time.in is after now (for TTL/expiry). The mirror of time.ago:
+        // ISO text is lexicographic = chronological, so the `expires > $now`
+        // SQL filter works correctly. We compare the year/month/.../sec parts.
         run(r#"
 now = time.now
 soon = time.in 1 :hr
 ny = str.int (time.fmt now "YYYYMMDDHHmmss")
 sy = str.int (time.fmt soon "YYYYMMDDHHmmss")
-(sy > ny) | (fail "time.in o'tmishda: soon=${soon} now=${now}")
+(sy > ny) | (fail "time.in in the past: soon=${soon} now=${now}")
 "#);
     }
 
     #[test]
     fn time_parse_add_diff_booking_flow() {
-        // Issue #65: mijoz ISO `start_at` va `duration_minutes` beradi ->
-        // server `end_at` ni hisoblaydi. Booking yadrosining e2e ssenariysi.
+        // Issue #65: the client gives an ISO `start_at` and `duration_minutes` ->
+        // the server computes `end_at`. The e2e scenario of the booking core.
         run(r#"
 start_at = time.parse "2026-06-10T10:00:00Z"
-(start_at == "2026-06-10 10:00:00") | (fail "parse noto'g'ri: ${start_at}")
+(start_at == "2026-06-10 10:00:00") | (fail "parse wrong: ${start_at}")
 end_at = time.add start_at 30 :min
-(end_at == "2026-06-10 10:30:00") | (fail "add noto'g'ri: ${end_at}")
+(end_at == "2026-06-10 10:30:00") | (fail "add wrong: ${end_at}")
 mins = (time.diff end_at start_at) / 60
-(mins == 30) | (fail "diff noto'g'ri: ${mins}")
-# buffer-inclusive interval: start - 5min (time.sub — add ning ko'zgusi)
+(mins == 30) | (fail "diff wrong: ${mins}")
+# buffer-inclusive interval: start - 5min (time.sub — the mirror of add)
 buf_start = time.sub start_at 5 :min
-(buf_start == "2026-06-10 09:55:00") | (fail "time.sub noto'g'ri: ${buf_start}")
+(buf_start == "2026-06-10 09:55:00") | (fail "time.sub wrong: ${buf_start}")
 "#);
     }
 
     #[test]
     fn time_parse_handles_iso_offset() {
-        // ISO mintaqali matn UTC ga keltiriladi (+05:00 -> vaqt 5 soat oldin).
+        // ISO text with an offset is brought to UTC (+05:00 -> the time is 5 hours earlier).
         run(r#"
 t = time.parse "2026-06-10T15:00:00+05:00"
 (t == "2026-06-10 10:00:00") | (fail "mintaqa UTC ga kelmadi: ${t}")
@@ -1463,26 +1464,26 @@ t = time.parse "2026-06-10T15:00:00+05:00"
 
     #[test]
     fn time_parse_fmt_iana_zone_dst() {
-        // Issue #80: IANA zona nomi bilan DST-aware konversiya. "09:00 local"
-        // qishda va yozda turli UTC ga tushadi — fiksrlangan offset emas.
+        // Issue #80: DST-aware conversion with an IANA zone name. "09:00 local"
+        // maps to different UTC in winter and summer — not a fixed offset.
         run(r#"
-# Qish (EST = UTC-5): 09:00 local -> 14:00 UTC
+# winter (EST = UTC-5): 09:00 local -> 14:00 UTC
 w = time.parse "2026-01-15 09:00:00" "America/New_York"
-(w == "2026-01-15 14:00:00") | (fail "qish DST noto'g'ri: ${w}")
-# Yoz (EDT = UTC-4): aynan shu wall-clock -> 13:00 UTC
+(w == "2026-01-15 14:00:00") | (fail "winter DST wrong: ${w}")
+# summer (EDT = UTC-4): the exact same wall-clock -> 13:00 UTC
 s = time.parse "2026-07-15 09:00:00" "America/New_York"
-(s == "2026-07-15 13:00:00") | (fail "yoz DST noto'g'ri: ${s}")
-# Teskari yo'l: UTC instant -> zona wall-clock'i (ko'rsatish uchun)
+(s == "2026-07-15 13:00:00") | (fail "summer DST wrong: ${s}")
+# reverse path: UTC instant -> the zone's wall-clock (for display)
 back = time.fmt s "HH:mm" "America/New_York"
-(back == "09:00") | (fail "fmt zona noto'g'ri: ${back}")
+(back == "09:00") | (fail "fmt zone wrong: ${back}")
 "#);
     }
 
     #[test]
     fn keyword_as_field_name() {
-        // `.` dan keyin kalit so'z field nomi bo'la oladi (time.in shu tufayli ishlaydi).
-        // Map kaliti kalit so'z bo'lsa ham `.in`/`.match` bilan o'qiladi — bu Fluxon
-        // falsafasi: member pozitsiyasida kalit so'zning grammatik ma'nosi yo'q.
+        // After `.` a keyword can be a field name (this is why time.in works).
+        // Even if a map key is a keyword, it is read with `.in`/`.match` — this is the
+        // Fluxon philosophy: in member position a keyword has no grammatical meaning.
         run(r#"
 m = {in: 1 match: 2 each: 3}
 (m.in == 1) | (fail "m.in: ${m.in}")
@@ -1493,96 +1494,96 @@ m = {in: 1 match: 2 each: 3}
 
     #[test]
     fn env_member_access() {
-        // env.NOM -> std::env. Yo'q bo'lsa nil -> `??` default. Bor bo'lsa qiymat.
-        // FLUXON_TEST_VAR'ni o'rnatib o'qiymiz (DB_TEST_LOCK kerak emas — boshqa env).
-        unsafe { std::env::set_var("FLUXON_TEST_VAR", "salom") };
+        // env.NAME -> std::env. Missing -> nil -> `??` default. Present -> the value.
+        // We set and read FLUXON_TEST_VAR (no DB_TEST_LOCK needed — a different env var).
+        unsafe { std::env::set_var("FLUXON_TEST_VAR", "hello") };
         run(r#"
 v = env.FLUXON_TEST_VAR
-(v == "salom") | (fail "env o'qish: ${v}")
+(v == "hello") | (fail "env read: ${v}")
 miss = env.FLUXON_NONEXISTENT_XYZ ?? "default"
-(miss == "default") | (fail "yo'q env nil -> default emas: ${miss}")
+(miss == "default") | (fail "missing env nil -> default not: ${miss}")
 "#);
         unsafe { std::env::remove_var("FLUXON_TEST_VAR") };
     }
 
     #[test]
     fn env_shadowed_by_local() {
-        // Foydalanuvchi `env` nomli o'zgaruvchi yaratsa, u built-in env'ni ustun
-        // bosadi (member access map'ga ishlaydi, std::env'ga emas).
+        // If the user creates a variable named `env`, it overrides the built-in env
+        // (member access goes to the map, not to std::env).
         run(r#"
 env = {PORT:"9999"}
 p = env.PORT
-(p == "9999") | (fail "local env shadow ishlamadi: ${p}")
+(p == "9999") | (fail "local env shadow did not work: ${p}")
 "#);
     }
 
     #[test]
     fn json_unicode_roundtrip() {
-        // json.dec ko'p baytli UTF-8 (emoji, o'zbekcha) va \u escape (surrogate
-        // juftligi) ni TO'G'RI dekodlasin — avval bayt-bayt `as char` mojibake
-        // berardi (🙂 -> ð...). Bu yadro tuzatishi http/db/ai hammasiga taalluqli.
+        // json.dec must decode multi-byte UTF-8 (emoji, Uzbek) and \u escapes (surrogate
+        // pairs) CORRECTLY — before, byte-by-byte `as char` gave mojibake
+        // (🙂 -> ð...). This core fix applies to http/db/ai alike.
         run(r#"
-# Xom UTF-8 baytlar (escape'siz): emoji + o'zbekcha — bayt-bayt as char BUZARDI
+# raw UTF-8 bytes (no escapes): emoji + Uzbek — byte-by-byte as char USED TO BREAK
 r = json.dec "{\"s\":\"o'zbek 🙂 g'ayrat\"}"
-(r.s == "o'zbek 🙂 g'ayrat") | (fail "xom UTF-8 buzildi: ${r.s}")
-# \u escape: BMP belgisi (ü = ü). \\u -> manbada literal \u bo'ladi.
+(r.s == "o'zbek 🙂 g'ayrat") | (fail "raw UTF-8 broke: ${r.s}")
+# \u escape: a BMP character (ü = ü). \\u -> a literal \u in the source.
 u = json.dec "{\"c\":\"\\u00fc\"}"
-(u.c == "ü") | (fail "\\u00fc dekod buzildi: ${u.c}")
-# \u surrogate juftligi (🙂 = 🙂)
+(u.c == "ü") | (fail "\\u00fc dekod broke: ${u.c}")
+# \u surrogate pair (🙂 = 🙂)
 e = json.dec "{\"c\":\"\\ud83d\\ude42\"}"
-(e.c == "🙂") | (fail "\\u surrogate juftligi buzildi: ${e.c}")
+(e.c == "🙂") | (fail "\\u surrogate evenligi broke: ${e.c}")
 # enc -> dec round-trip
-back = json.dec (json.enc {x:"salom 🙂 dünyo"})
-(back.x == "salom 🙂 dünyo") | (fail "round-trip buzildi: ${back.x}")
+back = json.dec (json.enc {x:"hello 🙂 dünyo"})
+(back.x == "hello 🙂 dünyo") | (fail "round-trip broke: ${back.x}")
 "#);
     }
 
     #[test]
     fn json_enc_valid_output() {
-        // issue #102: control belgilar escape bo'lsin, non-finite float -> null.
+        // issue #102: control characters must be escaped, non-finite float -> null.
         run(r#"
-# 1/0 = Infinity -> JSON'da "inf" emas, null bo'lishi kerak
+# 1/0 = Infinity -> in JSON it must be null, not "inf"
 enc = json.enc (1.0 / 0.0)
-(enc == "null") | (fail "Infinity null bo'lmadi: ${enc}")
-# tab (control belgi) \t qisqa shaklda escape bo'lib round-trip qilinsin
+(enc == "null") | (fail "Infinity was not null: ${enc}")
+# tab (control char) \t should escape in short form and round-trip
 back = json.dec (json.enc "a\tb")
-(back == "a\tb") | (fail "control belgi round-trip buzildi: ${back}")
+(back == "a\tb") | (fail "control char round-trip broke: ${back}")
 "#);
-        // "1 garbage" -> dekoder xato berishi kerak (avval jim 1 qaytarardi)
+        // "1 garbage" -> the decoder must error (it used to silently return 1)
         assert!(run_source(r#"log (json.dec "1 garbage")"#).is_err());
-        // noto'g'ri null-o'xshash matn xato beradi
+        // an invalid null-like string errors
         assert!(run_source(r#"log (json.dec "nqqq")"#).is_err());
-        // boshida '+' bo'lgan son xato beradi
+        // a number with a leading '+' errors
         assert!(run_source(r#"log (json.dec "+5")"#).is_err());
     }
 
     #[test]
     fn reg_add_call_has_names() {
-        // reg battery: funksiyani nom bilan saqlash/chaqirish (dinamik dispatch).
-        // closure args map oladi (agent tool naqshi); reg.has bool, reg.names list.
+        // reg battery: store/call a function by name (dynamic dispatch).
+        // the closure takes an args map (the agent tool pattern); reg.has bool, reg.names list.
         run(r#"
 reg.add "calc" \args -> args.a + args.b
-reg.add "greet" \args -> "salom ${args.nom}"
+reg.add "greet" \args -> "hello ${args.name}"
 
 out = reg.call "calc" {a:2 b:3}
-(out == 5) | (fail "reg.call calc noto'g'ri: ${out}")
+(out == 5) | (fail "reg.call calc wrong: ${out}")
 
-g = reg.call "greet" {nom:"Aziza"}
-(g == "salom Aziza") | (fail "reg.call greet noto'g'ri: ${g}")
+g = reg.call "greet" {name:"Aziza"}
+(g == "hello Aziza") | (fail "reg.call greet wrong: ${g}")
 
-(reg.has "calc") | (fail "reg.has calc false bo'lmasligi kerak")
-((reg.has "yoq") == false) | (fail "reg.has yoq true bo'lmasligi kerak")
+(reg.has "calc") | (fail "reg.has calc should not be false")
+((reg.has "none") == false) | (fail "reg.has none should not be true")
 
-# reg.names argumentsiz (Field) — alifbo tartibida barqaror chiqish
+# reg.names with no argument (Field) — stable output in alphabetical order
 ns = reg.names
-(ns.len == 2) | (fail "reg.names uzunligi 2 emas: ${ns}")
-(ns.0 == "calc") | (fail "reg.names[0] calc emas: ${ns}")
+(ns.len == 2) | (fail "reg.names uzunligi 2 not: ${ns}")
+(ns.0 == "calc") | (fail "reg.names[0] calc not: ${ns}")
 "#);
     }
 
     #[test]
     fn reg_call_unknown_fails() {
-        // Ro'yxatda yo'q nomni chaqirish fail bo'lishi kerak (jim nil emas).
+        // Calling a name that is not registered must fail (not silently nil).
         let err = run_source(
             r#"
 out = reg.call "yoq" {a:1}
@@ -1591,15 +1592,15 @@ log out
         )
         .unwrap_err();
         assert!(
-            err.contains("ro'yxatda yo'q"),
-            "kutilgan 'ro'yxatda yo'q', topildi: {}",
+            err.contains("not registered"),
+            "expected 'not registered', got: {}",
             err
         );
     }
 
     #[test]
     fn reg_add_overwrites() {
-        // Bir nomga qayta reg.add — ustiga yozadi (tool yangilash holati).
+        // A repeat reg.add to the same name — overwrites (the tool-update case).
         run(r#"
 reg.add "f" \args -> 1
 reg.add "f" \args -> 2
@@ -1610,18 +1611,18 @@ out = reg.call "f" {}
 
     #[test]
     fn fail_as_expr_and_guard() {
-        // fail ifoda kontekstida (guard) — oqimni uzadi, yuqoriga ko'tariladi.
+        // fail in an expression context (guard) — breaks the flow, propagates upward.
         let err = run_source(
             r#"
 fn check x
-  x > 0 | (fail 422 "musbat bo'lishi kerak")
+  x > 0 | (fail 422 "must be positive")
   "ok"
 log (check 5)
 log (check 0)
 "#,
         )
         .unwrap_err();
-        assert!(err.contains("422"), "kutilgan 422, topildi: {}", err);
+        assert!(err.contains("422"), "expected 422, got: {}", err);
     }
 
     #[test]
@@ -1632,71 +1633,71 @@ fn sq x -> x * x
 r = 3 |> inc |> sq
 log "r=${r}"
 m = {a:1}
-log "missing=${m.b ?? "yo'q"}"
+log "missing=${m.b ?? "none"}"
 "#);
     }
 
-    // Ko'p-qatorli pipe: qator `|>` bilan boshlansa, oldingi ifoda davomi
-    // (builder zanjiri o'qiluvchanligi, issue #78). Faqat `|>` — `|` (Or) emas.
+    // Multi-line pipe: if a line starts with `|>`, it continues the previous
+    // expression (builder-chain readability, issue #78). Only `|>` — not `|` (Or).
     #[test]
     fn multiline_pipe_continuation() {
         run(r#"
 fn inc x -> x + 1
 fn dbl x -> x * 2
-# bosqichlar yangi qatorda, leading |>
+# stages on new lines, leading |>
 r = 5
   |> inc
   |> dbl
   |> inc
-(r == 13) | (fail "ko'p-qatorli pipe noto'g'ri: ${r}")
-# izoh va bo'sh qator orasida ham davom etadi
+(r == 13) | (fail "multi-line pipe wrong: ${r}")
+# continues across a comment and a blank line too
 r2 = 10
   |> inc
 
-  # bu yerda izoh
+  # a comment here
   |> dbl
-(r2 == 22) | (fail "izoh/bo'sh qator orqali pipe davomi buzildi: ${r2}")
+(r2 == 22) | (fail "pipe continuation through comment/empty line broke: ${r2}")
 "#);
     }
 
-    // Pipe qisman chaqiruv: `x |> f a b` => `f a b x` (lhs OXIRGI argument).
-    // Builder/chain naqshini ishlatadi. Argumentsiz funksiya qiymati va
-    // argumentsiz modul chaqiruvi (`|> str.up`) eski xulqni saqlaydi.
+    // Pipe partial application: `x |> f a b` => `f a b x` (lhs is the LAST argument).
+    // Drives the builder/chain pattern. An argument-less function value and an
+    // argument-less module call (`|> str.up`) keep the old behavior.
     #[test]
     fn pipe_partial_application() {
         run(r#"
 fn addto base n -> base + n
-# argumentli chaqiruv: lhs oxirgi argument bo'lib qo'shiladi
-(5 |> addto 100) == 105 | (fail "pipe argumentli chaqiruv ishlamadi")
-# zanjir
-(3 |> addto 10 |> addto 100) == 113 | (fail "pipe zanjir ishlamadi")
-# argumentsiz modul chaqiruvi (eski xulq saqlanishi kerak)
-("hello" |> str.up) == "HELLO" | (fail "pipe argumentsiz modul chaqiruvi buzildi")
-# lambda (eski xulq)
-(5 |> \n -> n * 2) == 10 | (fail "pipe lambda buzildi")
+# call with arguments: lhs is appended as the last argument
+(5 |> addto 100) == 105 | (fail "pipe call with arguments did not work")
+# chain
+(3 |> addto 10 |> addto 100) == 113 | (fail "pipe zanjir did not work")
+# argument-less module call (old behavior must be preserved)
+("hello" |> str.up) == "HELLO" | (fail "pipe argumentsiz modul chaqiruvi broke")
+# lambda (old behavior)
+(5 |> \n -> n * 2) == 10 | (fail "pipe lambda broke")
 "#);
     }
 
-    // --- db battery testlari (in-memory SQLite, har Interp alohida DB) ---
+    // --- db battery tests (in-memory SQLite, a separate DB per Interp) ---
 
-    // DATABASE_URL global env — uni o'rnatib darhol run qilish race bo'lmasligi
-    // uchun db testlarini global mutex bilan SERIALIZATSIYA qilamiz. Guard
-    // ushlangan paytda boshqa db testi env'ni o'zgartirmaydi. Har test ALOHIDA
-    // nomlangan shared-cache memory DB ishlatadi (pool bir nechta connection
-    // ochadi → shared-cache kerak; unikal nom → testlar bir-birini ko'rmaydi).
+    // DATABASE_URL is a global env var — to avoid a race between setting it and
+    // immediately running, we SERIALIZE the db tests with a global mutex. While the
+    // guard is held no other db test changes the env. Each test uses a SEPARATELY
+    // named shared-cache memory DB (the pool opens several connections -> shared-cache
+    // is required; a unique name -> tests do not see each other).
     static DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_db_test(name: &str, body: impl FnOnce()) {
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let url = format!("sqlite:file:{name}?mode=memory&cache=shared");
-        // SAFETY: guard ushlanган — bir vaqtda faqat bitta db testi env qo'yadi.
+        // SAFETY: the guard is held — only one db test sets the env at a time.
         unsafe { std::env::set_var("DATABASE_URL", &url) };
         body();
     }
 
     #[test]
     fn db_ins_sym_json_roundtrip() {
-        // ins generatsiya qilingan id qaytaradi; sym Str<->Sym; json map round-trip.
+        // ins returns the generated id; sym Str<->Sym; json map round-trip.
         with_db_test("ins_sym_json", || {
             run(r#"
 use db
@@ -1705,18 +1706,18 @@ tbl tickets
   category sym
   meta     json
 t = db.ins "tickets" {category::billing meta:{tries:3}}
-(t.id == 1) | (fail "id 1 bo'lishi kerak")
+(t.id == 1) | (fail "id 1 should be")
 match t.category
   :billing -> log "ok sym"
-  _ -> fail "sym :billing bo'lishi kerak"
-(t.meta.tries == 3) | (fail "json meta.tries 3 bo'lishi kerak")
+  _ -> fail "sym :billing should be"
+(t.meta.tries == 3) | (fail "json meta.tries 3 should be")
 "#);
         });
     }
 
     #[test]
     fn db_param_and_placeholder() {
-        // param'siz q + $1 placeholder SQLite'da rewrite'siz bog'lanadi + sym param.
+        // q without a param + the $1 placeholder binds in SQLite without a rewrite + sym param.
         with_db_test("param_placeholder", || {
             run(r#"
 use db
@@ -1726,15 +1727,15 @@ tbl items
 db.ins "items" {kind::a}
 db.ins "items" {kind::b}
 all = db.q "select * from items"
-(all.len == 2) | (fail "param'siz q 2 qator")
+(all.len == 2) | (fail "q without param 2 row")
 only = db.q "select * from items where kind=$1" [:a]
-(only.len == 1) | (fail "$1 sym param 1 qator")
+(only.len == 1) | (fail "$1 sym param 1 row")
 "#);
         });
     }
 
-    // Deklarativ o'qish builder'i (issue #78): db.from |> db.eq/cmp/order/limit
-    // |> db.all/first. List qiymat → IN. Xom SQL'siz filtr+range+order+paging.
+    // Declarative read builder (issue #78): db.from |> db.eq/cmp/order/limit
+    // |> db.all/first. A list value -> IN. Filter+range+order+paging without raw SQL.
     #[test]
     fn db_query_builder_reads() {
         with_db_test("query_builder", || {
@@ -1751,58 +1752,58 @@ db.ins "bookings" {tenant_id:1 resource_id:5 status::confirmed start_at:"2026-06
 db.ins "bookings" {tenant_id:1 resource_id:7 status::pending start_at:"2026-06-03"}
 db.ins "bookings" {tenant_id:2 resource_id:9 status::done start_at:"2026-06-04"}
 
-# IN-filtr (list qiymat) + order
+# IN filter (list value) + order
 in_rows = db.from "bookings" |> db.eq {tenant_id:1 status:[:pending :confirmed]} |> db.order :start_at |> db.all
-(in_rows.len == 2) | (fail "IN-filtr 2 qator kutilgan, ${in_rows.len}")
+(in_rows.len == 2) | (fail "IN-filter 2 row expected, ${in_rows.len}")
 match in_rows.0.status
   :confirmed -> log "ok IN order"
-  _ -> fail "order start_at noto'g'ri"
+  _ -> fail "order start_at wrong"
 
 # cmp range + limit
 rng = db.from "bookings" |> db.eq {tenant_id:1} |> db.cmp :start_at :ge "2026-06-02" |> db.limit 10 |> db.all
-(rng.len == 2) | (fail "cmp >= 2 qator kutilgan, ${rng.len}")
+(rng.len == 2) | (fail "cmp >= 2 row expected, ${rng.len}")
 
-# first — bitta yoki nil
+# first — one or nil
 one = db.from "bookings" |> db.eq {tenant_id:1 resource_id:7} |> db.first
-(one != nil) | (fail "first nil qaytardi")
+(one != nil) | (fail "first returned nil")
 match one.status
   :pending -> log "ok first"
-  _ -> fail "first noto'g'ri qator"
+  _ -> fail "first wrong row"
 
-# first — mos qator yo'q → nil
+# first — no matching row → nil
 none = db.from "bookings" |> db.eq {tenant_id:99} |> db.first
-(none == nil) | (fail "first mos yo'qda nil kutilgan")
+(none == nil) | (fail "first with no match expected nil")
 
-# bo'sh IN list → hech narsa
+# empty IN list → nothing
 empty = db.from "bookings" |> db.eq {status:[]} |> db.all
-(empty.len == 0) | (fail "bo'sh IN 0 qator kutilgan")
+(empty.len == 0) | (fail "empty IN 0 row expected")
 
-# nil qiymat → IS NULL ( = NULL hech qachon mos kelmaydi). resource_id null qator.
+# nil value → IS NULL ( = NULL never matches). a row with resource_id null.
 db.ins "bookings" {tenant_id:1 resource_id:nil status::pending start_at:"2026-06-09"}
 nulls = db.from "bookings" |> db.eq {tenant_id:1 resource_id:nil} |> db.all
-(nulls.len == 1) | (fail "nil → IS NULL 1 qator kutilgan, ${nulls.len}")
+(nulls.len == 1) | (fail "nil → IS NULL 1 row expected, ${nulls.len}")
 "#);
         });
     }
 
-    // Issue #104: db.up bo'sh shart map'i bilan chaqirilsa, build_update ustunsiz
-    // "WHERE" quradi (malformed SQL) va butun jadval yangilanardi. db.del'dagi
-    // kabi guard endi aniq o'zbekcha xato beradi (SQLite'ning xom "incomplete
-    // input" o'rniga).
+    // Issue #104: when db.up was called with an empty condition map, build_update
+    // built a column-less "WHERE" (malformed SQL) and the whole table got updated.
+    // Like the guard in db.del, it now gives a clear error (instead of SQLite's raw
+    // "incomplete input").
     #[test]
     fn db_up_bosh_shart_rad_etiladi() {
         with_db_test("up_empty_where", || {
             let setup = "use db\ntbl t\n  id serial pk\n  n int\ndb.ins \"t\" {n:1}\n";
             let e = run_source(&format!("{setup}db.up \"t\" {{n:5}} {{}}\n")).unwrap_err();
             assert!(
-                e.contains("db.up: shart map'i bo'sh"),
-                "kutilmagan xato: {e}"
+                e.contains("db.up: condition map is empty"),
+                "unexpected error: {e}"
             );
         });
     }
 
-    // Issue #104: db.offset LIMIT'siz avval jim e'tiborsiz qolardi (SQLite OFFSET
-    // uchun LIMIT talab qiladi). Endi LIMIT -1 OFFSET m bilan to'g'ri qo'llanadi.
+    // Issue #104: db.offset without LIMIT used to be silently ignored (SQLite requires
+    // LIMIT for OFFSET). Now it is applied correctly with LIMIT -1 OFFSET m.
     #[test]
     fn db_offset_limitsiz_qollanadi() {
         with_db_test("offset_no_limit", || {
@@ -1814,16 +1815,16 @@ tbl t
 db.ins "t" {n:1}
 db.ins "t" {n:2}
 db.ins "t" {n:3}
-# offset 1, limit yo'q → birinchisini o'tkazib, qolgan 2 ta qaytadi.
+# offset 1, no limit → skip the first, return the remaining 2.
 rows = db.from "t" |> db.order :n |> db.offset 1 |> db.all
-(rows.len == 2) | (fail "offset LIMIT'siz 2 qator kutilgan, ${rows.len}")
-(rows.0.n == 2) | (fail "offset birinchini o'tkazishi kerak, ${rows.0.n}")
+(rows.len == 2) | (fail "offset without LIMIT 2 row expected, ${rows.len}")
+(rows.0.n == 2) | (fail "offset should skip the first needed, ${rows.0.n}")
 "#);
         });
     }
 
-    // Issue #104: manfiy limit/offset SQLite'da kutilmagan xulq beradi (manfiy
-    // LIMIT = cheksiz). Endi user sathida aniq rad etiladi.
+    // Issue #104: a negative limit/offset gives unexpected behavior in SQLite (a
+    // negative LIMIT = unlimited). Now it is clearly rejected at the user level.
     #[test]
     fn db_manfiy_limit_offset_rad_etiladi() {
         with_db_test("neg_limit_offset", || {
@@ -1832,16 +1833,16 @@ rows = db.from "t" |> db.order :n |> db.offset 1 |> db.all
                 "{setup}db.from \"t\" |> db.limit (0 - 1) |> db.all\n"
             ))
             .unwrap_err();
-            assert!(e1.contains("db.limit: manfiy"), "limit xatosi: {e1}");
+            assert!(e1.contains("db.limit: negative"), "limit error: {e1}");
             let e2 = run_source(&format!(
                 "{setup}db.from \"t\" |> db.offset (0 - 3) |> db.all\n"
             ))
             .unwrap_err();
-            assert!(e2.contains("db.offset: manfiy"), "offset xatosi: {e2}");
+            assert!(e2.contains("db.offset: negative"), "offset error: {e2}");
         });
     }
 
-    // Aggregatsiya builder'i: group + count/sum + conditional agg (count_if/sum_if).
+    // Aggregation builder: group + count/sum + conditional agg (count_if/sum_if).
     #[test]
     fn db_query_builder_agg() {
         with_db_test("query_builder_agg", || {
@@ -1859,25 +1860,25 @@ db.ins "bookings" {tenant_id:1 resource_id:7 status::pending total_cents:1000}
 
 # group + count + sum, order desc
 ag = db.from "bookings" |> db.eq {tenant_id:1 status:[:done :confirmed]} |> db.group :resource_id |> db.count :n |> db.sum :total_cents :rev |> db.order :rev :desc |> db.agg
-(ag.len == 1) | (fail "agg 1 guruh kutilgan, ${ag.len}")
+(ag.len == 1) | (fail "agg 1 guruh expected, ${ag.len}")
 (ag.0.resource_id == 5) | (fail "agg resource_id 5")
 (ag.0.n == 2) | (fail "agg count 2, ${ag.0.n}")
 (ag.0.rev == 8000) | (fail "agg sum 8000, ${ag.0.rev}")
 
-# conditional agg (overview, group'siz) → bitta qator
+# conditional agg (overview, no group) → a single row
 ov = db.from "bookings" |> db.eq {tenant_id:1} |> db.count_if {status::confirmed} :confirmed |> db.count_if {status::pending} :pending |> db.sum_if :total_cents {status::done} :revenue |> db.agg_row
 (ov.confirmed == 1) | (fail "count_if confirmed 1, ${ov.confirmed}")
 (ov.pending == 1) | (fail "count_if pending 1, ${ov.pending}")
 (ov.revenue == 5000) | (fail "sum_if revenue 5000, ${ov.revenue}")
 
-# bo'sh tenant: count_if 0 qaytarishi kerak (nil emas — COUNT semantikasi)
+# empty tenant: count_if must return 0 (not nil — COUNT semantics)
 empty_ov = db.from "bookings" |> db.eq {tenant_id:99} |> db.count_if {status::done} :done |> db.agg_row
-(empty_ov.done == 0) | (fail "bo'sh count_if 0 kutilgan (nil emas), ${empty_ov.done}")
+(empty_ov.done == 0) | (fail "empty count_if 0 expected (nil not), ${empty_ov.done}")
 "#);
         });
     }
 
-    // str.sym: string→symbol (query-string statuslarini sym filtrga aylantirish).
+    // str.sym: string -> symbol (turning query-string statuses into a sym filter).
     #[test]
     fn str_sym_conversion() {
         run(r#"
@@ -1889,18 +1890,18 @@ syms = (str.split "pending,confirmed" ",").map \s -> str.sym s
 "#);
     }
 
-    // --- Issue #82: tbl deklarativ schema migration + index/uniq ---
+    // --- Issue #82: tbl declarative schema migration + index/uniq ---
 
-    // Migration testlari uchun yordamchi: fayl-backed temp DB tayyorlaydi (ikki
-    // ALOHIDA Interp = ikki deploy sikli; memory DB birinchi drop'da o'chadi).
-    // Yangilangan path qaytaradi; oxirida `cleanup_db` chaqirilsin.
+    // Helper for migration tests: prepares a file-backed temp DB (two SEPARATE
+    // Interps = two deploy cycles; a memory DB is gone on the first drop).
+    // Returns the path; call `cleanup_db` at the end.
     #[cfg(test)]
     fn setup_db(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
-        // SAFETY: chaqiruvchi DB_TEST_LOCK ushlaydi.
+        // SAFETY: the caller holds DB_TEST_LOCK.
         unsafe {
             std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
         }
@@ -1916,17 +1917,17 @@ syms = (str.split "pending,confirmed" ",").map \s -> str.sym s
 
     #[test]
     fn migrate_add_column_idempotent() {
-        // tbl'ga yangi ustun qo'shilsa -> ADD COLUMN; eski qatorlar saqlanadi;
-        // qayta-deploy idempotent (yiqilmaydi).
+        // Adding a new column to tbl -> ADD COLUMN; old rows are preserved;
+        // re-deploy is idempotent (does not fail).
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_mig_addcol.db");
 
-        // Deploy 1: ikki ustunli jadval + bitta qator.
+        // Deploy 1: a two-column table + one row.
         run_source("use db\ntbl t\n  id serial pk\n  a int\ndb.ins \"t\" {a:1}\n")
             .unwrap_or_else(|e| panic!("deploy1: {}", e));
 
-        // Deploy 2: yangi ustun `b` qo'shilgan. ADD COLUMN bo'lishi, eski qator
-        // saqlanib (b NULL) qolishi kerak.
+        // Deploy 2: new column `b` added. It must be an ADD COLUMN, and the old row
+        // must be preserved (b NULL).
         run_source(
             r#"
 use db
@@ -1935,15 +1936,15 @@ tbl t
   a  int
   b  str
 old = db.one "select * from t where a=1"
-(old != nil) | (fail "eski qator saqlanishi kerak")
-(old.b == nil) | (fail "yangi ustun b NULL bo'lishi kerak")
+(old != nil) | (fail "old row should be preserved needed")
+(old.b == nil) | (fail "new column b NULL should be")
 db.ins "t" {a:2 b:"hi"}
-(db.one "select b from t where a=2").b == "hi" | (fail "yangi ustunga yozish")
+(db.one "select b from t where a=2").b == "hi" | (fail "write to new column")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 add column: {}", e));
 
-        // Deploy 3: aynan o'sha schema — idempotent, yiqilmaydi.
+        // Deploy 3: the exact same schema — idempotent, does not fail.
         run_source("use db\ntbl t\n  id serial pk\n  a int\n  b str\n")
             .unwrap_or_else(|e| panic!("deploy3 idempotent: {}", e));
 
@@ -1952,8 +1953,8 @@ db.ins "t" {a:2 b:"hi"}
 
     #[test]
     fn migrate_drop_column_with_backup() {
-        // tbl'dan ustun olib tashlansa -> DROP COLUMN + _fluxon_bak_* backup jadval
-        // eski ma'lumot bilan qoladi.
+        // Removing a column from tbl -> DROP COLUMN + a _fluxon_bak_* backup table
+        // remains with the old data.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_mig_dropcol.db");
 
@@ -1962,23 +1963,23 @@ db.ins "t" {a:2 b:"hi"}
         )
         .unwrap_or_else(|e| panic!("deploy1: {}", e));
 
-        // Deploy 2: `b` ustuni olib tashlangan -> DROP COLUMN. `b` so'rovi xato
-        // beradi (ustun yo'q), lekin backup jadvalda `b="keep"` saqlanadi.
+        // Deploy 2: column `b` removed -> DROP COLUMN. A query for `b` errors
+        // (column gone), but the backup table keeps `b="keep"`.
         run_source(
             r#"
 use db
 tbl t
   id serial pk
   a  int
-# b ustuni endi yo'q -> DROP COLUMN
+# column b is gone now -> DROP COLUMN
 baks = db.q "select name from sqlite_master where type='table' and name like '_fluxon_bak_t_%'"
-(baks.len >= 1) | (fail "backup jadval yaratilishi kerak")
+(baks.len >= 1) | (fail "backup table should be created needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop column: {}", e));
 
-        // Deploy 3: aynan o'sha (b'siz) schema — `b` allaqachon yo'q, DROP COLUMN
-        // yo'q ustunga uriniladi, lekin idempotent: jim pass, yiqilmaydi.
+        // Deploy 3: the exact same (b-less) schema — `b` is already gone, DROP COLUMN
+        // is attempted on a missing column, but idempotent: silent pass, no failure.
         run_source("use db\ntbl t\n  id serial pk\n  a int\n")
             .unwrap_or_else(|e| panic!("deploy3 drop idempotent: {}", e));
 
@@ -1987,12 +1988,12 @@ baks = db.q "select name from sqlite_master where type='table' and name like '_f
 
     #[test]
     fn migrate_drop_table_only_fluxon_managed() {
-        // tbl source'dan butunlay olib tashlansa -> DROP TABLE + backup, lekin
-        // FAQAT Fluxon yaratgan jadval (_fluxon_schema'da). Fluxon yaratmagan jadval saqlanadi.
+        // If a tbl is removed from the source entirely -> DROP TABLE + backup, but
+        // ONLY a Fluxon-created table (in _fluxon_schema). A non-Fluxon table is preserved.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_mig_droptbl.db");
 
-        // Deploy 1: Fluxon `a` jadvalini yaratadi + qo'lda Fluxon-bo'lmagan `manual` jadval.
+        // Deploy 1: Fluxon creates table `a` + a manual, non-Fluxon `manual` table.
         run_source(
             r#"
 use db
@@ -2006,20 +2007,20 @@ db.q "INSERT INTO manual VALUES (42)"
         )
         .unwrap_or_else(|e| panic!("deploy1: {}", e));
 
-        // Deploy 2: `a` tbl olib tashlangan (lekin boshqa tbl bor — registry bo'sh
-        // EMAS). `a` DROP bo'lishi, `manual` saqlanishi kerak.
+        // Deploy 2: tbl `a` removed (but another tbl exists — the registry is NOT
+        // empty). `a` must be DROPped, `manual` must be preserved.
         run_source(
             r#"
 use db
 tbl b
   id serial pk
 gone = db.q "select name from sqlite_master where type='table' and name='a'"
-(gone.len == 0) | (fail "a jadvali DROP bo'lishi kerak")
+(gone.len == 0) | (fail "a tablei DROP should be")
 kept = db.q "select name from sqlite_master where type='table' and name='manual'"
-(kept.len == 1) | (fail "manual jadval saqlanishi kerak (Fluxon yaratmagan)")
-(db.one "select x from manual").x == 42 | (fail "manual ma'lumot saqlanishi kerak")
+(kept.len == 1) | (fail "manual table should be preserved needed (not created by Fluxon)")
+(db.one "select x from manual").x == 42 | (fail "manual data should be preserved needed")
 baks = db.q "select name from sqlite_master where type='table' and name like '_fluxon_bak_a_%'"
-(baks.len >= 1) | (fail "a uchun backup yaratilishi kerak")
+(baks.len >= 1) | (fail "backup for a should be created needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop table: {}", e));
@@ -2029,12 +2030,12 @@ baks = db.q "select name from sqlite_master where type='table' and name like '_f
 
     #[test]
     fn migrate_index_create_and_drop() {
-        // Index e'loni -> CREATE INDEX; olib tashlansa -> DROP INDEX. uniq(a b) ->
-        // duplicate insert xato. sqlite_autoindex_* tegilmaydi.
+        // An index declaration -> CREATE INDEX; removing it -> DROP INDEX. uniq(a b) ->
+        // a duplicate insert errors. sqlite_autoindex_* is left untouched.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_mig_index.db");
 
-        // Deploy 1: single index + multi unique.
+        // Deploy 1: a single index + a multi-column unique.
         run_source(
             r#"
 use db
@@ -2045,15 +2046,15 @@ tbl bookings
   start_at    str
   uniq(resource_id start_at)
 idx = db.q "select name from sqlite_master where type='index' and name='idx_bookings_status'"
-(idx.len == 1) | (fail "idx_bookings_status yaratilishi kerak")
+(idx.len == 1) | (fail "idx_bookings_status yaratilishi needed")
 uniq = db.q "select name from sqlite_master where type='index' and name='uniq_bookings_resource_id_start_at'"
-(uniq.len == 1) | (fail "uniq index yaratilishi kerak")
+(uniq.len == 1) | (fail "uniq index should be created needed")
 db.ins "bookings" {resource_id:5 status::done start_at:"2026-06-01"}
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy1 index: {}", e));
 
-        // uniq buzilishi: bir xil (resource_id start_at) -> xato.
+        // uniq violation: the same (resource_id start_at) -> error.
         let dup = run_source(
             r#"
 use db
@@ -2068,10 +2069,10 @@ db.ins "bookings" {resource_id:5 status::pending start_at:"2026-06-01"}
         );
         assert!(
             dup.is_err(),
-            "uniq(resource_id start_at) duplicate insert xato berishi kerak"
+            "uniq(resource_id start_at) duplicate insert should error"
         );
 
-        // Deploy 2: status index olib tashlangan -> DROP INDEX. uniq qoladi.
+        // Deploy 2: the status index removed -> DROP INDEX. uniq stays.
         run_source(
             r#"
 use db
@@ -2082,9 +2083,9 @@ tbl bookings
   start_at    str
   uniq(resource_id start_at)
 dropped = db.q "select name from sqlite_master where type='index' and name='idx_bookings_status'"
-(dropped.len == 0) | (fail "idx_bookings_status DROP bo'lishi kerak")
+(dropped.len == 0) | (fail "idx_bookings_status DROP should be")
 kept = db.q "select name from sqlite_master where type='index' and name='uniq_bookings_resource_id_start_at'"
-(kept.len == 1) | (fail "uniq index saqlanishi kerak")
+(kept.len == 1) | (fail "uniq index should be preserved needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop index: {}", e));
@@ -2094,14 +2095,14 @@ kept = db.q "select name from sqlite_master where type='index' and name='uniq_bo
 
     #[test]
     fn migrate_drop_indexed_column() {
-        // REGRESSIYA (code review): index'lanган ustun olib tashlanganda eskirgan
-        // index ustun DROP'idan OLDIN tashlanishi kerak — aks holda ba'zi SQLite
-        // holatlarida DROP COLUMN "error in index ... no such column" bilan rad
-        // etiladi va deploy migrate qila olmaydi. Single va kompozit index ikkalasi.
+        // REGRESSION (code review): when an indexed column is removed, the stale
+        // index must be dropped BEFORE the column DROP — otherwise in some SQLite
+        // states DROP COLUMN is rejected with "error in index ... no such column"
+        // and the deploy cannot migrate. Both single and composite index.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_mig_dropidxcol.db");
 
-        // Deploy 1: index'li `status` ustun + kompozit index(a status).
+        // Deploy 1: an indexed `status` column + a composite index(a status).
         run_source(
             r#"
 use db
@@ -2115,9 +2116,9 @@ db.ins "t" {a:1 status::x}
         )
         .unwrap_or_else(|e| panic!("deploy1: {}", e));
 
-        // Deploy 2: `status` ustuni olib tashlangan. Eski idx_t_status va
-        // idx_t_a_status hali DB'da — migration yiqilmasligi (eskirgan index avval
-        // tashlanadi), keyin DROP COLUMN ishlashi kerak.
+        // Deploy 2: column `status` removed. The old idx_t_status and idx_t_a_status
+        // are still in the DB — the migration must not fail (the stale index is
+        // dropped first), then DROP COLUMN must work.
         run_source(
             r#"
 use db
@@ -2125,12 +2126,12 @@ tbl t
   id serial pk
   a  int
 gone = db.q "select name from sqlite_master where type='index' and name='idx_t_status'"
-(gone.len == 0) | (fail "idx_t_status DROP bo'lishi kerak")
+(gone.len == 0) | (fail "idx_t_status DROP should be")
 comp = db.q "select name from sqlite_master where type='index' and name='idx_t_a_status'"
-(comp.len == 0) | (fail "idx_t_a_status (status'ga bog'liq) DROP bo'lishi kerak")
-# status ustuni haqiqatan yo'qolgan
+(comp.len == 0) | (fail "idx_t_a_status (depending on status) DROP should be")
+# the status column is really gone
 cols = db.q "select name from pragma_table_info('t') where name='status'"
-(cols.len == 0) | (fail "status ustuni DROP bo'lishi kerak")
+(cols.len == 0) | (fail "status columni DROP should be")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 drop indexed column: {}", e));
@@ -2140,8 +2141,8 @@ cols = db.q "select name from pragma_table_info('t') where name='status'"
 
     #[test]
     fn migrate_pipe_modifier_creates_unique_index() {
-        // `email str index|uniq` -> bitta UNIQUE index yaratiladi (uniq subsume
-        // qiladi), duplicate insert xato beradi.
+        // `email str index|uniq` -> a single UNIQUE index is created (uniq subsumes
+        // it), a duplicate insert errors.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_mig_pipe.db");
 
@@ -2152,7 +2153,7 @@ tbl users
   id    serial pk
   email str index|uniq
 ui = db.q "select name from sqlite_master where type='index' and name='uniq_users_email'"
-(ui.len == 1) | (fail "uniq_users_email yaratilishi kerak")
+(ui.len == 1) | (fail "uniq_users_email should be created needed")
 db.ins "users" {email:"a@x.uz"}
 "#,
         )
@@ -2167,20 +2168,17 @@ tbl users
 db.ins "users" {email:"a@x.uz"}
 "#,
         );
-        assert!(
-            dup.is_err(),
-            "index|uniq duplicate email xato berishi kerak"
-        );
+        assert!(dup.is_err(), "index|uniq duplicate email should error");
 
         cleanup_db(&path);
     }
 
     #[test]
     fn migrate_multi_column_uniq_constraint() {
-        // Issue #94: `uniq(a, b)` (vergulli) ko'p-ustunli UNIQUE cheklov yaratadi —
-        // soxta "uniq" ustun EMAS. Dublikat (a,b) juftligi xato beradi.
+        // Issue #94: `uniq(a, b)` (comma-separated) creates a multi-column UNIQUE
+        // constraint — NOT a fake "uniq" column. A duplicate (a,b) pair errors.
         with_db_test("multi_uniq", || {
-            // 1. Soxta `uniq` ustun yo'qligi: jadvalda faqat a, b bo'lishi kerak.
+            // 1. No fake `uniq` column: the table must contain only a, b.
             run(r#"
 use db
 tbl t
@@ -2188,14 +2186,14 @@ tbl t
   b str
   uniq(a, b)
 n = (db.q "select count(*) c from pragma_table_info('t')").0.c
-(n == 2) | (fail "jadvalda faqat 2 ustun (a, b) bo'lishi kerak — soxta uniq yo'q")
+(n == 2) | (fail "table should have only 2 columns (a, b) — no phantom uniq column")
 ui = db.q "select name from sqlite_master where type='index' and name='uniq_t_a_b'"
-(ui.len == 1) | (fail "uniq_t_a_b unikal index yaratilishi kerak")
+(ui.len == 1) | (fail "uniq_t_a_b unique index should be created")
 db.ins "t" {a:"x" b:"y"}
 "#);
 
-            // 2. Dublikat (a, b) juftligi UNIQUE cheklovni buzadi. Ikkala insert
-            //    bir manbada — shared-memory db run'lar orasida yo'qolmasin.
+            // 2. A duplicate (a, b) pair violates the UNIQUE constraint. Both inserts
+            //    are in one source — so the shared-memory db is not lost between runs.
             let dup = run_source(
                 r#"
 use db
@@ -2207,16 +2205,16 @@ db.ins "t" {a:"x" b:"y"}
 db.ins "t" {a:"x" b:"y"}
 "#,
             );
-            assert!(dup.is_err(), "dublikat (a, b) uniq xato berishi kerak");
+            assert!(dup.is_err(), "duplicate (a, b) should violate uniq");
         });
     }
 
     #[test]
     fn fk_ref_modifier_enforced() {
-        // Issue #94 (bog'liq): `ref:tbl.col` FK modifikatori endi enforce qilinadi —
-        // mavjud bo'lmagan ota qatorga ishora qilgan insert xato beradi.
+        // Issue #94 (related): the `ref:tbl.col` FK modifier is now enforced —
+        // an insert referencing a non-existent parent row errors.
         with_db_test("fk_ref", || {
-            // Yaroqli FK: ota qator mavjud — insert o'tadi.
+            // Valid FK: the parent row exists — the insert passes.
             run(r#"
 use db
 tbl users
@@ -2227,11 +2225,11 @@ tbl posts
   owner int ref:users.id
   title str
 db.ins "users" {name:"ali"}
-p = db.ins "posts" {owner:1 title:"salom"}
-(p.id == 1) | (fail "yaroqli FK insert o'tishi kerak")
+p = db.ins "posts" {owner:1 title:"hello"}
+(p.id == 1) | (fail "valid FK insert should pass needed")
 "#);
 
-            // Yetim FK: owner=999 mavjud emas -> FOREIGN KEY constraint failed.
+            // Orphan FK: owner=999 does not exist -> FOREIGN KEY constraint failed.
             let orphan = run_source(
                 r#"
 use db
@@ -2242,23 +2240,23 @@ tbl posts
   id    serial pk
   owner int ref:users.id
   title str
-db.ins "posts" {owner:999 title:"yetim"}
+db.ins "posts" {owner:999 title:"orphan"}
 "#,
             );
-            assert!(orphan.is_err(), "yetim FK insert xato berishi kerak");
+            assert!(orphan.is_err(), "orphan FK insert should error");
         });
     }
 
     #[test]
     fn migrate_adds_fk_to_existing_column_via_rebuild() {
-        // Issue #94 (codex revyu): FK faqat YANGI jadvalga emas — MAVJUD jadvaldagi
-        // mavjud ustunga ham qo'llanishi kerak. Eski holatni (DB introspeksiyasi)
-        // declaration bilan solishtirib, farqda jadval rebuild qilinadi. Ma'lumot
-        // saqlanadi, autoincrement davom etadi, FK enforce qilinadi.
+        // Issue #94 (codex review): FK must apply not only to a NEW table — also to
+        // an existing column in an EXISTING table. The old state (DB introspection) is
+        // compared with the declaration, and on a difference the table is rebuilt. Data
+        // is preserved, autoincrement continues, FK is enforced.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_fk_rebuild.db");
 
-        // Deploy 1: posts FK'siz, ma'lumot bilan.
+        // Deploy 1: posts without an FK, with data.
         run_source(
             r#"
 use db
@@ -2276,7 +2274,7 @@ db.ins "posts" {owner:1 title:"b"}
         )
         .unwrap_or_else(|e| panic!("deploy1: {}", e));
 
-        // Deploy 2: mavjud `owner` ustuniga ref:users.id qo'shildi -> rebuild.
+        // Deploy 2: ref:users.id added to the existing `owner` column -> rebuild.
         run_source(
             r#"
 use db
@@ -2288,16 +2286,16 @@ tbl posts
   owner int ref:users.id
   title str
 rows = db.q "select count(*) c from posts"
-(rows.0.c == 2) | (fail "rebuild ma'lumotni saqlashi kerak (2 qator)")
+(rows.0.c == 2) | (fail "rebuild should preserve data needed (2 row)")
 fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
-(fk.0.c == 1) | (fail "rebuild keyin posts'da FK bo'lishi kerak")
+(fk.0.c == 1) | (fail "posts should have FK after rebuild")
 n = db.ins "posts" {owner:1 title:"c"}
-(n.id == 3) | (fail "autoincrement davom etishi kerak (id=3)")
+(n.id == 3) | (fail "autoincrement should continue needed (id=3)")
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy2 rebuild: {}", e));
 
-        // Endi yetim insert rad etiladi (FK enforce).
+        // Now an orphan insert is rejected (FK enforced).
         let orphan = run_source(
             r#"
 use db
@@ -2308,12 +2306,12 @@ tbl posts
   id    serial pk
   owner int ref:users.id
   title str
-db.ins "posts" {owner:404 title:"yetim"}
+db.ins "posts" {owner:404 title:"orphan"}
 "#,
         );
         assert!(
             orphan.is_err(),
-            "rebuild keyin yetim FK insert xato berishi kerak"
+            "orphan FK insert should error after rebuild"
         );
 
         cleanup_db(&path);
@@ -2321,13 +2319,13 @@ db.ins "posts" {owner:404 title:"yetim"}
 
     #[test]
     fn migrate_drop_column_and_add_fk_same_deploy() {
-        // Codex revyu: bitta migration ham ustun DROP qilsa, ham mavjud ustunga
-        // ref qo'shsa — DROP COLUMN backup'i (`_fluxon_bak_<t>_<ts>`) bilan rebuild
-        // backup'i NOM TO'QNASHMASLIGI kerak (rebuild `_fk` suffiks ishlatadi).
+        // Codex review: if one migration both DROPs a column and adds a ref to an
+        // existing column — the DROP COLUMN backup (`_fluxon_bak_<t>_<ts>`) and the
+        // rebuild backup must NOT COLLIDE in name (rebuild uses a `_fk` suffix).
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_drop_and_fk.db");
 
-        // Deploy 1: `old` ustuni bor, ref yo'q.
+        // Deploy 1: an `old` column exists, no ref.
         run_source(
             r#"
 use db
@@ -2340,12 +2338,12 @@ tbl posts
   title str
   old   str
 db.ins "users" {name:"a"}
-db.ins "posts" {owner:1 title:"x" old:"eski"}
+db.ins "posts" {owner:1 title:"x" old:"old"}
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy1 drop+fk: {}", e));
 
-        // Deploy 2: `old` DROP + `owner` ga ref qo'shish (bitta migration).
+        // Deploy 2: DROP `old` + add a ref to `owner` (one migration).
         run_source(
             r#"
 use db
@@ -2357,22 +2355,22 @@ tbl posts
   owner int ref:users.id
   title str
 n = db.q "select count(*) c from posts"
-(n.0.c == 1) | (fail "ma'lumot saqlanishi kerak (1 qator)")
+(n.0.c == 1) | (fail "data should be preserved needed (1 row)")
 fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
-(fk.0.c == 1) | (fail "FK qo'shilishi kerak")
+(fk.0.c == 1) | (fail "FK should be added needed")
 cols = db.q "select count(*) c from pragma_table_info('posts')"
-(cols.0.c == 3) | (fail "old ustun DROP bo'lib 3 ustun qolishi kerak")
+(cols.0.c == 3) | (fail "old column DROPped, 3 columns should remain needed")
 "#,
         )
-        .unwrap_or_else(|e| panic!("deploy2 drop+fk (backup to'qnashuvi?): {}", e));
+        .unwrap_or_else(|e| panic!("deploy2 drop+fk (backup collision?): {}", e));
 
         cleanup_db(&path);
     }
 
     #[test]
     fn migrate_fk_rebuild_aborts_on_orphan_data() {
-        // Mavjud ma'lumotda yetim qator bo'lsa, FK qo'shish rebuild'i JIM yo'qotmaydi
-        // — aniq xato beradi va ROLLBACK orqali ma'lumot butun qoladi.
+        // If existing data has an orphan row, the FK-adding rebuild does NOT silently
+        // lose it — it gives a clear error and the data stays intact via ROLLBACK.
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_fk_orphan.db");
 
@@ -2388,12 +2386,12 @@ tbl posts
   title str
 db.ins "users" {name:"a"}
 db.ins "posts" {owner:1 title:"ok"}
-db.ins "posts" {owner:777 title:"yetim"}
+db.ins "posts" {owner:777 title:"orphan"}
 "#,
         )
         .unwrap_or_else(|e| panic!("deploy1 orphan: {}", e));
 
-        // ref qo'shish -> yetim qator FK ni buzadi -> migrate xato (rebuild abort).
+        // adding a ref -> the orphan row violates the FK -> migrate errors (rebuild aborts).
         let res = run_source(
             r#"
 use db
@@ -2407,19 +2405,16 @@ tbl posts
 db.q "select 1 x"
 "#,
         );
-        assert!(
-            res.is_err(),
-            "yetim ma'lumotda FK rebuild abort bo'lishi kerak"
-        );
+        assert!(res.is_err(), "FK rebuild should abort on orphan data");
 
-        // Ma'lumot va eski (FK'siz) sxema saqlangan bo'lishi kerak.
+        // The data and the old (FK-less) schema must be preserved.
         run_source(
             r#"
 use db
 n = db.q "select count(*) c from posts"
-(n.0.c == 2) | (fail "rollback ma'lumotni saqlashi kerak (2 qator)")
+(n.0.c == 2) | (fail "rollback should preserve data needed (2 row)")
 fk = db.q "select count(*) c from pragma_foreign_key_list('posts')"
-(fk.0.c == 0) | (fail "abort keyin FK qo'shilmasligi kerak")
+(fk.0.c == 0) | (fail "FK should not be added after abort needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("verify orphan: {}", e));
@@ -2438,24 +2433,24 @@ tbl t
 r = db.tx \->
   x = db.ins "t" {n:7}
   ret x
-(r.n == 7) | (fail "tx ret qiymati n=7")
-(db.one "select count(*) c from t").c == 1 | (fail "1 qator commit bo'lishi kerak")
+(r.n == 7) | (fail "tx ret valuei n=7")
+(db.one "select count(*) c from t").c == 1 | (fail "1 row commit should be")
 "#);
         });
     }
 
     #[test]
     fn db_tx_rollback_on_fail() {
-        // tx ichida fail -> butun blok rollback; xato yuqoriga ko'tariladi va
-        // birinchi (tx'siz) ins saqlanib, tx ichidagi ins rollback bo'ladi.
-        // FAYL-backed temp DB: ikki run_source orasida saqlanadi (memory DB esa
-        // birinchi Interp drop bo'lganda o'chadi). Tekshiruvchi run ALOHIDA Interp.
+        // fail inside tx -> the whole block rolls back; the error propagates upward
+        // and the first (tx-less) ins is preserved, while the ins inside the tx is
+        // rolled back. FILE-backed temp DB: persists between two run_source calls (a
+        // memory DB is gone when the first Interp drops). The verifying run is a SEPARATE Interp.
         let path = std::env::temp_dir().join("fluxon_tx_rollback_test.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: guard ushlangan.
+        // SAFETY: the guard is held.
         unsafe {
             std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
         }
@@ -2469,25 +2464,25 @@ tbl t
 db.ins "t" {n:1}
 db.tx \->
   db.ins "t" {n:2}
-  fail "ataylab"
+  fail "on purpose"
 "#,
         )
         .unwrap_err();
         assert!(
-            err.contains("ataylab"),
-            "kutilgan fail xabari, topildi: {}",
+            err.contains("on purpose"),
+            "expected fail message, got: {}",
             err
         );
 
-        // Alohida (yangi) Interp/pool — fayl DB saqlangan. Rollback ishlagan bo'lsa
-        // faqat tx'siz ins (n:1) qoladi, tx ichidagi (n:2) yo'q.
+        // A separate (new) Interp/pool — the file DB is preserved. If rollback worked,
+        // only the tx-less ins (n:1) remains, the one inside the tx (n:2) does not.
         run_source(
             r#"
 use db
 tbl t
   id serial pk
   n  int
-(db.one "select count(*) c from t").c == 1 | (fail "rollback'dan keyin 1 qator qolishi kerak")
+(db.one "select count(*) c from t").c == 1 | (fail "1 row should remain after rollback needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("rollback tekshiruvi: {}", e));
@@ -2499,21 +2494,22 @@ tbl t
 
     #[test]
     fn db_json_col_cross_process_decode() {
-        // Issue #63: json ustun `tbl` e'lon QILINMAGAN process'da ham map qaytarsin.
-        // Ikki ALOHIDA Interp (= ikki process) bir FAYL DB ustida: birinchi yozadi
-        // (tbl bilan), ikkinchi tbl'siz o'qiydi — DB introspeksiyasi ustun json
-        // ekanini tiklab map beradi (ilgari xom string qaytib row.body.x xato berardi).
+        // Issue #63: a json column must return a map even in a process where `tbl` is
+        // NOT declared. Two SEPARATE Interps (= two processes) over one FILE DB: the
+        // first writes (with tbl), the second reads without tbl — DB introspection
+        // recovers that the column is json and gives a map (before, a raw string came
+        // back and row.body.x errored).
         let path = std::env::temp_dir().join("fluxon_json_xproc_test.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: guard ushlangan.
+        // SAFETY: the guard is held.
         unsafe {
             std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
         }
 
-        // Yozuvchi process: tbl e'lon qiladi + json map (ichida list ham) yozadi.
+        // Writer process: declares tbl + writes a json map (which also contains a list).
         run_source(
             r#"
 use db
@@ -2525,16 +2521,16 @@ db.ins "t" {k::a body:{x:1 y:[1 2 3]}}
         )
         .unwrap_or_else(|e| panic!("yozish: {}", e));
 
-        // O'qiydigan process: tbl YO'Q — faqat o'qiydi. json map bo'lib kelishi shart.
+        // Reader process: NO tbl — only reads. The json must come back as a map.
         run_source(
             r#"
 use db
 row = db.one "select * from t where k=$1" [:a]
-(row.body.x == 1) | (fail "json ustun map bo'lib dekod bo'lishi kerak (x)")
-(row.body.y.len == 3) | (fail "json ichki list ham tiklanishi kerak (y)")
+(row.body.x == 1) | (fail "json column should decode as a map (x)")
+(row.body.y.len == 3) | (fail "inner json list should also be restored needed (y)")
 "#,
         )
-        .unwrap_or_else(|e| panic!("o'qish: {}", e));
+        .unwrap_or_else(|e| panic!("read: {}", e));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
@@ -2543,13 +2539,13 @@ row = db.one "select * from t where k=$1" [:a]
 
     #[test]
     fn db_json_schema_less_write_to_text_col() {
-        // Regression: tbl e'lon QILINMAGAN process TEXT ustuniga map/list yoza olsin.
-        // Ilgari DB introspeksiyasi TEXT ustunni Some("text") qaytarardi va write path
-        // "json ustun emas" xatosi berardi — endi yozish tomoni faqat tbl registry'dan
-        // foydalanadi, shuning uchun tbl yo'q process uchun schema-less yozish ishlaydi.
+        // Regression: a process where tbl is NOT declared must be able to write a
+        // map/list to a TEXT column. Before, DB introspection returned the TEXT column
+        // as Some("text") and the write path errored with "not a json column" — now the
+        // write side uses only the tbl registry, so schema-less writes work for a process without tbl.
         //
-        // Scenario: birinchi process `str` (TEXT) ustun yaratadi; ikkinchi process
-        // tbl YO'Q holda map yozadi — bu ilgari "json ustun emas" xatosi berardi.
+        // Scenario: the first process creates a `str` (TEXT) column; the second process
+        // writes a map with NO tbl — this used to error with "not a json column".
         let path = std::env::temp_dir().join("fluxon_schemaless_write_test.db");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
@@ -2559,8 +2555,8 @@ row = db.one "select * from t where k=$1" [:a]
             std::env::set_var("DATABASE_URL", format!("sqlite:{}", path.display()));
         }
 
-        // Birinchi process: str (TEXT) ustun bilan jadval yaratadi va bir qator yozadi
-        // (db.ins lazy DB open + migrate qiladi — jadval aynan shu yerda yaratiladi).
+        // First process: creates a table with a str (TEXT) column and writes one row
+        // (db.ins does a lazy DB open + migrate — the table is created right here).
         run_source(
             r#"
 use db
@@ -2572,13 +2568,13 @@ db.ins "t3" {body:"init"}
         )
         .unwrap_or_else(|e| panic!("jadval yaratish: {}", e));
 
-        // Ikkinchi process: tbl YO'Q — TEXT ustuniga map yozishi kerak (schema-less).
+        // Second process: NO tbl — must write a map to the TEXT column (schema-less).
         run_source(
             r#"
 use db
 db.ins "t3" {body:{x:42 y:[1 2]}}
 row = db.one "select body from t3 limit 1"
-row.body | (fail "body bo'sh bo'lmasligi kerak")
+row.body | (fail "body should not be empty needed")
 "#,
         )
         .unwrap_or_else(|e| panic!("schema-less yozish: {}", e));
@@ -2590,7 +2586,7 @@ row.body | (fail "body bo'sh bo'lmasligi kerak")
 
     #[test]
     fn db_tx_nested_savepoint() {
-        // Ichki tx (SAVEPOINT). Ichki blok ret qiymat qaytaradi, tashqi commit.
+        // Inner tx (SAVEPOINT). The inner block returns a ret value, the outer commits.
         with_db_test("tx_nested", || {
             run(r#"
 use db
@@ -2603,8 +2599,8 @@ r = db.tx \->
     x = db.ins "t" {n:2}
     ret x
   ret inner
-(r.n == 2) | (fail "nested tx ret qiymati n=2")
-(db.one "select count(*) c from t").c == 2 | (fail "ikkala ins commit bo'lishi kerak")
+(r.n == 2) | (fail "nested tx ret valuei n=2")
+(db.one "select count(*) c from t").c == 2 | (fail "ikkala ins commit should be")
 "#);
         });
     }
@@ -2620,16 +2616,16 @@ tbl counters
 db.put "counters" {hits:1} {name:"x"}
 db.put "counters" {hits:9} {name:"x"}
 c = db.one "select * from counters where name=$1" ["x"]
-(c.hits == 9) | (fail "upsert hits=9 bo'lishi kerak")
+(c.hits == 9) | (fail "upsert hits=9 should be")
 n = (db.q "select * from counters").len
-(n == 1) | (fail "upsert dublikat yaratmasligi kerak")
+(n == 1) | (fail "upsert should not create a duplicate needed")
 "#);
         });
     }
 
     #[test]
     fn db_uniq_violation_rolls_back_tx() {
-        // uniq buzilishi tx ichida -> rollback (idempotency naqshi).
+        // A uniq violation inside tx -> rollback (the idempotency pattern).
         with_db_test("uniq_violation", || {
             let err = run_source(
                 r#"
@@ -2643,10 +2639,10 @@ db.tx \->
 "#,
             )
             .unwrap_err();
-            // uniq buzilishi db xato sifatida ko'tariladi.
+            // The uniq violation is raised as a db error.
             assert!(
-                err.to_lowercase().contains("unique") || err.contains("db xato"),
-                "kutilgan uniq buzilish xatosi, topildi: {}",
+                err.to_lowercase().contains("unique") || err.contains("db error"),
+                "expected uniq violation error, got: {}",
                 err
             );
         });
@@ -2656,17 +2652,17 @@ db.tx \->
 
     #[test]
     fn cron_on_registratsiya_xatosiz() {
-        // Tirnoqsiz 5-maydon (nomli funksiya). cron.on bloklamaydi, dastur tugaydi.
+        // Unquoted 5-field form (a named function). cron.on does not block, the program ends.
         run(r#"
 fn check
-  log "tekshiruv"
+  log "check"
 cron.on 0 * * * * check
 "#);
     }
 
     #[test]
     fn cron_on_lambda_va_murakkab_ifoda() {
-        // Inline lambda + step/range/list aralash ifoda.
+        // Inline lambda + a mixed step/range/list expression.
         run(r#"
 cron.on */15 9 1,15 * 1-5 \->
   log "har 15 daqiqa, 9-soat, 1 va 15-kun, ish kunlari"
@@ -2675,17 +2671,17 @@ cron.on */15 9 1,15 * 1-5 \->
 
     #[test]
     fn cron_on_tirnoqli_variant() {
-        // Tirnoqli str ham ishlaydi (inson uchun; AI docs'da yo'q).
+        // A quoted str also works (for humans; not in the AI docs).
         run(r#"
 fn report
-  log "hisobot"
+  log "report"
 cron.on "30 9 * * *" report
 "#);
     }
 
     #[test]
     fn cron_on_notogri_ifoda_xato() {
-        // 99-daqiqa yo'q — cron.on xato qaytarishi kerak.
+        // There is no minute 99 — cron.on must return an error.
         let err = run_source(
             r#"
 fn f
@@ -2693,10 +2689,10 @@ fn f
 cron.on 99 * * * * f
 "#,
         )
-        .expect_err("noto'g'ri cron ifoda xato berishi kerak");
+        .expect_err("an invalid cron expression should error");
         assert!(
-            err.contains("cron") && err.to_lowercase().contains("ifoda"),
-            "kutilgan cron ifoda xatosi, topildi: {}",
+            err.contains("cron") && err.to_lowercase().contains("expression"),
+            "expected cron expression error, got: {}",
             err
         );
     }
@@ -2705,39 +2701,39 @@ cron.on 99 * * * * f
 
     #[test]
     fn queue_on_push_registratsiya_xatosiz() {
-        // queue.on handler ro'yxatga oladi, queue.push ish qo'shadi — ikkalasi ham
-        // bloklamaydi, dastur tugaydi (worker fonda ishlayveradi). Handler bittagina
-        // `job` map argumenti oladi.
+        // queue.on registers a handler, queue.push adds a job — neither blocks, the
+        // program ends (the worker keeps running in the background). The handler takes
+        // a single `job` map argument.
         run(r#"
 queue.on "send" \job ->
-  log "yuborilmoqda: ${job.ph}"
-queue.push "send" {ph:"+99890" body:"salom"}
+  log "sending: ${job.ph}"
+queue.push "send" {ph:"+99890" body:"hello"}
 "#);
     }
 
     #[test]
     fn queue_push_payloadsiz() {
-        // Payload ixtiyoriy — berilmasa job Nil bo'ladi.
+        // Payload is optional — if omitted, job is Nil.
         run(r#"
 queue.on "tozala" \job ->
-  log "tozalandi"
+  log "cleaned"
 queue.push "tozala"
 "#);
     }
 
     #[test]
     fn queue_handlersiz_push_dastur_tugaydi() {
-        // Issue #105: handler'i hech qachon ro'yxatga olinmagan ish dastur
-        // chiqishini bloklamasligi kerak — run() ogohlantirish bilan normal
-        // tugaydi (eski busy-loop'da ish abadiy aylanardi).
-        run(r#"queue.push "yetim" {x:1}"#);
+        // Issue #105: a job whose handler is never registered must not block the
+        // program from exiting — run() ends normally with a warning (in the old
+        // busy-loop the job spun forever).
+        run(r#"queue.push "orphan" {x:1}"#);
     }
 
     #[test]
     fn queue_drain_handler_haqiqatan_ishlaydi() {
-        // Issue #105: run() qaytishidan oldin navbat drain bo'ladi — handler
-        // haqiqatan ishlagani DB orqali RACE'siz tekshiriladi (ilgari worker
-        // fon thread'i tugashini kafolatlab bo'lmasdi).
+        // Issue #105: the queue is drained before run() returns — that the handler
+        // actually ran is checked via the DB without a RACE (before, you could not
+        // guarantee the worker background thread had finished).
         let _guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = setup_db("fluxon_queue_drain.db");
 
@@ -2752,10 +2748,10 @@ queue.push "yoz" {nom:"a"}
 queue.push "yoz" {nom:"b"}
 "#);
 
-        // Birinchi run() drain bilan tugadi — ikkala ish DB'da bo'lishi SHART.
+        // The first run() ended with a drain — both jobs MUST be in the DB.
         run(r#"
 use db
-((db.q "select * from jobs").len == 2) | (fail "queue ishlari bajarilmagan")
+((db.q "select * from jobs").len == 2) | (fail "queue jobs were not executed")
 "#);
 
         cleanup_db(&path);
@@ -2763,66 +2759,64 @@ use db
 
     #[test]
     fn queue_push_nom_str_bolmasa_xato() {
-        // 1-argument ish nomi str bo'lishi shart.
-        let err = run_source(r#"queue.push 5"#).expect_err("nom str bo'lmasa xato kutiladi");
+        // The 1st argument, the job name, must be a str.
+        let err = run_source(r#"queue.push 5"#).expect_err("a non-str name should error");
         assert!(
             err.contains("queue.push"),
-            "kutilgan queue.push xatosi, topildi: {}",
+            "expected queue.push error, got: {}",
             err
         );
     }
 
     #[test]
     fn queue_argumentsiz_dispatch_ga_yetadi() {
-        // Argumentsiz `queue.X` (Call emas, Field bo'lib keladi) modul dispatch'iga
-        // yetishi kerak — `queue` ident o'zgaruvchi deb qidirilib "noma'lum nom"
-        // bermasin. Noma'lum funksiya bilan sinaymiz: dispatch'ga yetsa "queue
-        // modulida ... yo'q" xatosi keladi (noma'lum nom EMAS). [cron.run regressiyasi]
-        let err = run_source(r#"queue.yoq"#).expect_err("argumentsiz queue.yoq xato berishi kerak");
+        // An argument-less `queue.X` (it arrives as a Field, not a Call) must reach
+        // module dispatch — so the `queue` ident is not looked up as a variable and
+        // does not give "unknown name". We test with an unknown function: if it reaches
+        // dispatch, a "no ... in queue module" error comes (NOT unknown name). [cron.run regression]
+        let err = run_source(r#"queue.yoq"#).expect_err("argument-less queue.yoq should error");
         assert!(
-            err.contains("queue modulida") && !err.contains("noma'lum nom"),
-            "argumentsiz queue dispatch'ga yetishi kerak, topildi: {}",
+            err.contains("queue module") && !err.contains("unknown name"),
+            "argument-less queue should reach dispatch, got: {}",
             err
         );
     }
 
     #[test]
     fn cron_argumentsiz_dispatch_ga_yetadi() {
-        // `cron.run` argumentsiz — Field bo'lib keladi va dispatch'ga yetishi kerak
-        // (aks holda "noma'lum nom: cron"). cron.run bloklaydi, shuning uchun mavjud
-        // funksiya o'rniga noma'lum funksiya bilan dispatch'ga yetganini tekshiramiz.
-        let err = run_source(r#"cron.yoq"#).expect_err("argumentsiz cron.yoq xato berishi kerak");
+        // `cron.run` argument-less — arrives as a Field and must reach dispatch
+        // (otherwise "unknown name: cron"). cron.run blocks, so instead of an existing
+        // function we test, with an unknown function, that it reaches dispatch.
+        let err = run_source(r#"cron.yoq"#).expect_err("argument-less cron.yoq should error");
         assert!(
-            err.contains("cron modulida") && !err.contains("noma'lum nom"),
-            "argumentsiz cron dispatch'ga yetishi kerak, topildi: {}",
+            err.contains("cron module") && !err.contains("unknown name"),
+            "argument-less cron should reach dispatch, got: {}",
             err
         );
     }
 
     #[test]
     fn queue_on_handler_fn_bolmasa_xato() {
-        // 2-argument handler fn bo'lishi shart.
-        let err =
-            run_source(r#"queue.on "send" 5"#).expect_err("handler fn bo'lmasa xato kutiladi");
+        // The 2nd argument, the handler, must be an fn.
+        let err = run_source(r#"queue.on "send" 5"#).expect_err("a non-fn handler should error");
         assert!(
             err.contains("queue.on"),
-            "kutilgan queue.on xatosi, topildi: {}",
+            "expected queue.on error, got: {}",
             err
         );
     }
 
-    // `ai` testlari env'ga (kalitlarga) bog'liq — global mutex bilan serializatsiya
-    // qilamiz (boshqa testlar parallel env'ni o'zgartirmasin). Bu testlar
-    // TARMOQQA CHIQMAYDI: kalit yo'qligida API chaqiruvidan OLDIN xato berilishini
-    // tekshiramiz.
+    // The `ai` tests depend on the env (keys) — we serialize them with a global mutex
+    // (so other tests do not change the env in parallel). These tests do NOT GO TO THE
+    // NETWORK: we check that an error is raised BEFORE the API call when the key is missing.
     static AI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn ai_kalit_yoq_bolsa_aniq_xato() {
         let _guard = AI_ENV_LOCK.lock().unwrap();
-        // Hamma kalit env'larini vaqtincha o'chiramiz (auto-detect hech qaysisini
-        // topmasligi kerak). runtime/ da .env yo'q -> aniq "kaliti topilmadi" xatosi,
-        // tarmoqqa chiqilmaydi. Oldingi qiymatlarni saqlab, testdan keyin tiklaymiz.
+        // We temporarily remove all key envs (auto-detect must find none). There is no
+        // .env in runtime/ -> a clear "key not found" error, no network call. We save
+        // the previous values and restore them after the test.
         let saved: Vec<(&str, Option<String>)> = ["AI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
@@ -2830,16 +2824,16 @@ use db
         for (k, _) in &saved {
             unsafe { std::env::remove_var(k) };
         }
-        let err = run_source(r#"x = ai.ask "salom""#).expect_err("kalit yo'qligida xato kutiladi");
-        // env'ni tiklaymiz (boshqa testlarga ta'sir qilmasin).
+        let err = run_source(r#"x = ai.ask "hello""#).expect_err("a missing key should error");
+        // restore the env (so it does not affect other tests).
         for (k, v) in &saved {
             if let Some(val) = v {
                 unsafe { std::env::set_var(k, val) };
             }
         }
         assert!(
-            err.contains("kaliti topilmadi") || err.contains("kalit"),
-            "kutilgan kalit-topilmadi xatosi, topildi: {}",
+            err.contains("key not found") || err.contains("key"),
+            "expected key-not-found error, got: {}",
             err
         );
     }
@@ -2847,54 +2841,53 @@ use db
     #[test]
     fn ai_noma_lum_funksiya_xato() {
         let _guard = AI_ENV_LOCK.lock().unwrap();
-        // ai.foo -> dispatch'ga yetib "ai.foo yo'q" beradi (noma'lum nom EMAS).
-        // Kalit bo'lsa ham bo'lmasa ham bu funksiya nomini tekshirishdan oldin keladi.
-        let err =
-            run_source(r#"ai.foo "x""#).expect_err("noma'lum ai funksiyasi xato berishi kerak");
+        // ai.foo -> reaches dispatch and gives "no ai.foo" (NOT unknown name).
+        // Whether or not a key exists, this comes before checking the function name.
+        let err = run_source(r#"ai.foo "x""#).expect_err("an unknown ai function should error");
         assert!(
-            err.contains("ai.foo") && !err.contains("noma'lum nom"),
-            "ai dispatch'ga yetib funksiya xatosi berishi kerak, topildi: {}",
+            err.contains("ai.foo") && !err.contains("unknown name"),
+            "ai should reach dispatch and give a function error, got: {}",
             err
         );
     }
 
     #[test]
     fn ai_ozgaruvchi_modulni_yopadi() {
-        // `ai` o'zgaruvchi sifatida e'lon qilinsa, u modul emas — oddiy map maydoni
-        // sifatida o'qiladi (http/db kabi emas, lekin ai dispatch lookup tekshiradi).
+        // If `ai` is declared as a variable, it is not a module — it is read as a plain
+        // map field (unlike http/db, but the ai dispatch lookup checks for it).
         run(r#"
 ai = {ask:"shadowed"}
 log "ai.ask = ${ai.ask}"
 "#);
     }
 
-    // sh.run -> {stdout stderr code}: echo natijasi va muvaffaqiyat kodi to'g'ri.
-    // (Unix-mos echo, CI ubuntu+macOS da ishlaydi.)
+    // sh.run -> {stdout stderr code}: the echo output and the success code are correct.
+    // (Unix-compatible echo, works on CI ubuntu+macOS.)
     #[test]
     fn sh_run_echo_natija_va_kod() {
         run(r#"
-r = sh.run "printf salom"
-(r.code == 0) | (fail "code 0 bo'lishi kerak: ${r.code}")
-(r.stdout == "salom") | (fail "stdout noto'g'ri: ${r.stdout}")
-(r.stderr == "") | (fail "stderr bo'sh bo'lishi kerak: ${r.stderr}")
+r = sh.run "printf hello"
+(r.code == 0) | (fail "code should be 0: ${r.code}")
+(r.stdout == "hello") | (fail "stdout wrong: ${r.stdout}")
+(r.stderr == "") | (fail "stderr empty should be: ${r.stderr}")
 "#);
     }
 
-    // Non-zero exit -> Flow::err EMAS, `code` orqali tekshiriladi (kutilgan natija).
+    // Non-zero exit -> NOT a Flow::err, it is checked via `code` (the expected result).
     #[test]
     fn sh_run_nolik_bolmagan_kod_xato_emas() {
         run(r#"
 r = sh.run "exit 7"
-(r.code == 7) | (fail "code 7 bo'lishi kerak: ${r.code}")
+(r.code == 7) | (fail "code 7 should be: ${r.code}")
 "#);
     }
 
-    // --- `use ./fayl` foydalanuvchi modullari (issue #45) ---
+    // --- `use ./file` user modules (issue #45) ---
 
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // Unikal vaqtinchalik katalog — parallel testlar to'qnashmasligi uchun
-    // (process id + atomik hisoblagich). Test fayllari shu yerga yoziladi.
+    // A unique temporary directory — so parallel tests do not collide
+    // (process id + an atomic counter). Test files are written here.
     fn temp_module_dir() -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -2904,13 +2897,13 @@ r = sh.run "exit 7"
         dir
     }
 
-    // `files` ([(nom, manba), ...]) ni `dir`ga yozadi, birinchisini run qiladi,
-    // natijani qaytaradi. Tugagach katalogni tozalaydi.
+    // Writes `files` ([(name, source), ...]) into `dir`, runs the first one, and
+    // returns the result. Cleans up the directory when done.
     fn run_modules(files: &[(&str, &str)]) -> Result<(), String> {
         let dir = temp_module_dir();
         for (name, src) in files {
-            // Fayl nomi subkatalogli bo'lishi mumkin ("sub/test.fx") — `../`
-            // (yuqori papka) modul yo'llarini sinash uchun papka ierarxiyasi kerak.
+            // The file name may include a subdirectory ("sub/test.fx") — a directory
+            // hierarchy is needed to test `../` (parent directory) module paths.
             let p = dir.join(name);
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -2924,9 +2917,9 @@ r = sh.run "exit 7"
         r
     }
 
-    // Asosiy holat (issue #45 reproduction): `exp` qilingan qiymat va funksiya
-    // `modul.nom` ostida ko'rinadi; modul funksiyasi modul-darajadagi `exp`ga
-    // (closure) kira oladi.
+    // Main case (issue #45 reproduction): an `exp`-ed value and function appear
+    // under `module.name`; a module function can access a module-level `exp`
+    // (closure).
     #[test]
     fn use_module_exp_va_closure() {
         run_modules(&[
@@ -2934,19 +2927,19 @@ r = sh.run "exit 7"
                 "main.fx",
                 r#"
 use ./greet
-(greet.greeting == "salom") | (fail "greeting: ${greet.greeting}")
-(greet.hello "Aziza" == "salom, Aziza") | (fail "hello: ${greet.hello "Aziza"}")
+(greet.greeting == "hello") | (fail "greeting: ${greet.greeting}")
+(greet.hello "Aziza" == "hello, Aziza") | (fail "hello: ${greet.hello "Aziza"}")
 "#,
             ),
             (
                 "greet.fx",
-                "exp greeting = \"salom\"\nexp fn hello nom -> \"${greeting}, ${nom}\"\n",
+                "exp greeting = \"hello\"\nexp fn hello name -> \"${greeting}, ${name}\"\n",
             ),
         ])
         .unwrap();
     }
 
-    // `as alias` — bog'lash nomi alias bo'ladi (batareya nomi bilan to'qnashmaslik).
+    // `as alias` — the binding name becomes the alias (to avoid clashing with a battery name).
     #[test]
     fn use_module_alias() {
         run_modules(&[
@@ -2954,15 +2947,15 @@ use ./greet
                 "main.fx",
                 r#"
 use ./tools as t
-(t.classify "x" == "turi: x") | (fail "classify: ${t.classify "x"}")
+(t.classify "x" == "type: x") | (fail "classify: ${t.classify "x"}")
 "#,
             ),
-            ("tools.fx", "exp fn classify v -> \"turi: ${v}\"\n"),
+            ("tools.fx", "exp fn classify v -> \"type: ${v}\"\n"),
         ])
         .unwrap();
     }
 
-    // Modul-private nomlar (oddiy `=`/`fn`) namespace'ga KIRMAYDI — faqat `exp`.
+    // Module-private names (plain `=`/`fn`) do NOT enter the namespace — only `exp`.
     #[test]
     fn use_module_private_nom_eksport_qilinmaydi() {
         run_modules(&[
@@ -2971,7 +2964,7 @@ use ./tools as t
                 r#"
 use ./m
 (m.pub_v == 1) | (fail "pub_v: ${m.pub_v}")
-(m.priv_v == nil) | (fail "priv_v eksport qilinmasligi kerak: ${m.priv_v}")
+(m.priv_v == nil) | (fail "priv_v should not be exported needed: ${m.priv_v}")
 "#,
             ),
             ("m.fx", "exp pub_v = 1\npriv_v = 2\n"),
@@ -2979,8 +2972,8 @@ use ./m
         .unwrap();
     }
 
-    // Nested import (main -> a -> b): modul boshqa modulni import qila oladi,
-    // yo'l import qiluvchi modulning katalogiga nisbatan hal qilinadi.
+    // Nested import (main -> a -> b): a module can import another module, the
+    // path is resolved relative to the importing module's directory.
     #[test]
     fn use_module_nested() {
         run_modules(&[
@@ -2997,9 +2990,9 @@ use ./a
         .unwrap();
     }
 
-    // `../` (yuqori papka) modul yo'li (issue #47): subkatalogdagi fayl
-    // ota-katalogdagi modulni import qila oladi. parse_use `Tok::DotDot`'ni
-    // tan olishi va runtime yo'lni `..` bilan hal qila olishi shu yerda sinaladi.
+    // `../` (parent directory) module path (issue #47): a file in a subdirectory
+    // can import a module in the parent directory. This tests that parse_use
+    // recognizes `Tok::DotDot` and the runtime can resolve a path with `..`.
     #[test]
     fn use_module_yuqori_papka() {
         run_modules(&[
@@ -3007,16 +3000,16 @@ use ./a
                 "sub/test.fx",
                 r#"
 use ../greet
-(greet.greeting == "salom") | (fail "greeting: ${greet.greeting}")
+(greet.greeting == "hello") | (fail "greeting: ${greet.greeting}")
 "#,
             ),
-            ("greet.fx", "exp greeting = \"salom\"\n"),
+            ("greet.fx", "exp greeting = \"hello\"\n"),
         ])
         .unwrap();
     }
 
-    // Cache: bir modul ikki marta `use` qilinsa bir marta bajariladi (idempotent).
-    // Modul top-level `<-` hisoblagichni oshiradi; ikki import'da ham 1 bo'lib qoladi.
+    // Cache: if one module is `use`d twice it runs once (idempotent).
+    // The module's top-level `<-` increments a counter; even with two imports it stays 1.
     #[test]
     fn use_module_cache_bir_marta_bajariladi() {
         run_modules(&[
@@ -3029,13 +3022,13 @@ use ./c as c2
 (c2.n == 1) | (fail "c2.n: ${c2.n}")
 "#,
             ),
-            // `exp n` bir martagina hisoblanadi — cache bo'lsa shunday.
+            // `exp n` is computed only once — that is what caching means.
             ("c.fx", "exp n = 1\n"),
         ])
         .unwrap();
     }
 
-    // Sikllik import (x -> y -> x) aniq xato beradi (cheksiz rekursiya emas).
+    // A circular import (x -> y -> x) gives a clear error (not infinite recursion).
     #[test]
     fn use_module_sikllik_import_xato() {
         let err = run_modules(&[
@@ -3044,25 +3037,25 @@ use ./c as c2
         ])
         .unwrap_err();
         assert!(
-            err.contains("sikllik import"),
-            "sikllik import xatosi kutilgan edi, kelgan: {}",
+            err.contains("circular import"),
+            "circular import error expected, got: {}",
             err
         );
     }
 
-    // Mavjud bo'lmagan modul — aniq "topilmadi" xatosi.
+    // A non-existent module — a clear "not found" error.
     #[test]
     fn use_module_topilmadi_xato() {
         let err = run_modules(&[("main.fx", "use ./yoq\n")]).unwrap_err();
         assert!(
-            err.contains("modul topilmadi"),
-            "topilmadi xatosi kutilgan edi, kelgan: {}",
+            err.contains("module not found"),
+            "not-found error expected, got: {}",
             err
         );
     }
 
-    // `.fx` kengaytmasi avtomatik qo'shiladi: `use ./greet` -> `greet.fx`.
-    // (Yuqoridagi testlar ham shunga tayanadi; bu aniq tekshiruv.)
+    // The `.fx` extension is added automatically: `use ./greet` -> `greet.fx`.
+    // (The tests above rely on this too; this is the explicit check.)
     #[test]
     fn use_module_fx_kengaytma_avto() {
         run_modules(&[
@@ -3075,31 +3068,31 @@ use ./c as c2
         .unwrap();
     }
 
-    // Batareya `use` (`use http`) hamon no-op — fayl yuklanmaydi, dispatch ishlaydi.
+    // A battery `use` (`use http`) is still a no-op — no file is loaded, dispatch works.
     #[test]
     fn use_batareya_hamon_no_op() {
-        // `use math` fayl izlamaydi (xato bermaydi), math.* dispatch ishlaydi.
+        // `use math` does not look for a file (no error), math.* dispatch works.
         run(r#"
 use math
-(math.floor 3.7 == 3) | (fail "floor noto'g'ri")
+(math.floor 3.7 == 3) | (fail "floor wrong")
 "#);
     }
 
-    // Issue #128: math.min/max/pow/sqrt — .fx yuzasidan tekshiruv.
+    // Issue #128: math.min/max/pow/sqrt — a check through the .fx surface.
     #[test]
     fn math_min_max_pow_sqrt() {
         run(r#"
-(math.min 3 7 == 3) | (fail "min noto'g'ri")
-(math.max 3 7 == 7) | (fail "max noto'g'ri")
-(math.min 3 2.5 == 2.5) | (fail "aralash min noto'g'ri")
-(math.pow 2 10 == 1024) | (fail "pow noto'g'ri")
-(math.sqrt 9 == 3.0) | (fail "sqrt noto'g'ri")
+(math.min 3 7 == 3) | (fail "min wrong")
+(math.max 3 7 == 7) | (fail "max wrong")
+(math.min 3 2.5 == 2.5) | (fail "mixed int/float min wrong")
+(math.pow 2 10 == 1024) | (fail "pow wrong")
+(math.sqrt 9 == 3.0) | (fail "sqrt wrong")
 "#);
     }
 
-    // `each i in inf` — cheksiz loop. `stop` chiqaradi, `i` 0 dan ortadi.
-    // REPL/event-loop uchun (issue #27): oldin model 1..1000 hiylasiga murojaat
-    // qilardi; endi tabiiy cheksiz takror bor.
+    // `each i in inf` — an infinite loop. `stop` exits it, `i` increases from 0.
+    // For the REPL/event-loop (issue #27): the model used to resort to the 1..1000
+    // trick; now there is a natural infinite repeat.
     #[test]
     fn each_inf_stop_va_hisoblagich() {
         run(r#"
@@ -3108,11 +3101,11 @@ each i in inf
   if i == 5
     stop
   sum <- sum + i
-(sum == 10) | (fail "0+1+2+3+4 = 10 bo'lishi kerak: ${sum}")
+(sum == 10) | (fail "0+1+2+3+4 = 10 should be: ${sum}")
 "#);
     }
 
-    // `skip` cheksiz loop'da keyingi iteratsiyaga o'tadi (i baribir ortadi).
+    // `skip` in an infinite loop moves to the next iteration (i still increases).
     #[test]
     fn each_inf_skip() {
         run(r#"
@@ -3123,32 +3116,32 @@ each i in inf
   if i % 2 == 0
     skip
   cnt <- cnt + 1
-(cnt == 5) | (fail "toq sonlar 1,3,5,7,9 = 5 ta: ${cnt}")
+(cnt == 5) | (fail "odd sonlar 1,3,5,7,9 = 5 ta: ${cnt}")
 "#);
     }
 
-    // inf qiymat sifatida ishlatib bo'lmaydi — faqat `each i in inf` da.
+    // inf cannot be used as a value — only in `each i in inf`.
     #[test]
     fn inf_qiymat_sifatida_xato() {
-        let err = run_source("x = inf\n").expect_err("inf qiymat bo'lishi xato berishi kerak");
-        assert!(err.contains("inf"), "kutilmagan xato: {}", err);
+        let err = run_source("x = inf\n").expect_err("inf as a value should error");
+        assert!(err.contains("inf"), "unexpected error: {}", err);
     }
 
-    // `each k, v in inf` — ikki o'zgaruvchi ma'nosiz (cheksiz oddiy hisoblagich).
+    // `each k, v in inf` — two variables are meaningless (a plain infinite counter).
     #[test]
     fn each_inf_ikki_ozgaruvchi_xato() {
         let err = run_source("each k, v in inf\n  stop\n")
-            .expect_err("inf bilan ikki o'zgaruvchi xato berishi kerak");
+            .expect_err("two variables with inf should error");
         assert!(
-            err.contains("bitta o'zgaruvchi"),
-            "kutilmagan xato: {}",
+            err.contains("a single variable"),
+            "unexpected error: {}",
             err
         );
     }
 
-    // --- `fluxon check` (faqat parse, issue #55) ---
+    // --- `fluxon check` (parse only, issue #55) ---
 
-    // To'g'ri kod -> check muvaffaqiyatli (Ok).
+    // Valid code -> check succeeds (Ok).
     #[test]
     fn check_togri_kod_ok() {
         check_source(
@@ -3160,33 +3153,33 @@ fn fib n
 log "${fib 10}"
 "#,
         )
-        .expect("to'g'ri kod check'dan o'tishi kerak");
+        .expect("valid code should pass check");
     }
 
-    // Parse/lex xato -> check Err qaytaradi (main bu Err'ni exit 2 ga aylantiradi).
+    // Parse/lex error -> check returns Err (main turns this Err into exit 2).
     #[test]
     fn check_parse_xato_err() {
-        let err = check_source("fn g x\n  ret (\n").expect_err("parse xato Err berishi kerak");
-        assert!(!err.is_empty(), "xato matni bo'sh bo'lmasligi kerak");
+        let err = check_source("fn g x\n  ret (\n").expect_err("a parse error should return Err");
+        assert!(!err.is_empty(), "error text should not be empty");
     }
 
-    // ENG MUHIM: check kodni BAJARMAYDI — runtime side-effect/xato bo'lmaydi.
-    // Quyidagi kod runtime'da fail qiladi (noma'lum nom), lekin sintaksis to'g'ri,
-    // shuning uchun check Ok beradi. Bu check'ning interp'ni o't kazib yuborishini
-    // isbotlaydi (Forge eval-gate QATLAM 1: bajarish XAVFLI).
+    // MOST IMPORTANT: check does NOT execute code — no runtime side effect/error.
+    // The code below fails at runtime (unknown name), but the syntax is valid, so
+    // check returns Ok. This proves that check skips the interp (Forge eval-gate
+    // LAYER 1: executing is DANGEROUS).
     #[test]
     fn check_kodni_bajarmaydi() {
-        // `nomalum_funksiya` runtime'da "noma'lum nom" beradi, lekin sintaksis joyida.
+        // `nomalum_funksiya` gives "unknown name" at runtime, but the syntax is fine.
         check_source("x = nomalum_funksiya 5\n")
-            .expect("sintaktik to'g'ri kod check'dan o'tishi kerak (bajarilmaydi)");
-        // Tasdiq: xuddi shu kod run'da xato beradi (bajariladi).
+            .expect("syntactically valid code should pass check (not executed)");
+        // Confirm: the same code errors under run (it is executed).
         assert!(
             run_source("x = nomalum_funksiya 5\n").is_err(),
-            "run bu kodni bajarib xato berishi kerak (check bilan farq)"
+            "run should execute this code and error (unlike check)"
         );
     }
 
-    // parse_args: `check` buyrug'ini tanib, faylni Command::Check ga joylaydi.
+    // parse_args: recognizes the `check` command and puts the file into Command::Check.
     #[test]
     fn parse_args_check_buyrugi() {
         let args: Vec<String> = ["fluxon", "check", "test.fx"]
@@ -3195,86 +3188,86 @@ log "${fib 10}"
             .collect();
         match parse_args(&args) {
             Some(Command::Check(p)) => assert_eq!(p, "test.fx"),
-            _ => panic!("Command::Check kutilgan edi, topildi boshqa variant"),
+            _ => panic!("expected Command::Check, found another variant"),
         }
     }
 
-    // parse_args: `test` yo'lsiz (standart tests/) va yo'l bilan ishlaydi.
+    // parse_args: `test` works without a path (default tests/) and with a path.
     #[test]
     fn parse_args_test_buyrugi() {
         let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
         match parse_args(&to_args(&["fluxon", "test"])) {
             Some(Command::Test(None)) => {}
-            _ => panic!("Command::Test(None) kutilgan edi"),
+            _ => panic!("expected Command::Test(None)"),
         }
         match parse_args(&to_args(&["fluxon", "test", "smoke.fx"])) {
             Some(Command::Test(Some(p))) => assert_eq!(p, "smoke.fx"),
-            _ => panic!("Command::Test(Some) kutilgan edi"),
+            _ => panic!("expected Command::Test(Some)"),
         }
     }
 
-    // parse_args: version flag build qilingan package versiyasini chiqaradigan
-    // buyruqqa map bo'ladi.
+    // parse_args: a version flag maps to the command that prints the built package
+    // version.
     #[test]
     fn parse_args_version_flaglari() {
         let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
         match parse_args(&to_args(&["fluxon", "--version"])) {
             Some(Command::Version) => {}
-            _ => panic!("Command::Version kutilgan edi"),
+            _ => panic!("expected Command::Version"),
         }
         match parse_args(&to_args(&["fluxon", "-V"])) {
             Some(Command::Version) => {}
-            _ => panic!("Command::Version kutilgan edi"),
+            _ => panic!("expected Command::Version"),
         }
     }
 
-    // parse_args: help flaglari foydalanish matnini chiqaradigan buyruqqa map bo'ladi.
+    // parse_args: help flags map to the command that prints the usage text.
     #[test]
     fn parse_args_help_flaglari() {
         let to_args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
         match parse_args(&to_args(&["fluxon", "--help"])) {
             Some(Command::Help) => {}
-            _ => panic!("Command::Help kutilgan edi"),
+            _ => panic!("expected Command::Help"),
         }
         match parse_args(&to_args(&["fluxon", "-h"])) {
             Some(Command::Help) => {}
-            _ => panic!("Command::Help kutilgan edi"),
+            _ => panic!("expected Command::Help"),
         }
     }
 
-    // issue #136: assert primitivi — truthy shart jim o'tadi, falsy shart
-    // xabar bilan runtime xato beradi (fayl FAIL bo'ladi).
+    // issue #136: the assert primitive — a truthy condition passes silently, a falsy
+    // condition gives a runtime error with the message (the file becomes FAIL).
     #[test]
     fn assert_primitivi() {
         run(r#"
 assert true
-assert (1 + 1 == 2) "matematika ishlaydi"
-assert "bo'sh bo'lmagan str ham truthy"
+assert (1 + 1 == 2) "math works"
+assert "a non-empty str is also truthy"
 "#);
-        let err = run_source(r#"assert (1 == 2) "bir ikki emas""#).unwrap_err();
+        let err = run_source(r#"assert (1 == 2) "one is not two""#).unwrap_err();
         assert!(
-            err.contains("assert yiqildi: bir ikki emas"),
-            "xabar kutilgandek emas: {}",
+            err.contains("assert failed: one is not two"),
+            "message not as expected: {}",
             err
         );
-        // xabarsiz variant ham yiqiladi
+        // the variant without a message fails too
         let err = run_source("assert false").unwrap_err();
-        assert!(err.contains("assert yiqildi"), "xabar: {}", err);
-        // nil ham falsy
+        assert!(err.contains("assert failed"), "message: {}", err);
+        // nil is falsy too
         assert!(run_source("assert nil").is_err());
     }
 
-    // issue #136: `fluxon test` fayl topish — katalogdan .fx'lar rekursiv,
-    // tartiblangan; bitta fayl o'z holicha; yo'q yo'l/bo'sh katalog -> xato.
+    // issue #136: `fluxon test` file discovery — .fx files from a directory,
+    // recursive, ordered; a single file as-is; a missing path/empty directory -> error.
     #[test]
     fn test_fayllarini_topish() {
         let dir = std::env::temp_dir().join(format!("fluxon_test_disc_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir); // oldingi muvaffaqiyatsiz run qoldig'i
+        let _ = std::fs::remove_dir_all(&dir); // leftover from a previous failed run
         let sub = dir.join("ichki");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(dir.join("b.fx"), "assert true").unwrap();
         std::fs::write(dir.join("a.fx"), "assert true").unwrap();
-        std::fs::write(dir.join("eslatma.txt"), "fx emas").unwrap();
+        std::fs::write(dir.join("eslatma.txt"), "not fx").unwrap();
         std::fs::write(sub.join("c.fx"), "assert true").unwrap();
 
         let files = collect_test_files(&dir).unwrap();
@@ -3284,34 +3277,34 @@ assert "bo'sh bo'lmagan str ham truthy"
             .collect();
         assert_eq!(names, ["a.fx", "b.fx", "ichki/c.fx"]);
 
-        // bitta fayl — ro'yxat faqat o'sha fayldan iborat
+        // a single file — the list consists of only that file
         let one = collect_test_files(&dir.join("a.fx")).unwrap();
         assert_eq!(one.len(), 1);
 
-        // .fx bo'lmagan aniq fayl — discovery xatosi (Fluxon sifatida bajarilmaydi)
+        // an explicit non-.fx file — a discovery error (not executed as Fluxon)
         let err = collect_test_files(&dir.join("eslatma.txt")).unwrap_err();
-        assert!(err.contains(".fx fayl emas"), "xabar: {}", err);
+        assert!(err.contains("is not a .fx file"), "message: {}", err);
 
-        // mavjud bo'lmagan yo'l — xato
+        // a non-existent path — error
         assert!(collect_test_files(&dir.join("yoq")).is_err());
 
-        // .fx'siz katalog — xato (jim "0 fayl o'tdi" chalg'ituvchi bo'lardi)
+        // a directory with no .fx — error (a silent "0 files passed" would mislead)
         let empty = dir.join("bosh");
         std::fs::create_dir_all(&empty).unwrap();
         assert!(collect_test_files(&empty).is_err());
 
-        // halqali symlink (katalog o'ziga ishora) cheksiz rekursiya bermasin —
-        // file_type() symlink'ni kuzatmaydi, halqa shunchaki o'tkazib yuboriladi.
+        // a looping symlink (a directory pointing to itself) must not cause infinite
+        // recursion — file_type() does not follow the symlink, the loop is simply skipped.
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&dir, dir.join("halqa")).unwrap();
             let with_loop = collect_test_files(&dir).unwrap();
-            assert_eq!(with_loop.len(), 3, "halqa fayl ro'yxatini o'zgartirmasin");
+            assert_eq!(with_loop.len(), 3, "a loop should not change the file list");
         }
 
-        // o'qib bo'lmaydigan ichki katalog jim o'tkazilmasin — xato ko'tarilsin
-        // (codex P2). root ruxsat cheklovini chetlab o'tadi, shuning uchun faqat
-        // cheklov haqiqatan ishlagan muhitda tekshiramiz (CI runner non-root).
+        // an unreadable subdirectory must not be silently skipped — an error must be
+        // raised (codex P2). root bypasses permission restrictions, so we only check
+        // in an environment where the restriction actually applies (the CI runner is non-root).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3321,23 +3314,23 @@ assert "bo'sh bo'lmagan str ham truthy"
             std::fs::set_permissions(&yopiq, std::fs::Permissions::from_mode(0o000)).unwrap();
             if std::fs::read_dir(&yopiq).is_err() {
                 let err = collect_test_files(&dir).unwrap_err();
-                assert!(err.contains("o'qib bo'lmadi"), "xabar: {}", err);
+                assert!(err.contains("could not read"), "message: {}", err);
             }
-            // cleanup uchun ruxsatni qaytaramiz
+            // restore the permission for cleanup
             std::fs::set_permissions(&yopiq, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // issue #136: yiqilgan fayl keyingilarni to'xtatmaydi — har fayl alohida
-    // hisoblanadi va yakunda (PASS, FAIL) soni to'g'ri chiqadi.
+    // issue #136: a failed file does not stop the rest — each file is counted
+    // separately and the final (PASS, FAIL) count comes out correct.
     #[test]
     fn test_runner_fail_keyingisini_toxtatmaydi() {
         let dir = std::env::temp_dir().join(format!("fluxon_test_run_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir); // oldingi muvaffaqiyatsiz run qoldig'i
+        let _ = std::fs::remove_dir_all(&dir); // leftover from a previous failed run
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("01_yiqiladi.fx"), r#"assert false "ataylab""#).unwrap();
+        std::fs::write(dir.join("01_yiqiladi.fx"), r#"assert false "on purpose""#).unwrap();
         std::fs::write(dir.join("02_otadi.fx"), "assert (2 > 1)").unwrap();
 
         let files = collect_test_files(&dir).unwrap();
@@ -3347,27 +3340,27 @@ assert "bo'sh bo'lmagan str ham truthy"
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // issue #57: symbol MATNGA aylanganda `:` prefiks tashlanadi
-    // (interpolatsiya, str.str, `+` birlashtirish). Symbol literal sintaksisi
-    // (`:florist`) o'zgarmaydi — faqat matn ko'rinishi `:` siz.
+    // issue #57: when a symbol turns into TEXT the `:` prefix is dropped
+    // (interpolation, str.str, `+` concatenation). The symbol literal syntax
+    // (`:florist`) is unchanged — only the text representation is without `:`.
     #[test]
     fn sym_to_text_colon_tashlanadi() {
         run(r#"
 s = :florist
-# interpolatsiya
-(("v/${s}") == "v/florist") | (fail "interpolatsiya: ${"v/${s}"}")
+# interpolation
+(("v/${s}") == "v/florist") | (fail "interpolation: ${"v/${s}"}")
 # str.str
 ((str.str s) == "florist") | (fail "str.str: ${str.str s}")
-# `+` birlashtirish (ikkala tomon)
-(("p/" + s) == "p/florist") | (fail "chap + : ${"p/" + s}")
-((s + "/q") == "florist/q") | (fail "o'ng + : ${s + "/q"}")
-# symbol literal va taqqoslash O'ZGARMAYDI
-(s == :florist) | (fail "symbol taqqoslash buzildi")
+# `+` concatenation (both sides)
+(("p/" + s) == "p/florist") | (fail "left + : ${"p/" + s}")
+((s + "/q") == "florist/q") | (fail "right + : ${s + "/q"}")
+# symbol literal and comparison are UNCHANGED
+(s == :florist) | (fail "symbol comparison broke")
 "#);
     }
 
-    // Symbol list/map ICHIDA `:` prefiksini SAQLAYDI — u yerda symbol
-    // string'dan ajralib turishi kerak (repr matn ko'rinishidan farq qiladi).
+    // INSIDE a list/map a symbol KEEPS the `:` prefix — there a symbol must be
+    // distinguishable from a string (repr differs from the text representation).
     #[test]
     fn sym_repr_listda_colon_saqlaydi() {
         run(r#"
@@ -3378,8 +3371,8 @@ xs = [:a "b"]
 
     // --- auth battery (issue #69) ---
     //
-    // $AUTH_SECRET env'ga muhtoj testlar uchun lock — parallel testlar env'ga
-    // race qilmasin (AI_ENV_LOCK naqshi).
+    // A lock for tests that need the $AUTH_SECRET env — so parallel tests do not
+    // race on the env (the AI_ENV_LOCK pattern).
     static AUTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -3389,16 +3382,16 @@ xs = [:a "b"]
         run(r#"
 use auth
 token = auth.jwt {sub:"u1" tenant:"t1" role:"admin"}
-# imzolangan JWT — 3 segment (header.payload.imzo)
+# a signed JWT — 3 segments (header.payload.signature)
 parts = str.split token "."
-(parts.len == 3) | (fail "JWT 3 segment emas: ${parts.len}")
-# verify -> payload map qaytaradi, da'volar saqlanadi
+(parts.len == 3) | (fail "JWT 3 segment not: ${parts.len}")
+# verify -> returns the payload map, claims are preserved
 claims = auth.verify token
-(claims.sub == "u1") | (fail "sub noto'g'ri: ${claims.sub}")
-(claims.tenant == "t1") | (fail "tenant noto'g'ri: ${claims.tenant}")
-(claims.role == "admin") | (fail "role noto'g'ri: ${claims.role}")
-# iat/exp avtomatik qo'shilgan
-(claims.exp > claims.iat) | (fail "exp iat'dan katta bo'lishi kerak")
+(claims.sub == "u1") | (fail "sub wrong: ${claims.sub}")
+(claims.tenant == "t1") | (fail "tenant wrong: ${claims.tenant}")
+(claims.role == "admin") | (fail "role wrong: ${claims.role}")
+# iat/exp added automatically
+(claims.exp > claims.iat) | (fail "exp should be greater than iat")
 "#);
     }
 
@@ -3406,18 +3399,18 @@ claims = auth.verify token
     fn auth_verify_buzilgan_token_xato() {
         let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
-        // Imzo buzilgan token -> auth.verify err (Fluxon'da `try` o'tkazgich, xato
-        // run'ni to'xtatadi — shuning uchun Rust tomonda expect_err bilan
-        // tekshiramiz). token'ga belgi qo'shsak imzo mos kelmaydi.
+        // A token with a tampered signature -> auth.verify err (in Fluxon `try` is a
+        // passthrough, the error stops the run — so we check with expect_err on the
+        // Rust side). Adding a character to the token makes the signature mismatch.
         let err = run_source(
             r#"use auth
 token = auth.jwt {sub:"u1"}
 auth.verify (token + "x")"#,
         )
-        .expect_err("buzilgan token xato berishi kerak");
+        .expect_err("a tampered token should error");
         assert!(
-            err.contains("imzo"),
-            "kutilgan imzo xatosi, topildi: {}",
+            err.contains("signature"),
+            "expected signature error, got: {}",
             err
         );
     }
@@ -3426,15 +3419,15 @@ auth.verify (token + "x")"#,
     fn auth_verify_yaroqsiz_shakl_xato() {
         let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
-        // 3 segmentdan kam — JWT shakli noto'g'ri -> err.
+        // Fewer than 3 segments — the JWT format is invalid -> err.
         let err = run_source(
             r#"use auth
 auth.verify "faqat.ikki""#,
         )
-        .expect_err("yaroqsiz shakl xato berishi kerak");
+        .expect_err("an invalid format should error");
         assert!(
-            err.contains("shakl") || err.contains("segment"),
-            "kutilgan shakl xatosi, topildi: {}",
+            err.contains("format") || err.contains("segment"),
+            "expected format error, got: {}",
             err
         );
     }
@@ -3443,19 +3436,19 @@ auth.verify "faqat.ikki""#,
     fn auth_verify_exp_siz_token_rad_etiladi() {
         let _guard = AUTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("AUTH_SECRET", "sirli-kalit-123") };
-        // `exp:nil` payload -> auth.jwt `or_insert` nil'ni override qilmaydi,
-        // ya'ni token sonli `exp`siz imzolanadi. To'g'ri imzolangan bo'lsa ham,
-        // auth.verify uni RAD ETISHI kerak (aks holda abadiy amal qilardi —
-        // Codex P2). Kalit to'g'ri, shuning uchun bu imzo emas, exp xatosi.
+        // An `exp:nil` payload -> auth.jwt `or_insert` does not override nil,
+        // i.e. the token is signed without a numeric `exp`. Even if correctly signed,
+        // auth.verify must REJECT it (otherwise it would be valid forever —
+        // Codex P2). The key is correct, so this is an exp error, not a signature one.
         let err = run_source(
             r#"use auth
 token = auth.jwt {sub:"u1" exp:nil}
 auth.verify token"#,
         )
-        .expect_err("exp'siz token rad etilishi kerak");
+        .expect_err("a token without exp should be rejected");
         assert!(
-            err.contains("exp") || err.contains("muddat"),
-            "kutilgan exp-yo'q xatosi, topildi: {}",
+            err.contains("exp") || err.contains("expir"),
+            "expected exp-missing error, got: {}",
             err
         );
     }
@@ -3469,135 +3462,134 @@ auth.verify token"#,
             r#"use auth
 token = auth.jwt {sub:"u1"}"#,
         )
-        .expect_err("$AUTH_SECRET yo'qligida xato kutiladi");
+        .expect_err("a missing $AUTH_SECRET should error");
         if let Some(v) = saved {
             unsafe { std::env::set_var("AUTH_SECRET", v) };
         }
         assert!(
             err.contains("AUTH_SECRET"),
-            "kutilgan AUTH_SECRET xatosi, topildi: {}",
+            "expected AUTH_SECRET error, got: {}",
             err
         );
     }
 
     #[test]
     fn auth_hash_check_roundtrip() {
-        // hash/check env'ga muhtoj emas (lock kerak emas).
+        // hash/check do not need the env (no lock required).
         run(r#"
 use auth
 h = auth.hash "user-parol"
 # argon2id PHC string
-(str.has h "argon2id") | (fail "argon2id hash emas: ${h}")
-# to'g'ri parol -> true
-(auth.check "user-parol" h) | (fail "to'g'ri parol check false berdi")
-# noto'g'ri parol -> false
-((auth.check "xato-parol" h) == false) | (fail "noto'g'ri parol check true berdi")
+(str.has h "argon2id") | (fail "argon2id hash not: ${h}")
+# correct password -> true
+(auth.check "user-parol" h) | (fail "check returned false for correct password")
+# wrong password -> false
+((auth.check "wrong-password" h) == false) | (fail "check returned true for wrong password")
 "#);
     }
 
     #[test]
     fn auth_noma_lum_funksiya_xato() {
-        // auth.foo -> dispatch'ga yetib "auth.foo yo'q" beradi (noma'lum nom EMAS).
-        let err =
-            run_source(r#"auth.foo "x""#).expect_err("noma'lum auth funksiyasi xato berishi kerak");
+        // auth.foo -> reaches dispatch and gives "no auth.foo" (NOT unknown name).
+        let err = run_source(r#"auth.foo "x""#).expect_err("an unknown auth function should error");
         assert!(
-            err.contains("auth.foo") && !err.contains("noma'lum nom"),
-            "auth dispatch'ga yetib funksiya xatosi berishi kerak, topildi: {}",
+            err.contains("auth.foo") && !err.contains("unknown name"),
+            "auth should reach dispatch and give a function error, got: {}",
             err
         );
     }
 
     #[test]
     fn auth_ozgaruvchi_modulni_yopadi() {
-        // `auth` o'zgaruvchi sifatida e'lon qilinsa, u modul emas — oddiy map.
+        // If `auth` is declared as a variable, it is not a module — a plain map.
         run(r#"
 auth = {jwt:"shadowed"}
 log "auth.jwt = ${auth.jwt}"
 "#);
     }
 
-    // Issue #106: string interpolatsiya ichidagi parse xatosi asl qatorni
-    // ko'rsatishi kerak ("1-qatorda" ga yiqilib qolmasligi) va "interpolatsiya
-    // ichida:" prefiksi bilan kelishi kerak.
+    // Issue #106: a parse error inside string interpolation must point to the
+    // original line (not collapse to "on line 1") and must arrive with the
+    // "inside interpolation:" prefix.
     #[test]
     fn interp_parse_xatosi_asl_qatorni_korsatadi() {
         let err = run_source("log \"a\"\nlog \"b\"\nlog \"c\"\nlog \"d\"\nlog \"${x +}\"\n")
-            .expect_err("buzuq interpolatsiya ifodasi xato berishi kerak");
+            .expect_err("a broken interpolation expression should error");
         assert!(
-            err.contains("5-qatorda"),
-            "xato asl qatorni (5) ko'rsatishi kerak, topildi: {}",
+            err.contains("on line 5"),
+            "error should point to the original line (5), got: {}",
             err
         );
         assert!(
-            err.contains("interpolatsiya ichida"),
-            "parse xatosi ham 'interpolatsiya ichida' prefiksini olishi kerak, topildi: {}",
+            err.contains("inside interpolation"),
+            "the parse error should also carry the 'inside interpolation' prefix, got: {}",
             err
         );
     }
 
-    // Issue #106: lex xatosi ham asl qatorni saqlaydi. Ko'p qatorli ifoda
-    // ham qator hisobini buzmaydi — inner string 3-qatorda ochiladi.
+    // Issue #106: a lex error also preserves the original line. A multi-line
+    // expression does not break the line count either — the inner string opens on line 3.
     #[test]
     fn interp_lex_xatosi_asl_qatorni_korsatadi() {
         let err = run_source("log \"a\"\nlog \"b\"\nlog \"v=${\"x\ny\"}\"\n")
-            .expect_err("ko'p qatorli inner string xato berishi kerak");
+            .expect_err("a multi-line inner string should error");
         assert!(
-            err.contains("interpolatsiya ichida") && err.contains("3-qatorda"),
-            "lex xatosi asl qatorni (3) ko'rsatishi kerak, topildi: {}",
+            err.contains("inside interpolation") && err.contains("on line 3"),
+            "the lex error should point to the original line (3), got: {}",
             err
         );
     }
 
-    // Issue #106: ${...} chegarasi ichki string literallarni hisobga oladi —
-    // string ichidagi `}` interpolatsiyani erta yopmaydi.
+    // Issue #106: the ${...} boundary accounts for inner string literals —
+    // a `}` inside a string does not close the interpolation early.
     #[test]
     fn interp_ichki_string_qavsni_yopmaydi() {
         run(r#"
 x = "v: ${"inner } brace"}"
-(x == "v: inner } brace") | (fail "ichki string qavs noto'g'ri ishlandi: ${x}")
+(x == "v: inner } brace") | (fail "inner string brace wrong ishlandi: ${x}")
 "#);
     }
 
-    // Issue #106: ichki string ichidagi escape qilingan tirnoq (\") string'ni
-    // yopmaydi, undan keyingi `}` ham interpolatsiyani yopmaydi.
+    // Issue #106: an escaped quote (\") inside an inner string does not close the
+    // string, and the `}` after it does not close the interpolation either.
     #[test]
     fn interp_ichki_string_escape_tirnoq() {
         run(r#"
 x = "x=${"a\"}b"}"
-(x == "x=a\"}b") | (fail "escape qilingan tirnoq noto'g'ri ishlandi: ${x}")
+(x == "x=a\"}b") | (fail "escaped quote wrong ishlandi: ${x}")
 "#);
     }
 
-    // Issue #130: """ blok satr — umumiy chekinish kesiladi, yopuvchi """
-    // o'z qatorida bo'lsa oxirida \n qolmaydi.
+    // Issue #130: """ block string — the common indentation is stripped, if the
+    // closing """ is on its own line there is no trailing \n.
     #[test]
     fn blok_satr_dedent_va_trailing_yoq() {
         run(r#"
 s = """
-  salom
-  dunyo
+  hello
+  world
   """
-(s == "salom\ndunyo") | (fail "blok satr dedent xato: ${s}")
+(s == "hello\nworld") | (fail "block string dedent error: ${s}")
 "#);
     }
 
-    // Issue #130: blok satr ichida ${expr} va $ident interpolatsiya ishlaydi.
+    // Issue #130: ${expr} and $ident interpolation work inside a block string.
     #[test]
     fn blok_satr_interpolatsiya() {
         run(r#"
 name = "fluxon"
 n = 2
 s = """
-  salom ${name}!
+  hello ${name}!
   n+1 = ${n + 1}
-  qisqa: $name
+  short: $name
   """
-(s == "salom fluxon!\nn+1 = 3\nqisqa: fluxon") | (fail "blok satr interpolatsiya xato: ${s}")
+(s == "hello fluxon!\nn+1 = 3\nshort: fluxon") | (fail "block string interpolation error: ${s}")
 "#);
     }
 
-    // Issue #130: bo'sh qator \n bo'ladi, `"` va `""` escape'siz erkin —
-    // JSON/HTML parchalari to'g'ridan-to'g'ri yoziladi.
+    // Issue #130: an empty line becomes \n, `"` and `""` are free without escaping —
+    // JSON/HTML snippets are written directly.
     #[test]
     fn blok_satr_bosh_qator_va_tirnoq() {
         run(r#"
@@ -3606,12 +3598,12 @@ s = """
 
   {"json": true}
   """
-(s == "a \"quoted\"\n\n{\"json\": true}") | (fail "blok satr tirnoq/bo'sh qator xato: ${s}")
+(s == "a \"quoted\"\n\n{\"json\": true}") | (fail "block string quote/empty line error: ${s}")
 "#);
     }
 
-    // Issue #130: minimal chekinishdan chuqurroq qatorlar nisbiy joyini saqlaydi
-    // (SQL/prompt ichki strukturasi buzilmasin).
+    // Issue #130: lines deeper than the minimal indentation keep their relative
+    // position (so the inner structure of SQL/a prompt is not broken).
     #[test]
     fn blok_satr_nisbiy_chekinish() {
         run(r#"
@@ -3619,208 +3611,208 @@ s = """
   SELECT *
     FROM t
   """
-(s == "SELECT *\n  FROM t") | (fail "nisbiy chekinish saqlanishi kerak: ${s}")
+(s == "SELECT *\n  FROM t") | (fail "relative indentation should be preserved needed: ${s}")
 "#);
     }
 
-    // Issue #130: yopuvchi """ kontent qatorining oxirida ham kelishi mumkin.
+    // Issue #130: the closing """ may also come at the end of a content line.
     #[test]
     fn blok_satr_kontent_qatorida_yopilish() {
         run(r#"
 s = """
-  bitta qator"""
-(s == "bitta qator") | (fail "kontent qatorida yopilish xato: ${s}")
+  one line"""
+(s == "one line") | (fail "closing on a content line error: ${s}")
 "#);
     }
 
-    // Issue #130: blok satr indentatsiyali blok (fn tanasi) ichida ham ishlaydi —
-    // satr ichidagi qatorlar INDENT/DEDENT chiqarmaydi.
+    // Issue #130: a block string also works inside an indented block (an fn body) —
+    // the lines within the string do not emit INDENT/DEDENT.
     #[test]
     fn blok_satr_fn_ichida() {
         run(r#"
 fn f x ->
   s = """
-    ichki ${x}
+    inner ${x}
     """
   ret s
-((f "a") == "ichki a") | (fail "blok satr fn ichida xato")
+((f "a") == "inner a") | (fail "block string inside fn error")
 "#);
     }
 
-    // Issue #130: uchta ketma-ket tirnoq kerak bo'lsa \""" yoziladi.
+    // Issue #130: if three consecutive quotes are needed, write \""".
     #[test]
     fn blok_satr_escape_uchta_tirnoq() {
         run(r#"
 s = """
-  uchta: \"""
+  three: \"""
   """
-(s == "uchta: \"\"\"") | (fail "escape tirnoq xato: ${s}")
+(s == "three: \"\"\"") | (fail "escape quote error: ${s}")
 "#);
     }
 
-    // Issue #130: ochuvchi """ dan keyin shu qatorda matn — aniq xato
-    // (kanonik bitta yo'l: kontent yangi qatordan).
+    // Issue #130: text on the same line after the opening """ — a clear error
+    // (the one canonical way: content starts on a new line).
     #[test]
     fn blok_satr_ochilishda_matn_xato() {
         let err = run_source("s = \"\"\"matn\nx\"\"\"\n")
-            .expect_err("ochuvchi qatordagi matn xato berishi kerak");
-        assert!(err.contains("yangi qatordan"), "kutilmagan xato: {}", err);
+            .expect_err("text on the opening line should error");
+        assert!(err.contains("a new line"), "unexpected error: {}", err);
     }
 
-    // Issue #130: yopilmagan blok satr aniq xato beradi (ochilgan qator bilan).
+    // Issue #130: an unterminated block string gives a clear error (with the opening line).
     #[test]
     fn blok_satr_yopilmagan_xato() {
-        let err =
-            run_source("s = \"\"\"\n  abc\n").expect_err("yopilmagan blok satr xato berishi kerak");
+        let err = run_source("s = \"\"\"\n  abc\n")
+            .expect_err("an unterminated block string should error");
         assert!(
-            err.contains("yopilmagan blok satr") && err.contains("1-qatorda"),
-            "kutilmagan xato: {}",
+            err.contains("unterminated block string") && err.contains("on line 1"),
+            "unexpected error: {}",
             err
         );
     }
 
-    // Issue #131: crypto battery Fluxon kodidan ochiq — argumentli chaqiruv
-    // (Call) ham, argument'siz `crypto.uuid` (Field) ham ishlaydi.
+    // Issue #131: the crypto battery is accessible from Fluxon code — both a call
+    // with arguments (Call) and the argument-less `crypto.uuid` (Field) work.
     #[test]
     fn crypto_battery_fluxon_kodidan() {
         run(r#"
 h = crypto.sha256 "abc"
-(h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") | (fail "sha256 buzildi: ${h}")
+(h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") | (fail "sha256 broke: ${h}")
 sig = crypto.hmac "Jefe" "what do ya want for nothing?"
-(sig == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") | (fail "hmac buzildi: ${sig}")
-((crypto.b64d (crypto.b64 "salom dunyo")) == "salom dunyo") | (fail "b64 roundtrip buzildi")
-((crypto.hex "abz") == "61627a") | (fail "hex buzildi")
+(sig == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") | (fail "hmac broke: ${sig}")
+((crypto.b64d (crypto.b64 "hello world")) == "hello world") | (fail "b64 roundtrip broke")
+((crypto.hex "abz") == "61627a") | (fail "hex broke")
 u = crypto.uuid
-((str.len u) == 36) | (fail "uuid uzunligi buzildi: ${u}")
+((str.len u) == 36) | (fail "uuid uzunligi broke: ${u}")
 (u != crypto.uuid) | (fail "uuid takrorlandi")
 "#);
     }
 
-    // Issue #131: crypto.b64d noto'g'ri kirishda aniq xato (panic emas).
+    // Issue #131: crypto.b64d gives a clear error on invalid input (not a panic).
     #[test]
     fn crypto_b64d_xato_beradi() {
-        let err = run_source("crypto.b64d \"bu base64 emas!!!\"")
-            .expect_err("yaroqsiz base64 xato berishi kerak");
-        assert!(err.contains("base64"), "kutilmagan xato: {}", err);
+        let err = run_source("crypto.b64d \"this is not base64!!!\"")
+            .expect_err("invalid base64 should error");
+        assert!(err.contains("base64"), "unexpected error: {}", err);
     }
 
-    // Issue #131 (review): foydalanuvchi `crypto` nomini e'lon qilgan bo'lsa
-    // (masalan `use ./crypto` moduli), battery emas — uniki ustun. auth/ai
-    // bilan bir xil shadowing xatti-harakati, Call ham Field yo'li ham.
+    // Issue #131 (review): if the user has declared the name `crypto`
+    // (e.g. a `use ./crypto` module), it is not the battery — theirs wins. Same
+    // shadowing behavior as auth/ai, on both the Call and the Field path.
     #[test]
     fn crypto_lokal_nom_battery_dan_ustun() {
         run(r#"
 crypto = {sha256: \s -> "meniki ${s}" uuid: 7}
-((crypto.sha256 "x") == "meniki x") | (fail "lokal crypto.sha256 ustun bo'lmadi")
-((crypto.uuid) == 7) | (fail "lokal crypto.uuid ustun bo'lmadi")
+((crypto.sha256 "x") == "meniki x") | (fail "lokal crypto.sha256 column did not happen")
+((crypto.uuid) == 7) | (fail "lokal crypto.uuid column did not happen")
 "#);
     }
 
-    // Issue #132: bytes turi asoslari — of/str/len/slice, tenglik, Display.
+    // Issue #132: bytes type basics — of/str/len/slice, equality, Display.
     #[test]
     fn bytes_turi_asoslari() {
         run(r#"
-b = bytes.of "salom"
-((bytes.len b) == 5) | (fail "bytes.len buzildi")
-((bytes.str b) == "salom") | (fail "bytes.str buzildi")
-(b == (bytes.of "salom")) | (fail "bytes tenglik buzildi")
-(b != (bytes.of "boshqa")) | (fail "bytes notenglik buzildi")
-qism = bytes.slice b 0 2
-((bytes.str qism) == "sa") | (fail "bytes.slice buzildi")
-("${b}" == "<bytes 5>") | (fail "bytes interpolatsiya ko'rinishi buzildi: ${b}")
+b = bytes.of "hello"
+((bytes.len b) == 5) | (fail "bytes.len broke")
+((bytes.str b) == "hello") | (fail "bytes.str broke")
+(b == (bytes.of "hello")) | (fail "bytes equality broke")
+(b != (bytes.of "other")) | (fail "bytes inequality broke")
+part = bytes.slice b 0 2
+((bytes.str part) == "he") | (fail "bytes.slice broke")
+("${b}" == "<bytes 5>") | (fail "bytes interpolation representation broke: ${b}")
 "#);
     }
 
-    // Issue #132: bytes.len BAYT o'lchaydi, str.len BELGI — diakritikali matnda
-    // farq ko'rinadi (’ U+2019 = 3 bayt, 1 belgi).
+    // Issue #132: bytes.len measures BYTES, str.len measures CHARACTERS — the
+    // difference shows in text with diacritics (’ U+2019 = 3 bytes, 1 character).
     #[test]
     fn bytes_len_bayt_str_len_belgi() {
         run(r#"
 s = "o’zbek"
-((str.len s) == 6) | (fail "str.len belgi sanashi kerak")
-((bytes.len (bytes.of s)) == 8) | (fail "bytes.len bayt sanashi kerak")
+((str.len s) == 6) | (fail "str.len belgi sanashi needed")
+((bytes.len (bytes.of s)) == 8) | (fail "bytes.len bayt sanashi needed")
 "#);
     }
 
-    // Issue #132: crypto bilan integratsiya — b64db ikkilik dekodlash, bytes
-    // kirishlar str bilan bir xil natija.
+    // Issue #132: integration with crypto — b64db binary decoding, bytes inputs
+    // give the same result as str.
     #[test]
     fn bytes_crypto_integratsiya() {
         run(r#"
 data = crypto.b64db "AP/+iA=="
-((bytes.len data) == 4) | (fail "b64db uzunlik buzildi")
-((crypto.b64 data) == "AP/+iA==") | (fail "bytes b64 aylanasi buzildi")
-((crypto.sha256 (bytes.of "abc")) == (crypto.sha256 "abc")) | (fail "sha256 bytes/str farq qildi")
+((bytes.len data) == 4) | (fail "b64db uzunlik broke")
+((crypto.b64 data) == "AP/+iA==") | (fail "bytes b64 aylanasi broke")
+((crypto.sha256 (bytes.of "abc")) == (crypto.sha256 "abc")) | (fail "sha256 bytes/str differ")
 "#);
     }
 
-    // Issue #132: bytes.str UTF-8 bo'lmagan baytlarda aniq xato (jim buzilmaydi).
+    // Issue #132: bytes.str gives a clear error on non-UTF-8 bytes (not silent corruption).
     #[test]
     fn bytes_str_yaroqsiz_utf8_xato() {
         let err = run_source("bytes.str (crypto.b64db \"//4=\")")
-            .expect_err("yaroqsiz UTF-8 xato berishi kerak");
-        assert!(err.contains("UTF-8"), "kutilmagan xato: {}", err);
+            .expect_err("invalid UTF-8 should error");
+        assert!(err.contains("UTF-8"), "unexpected error: {}", err);
     }
 
-    // Issue #132: fs bilan ikkilik aylana — bytes yoziladi, fs.readb aynan
-    // o'sha baytlarni qaytaradi (rasm/PDF stsenariysi).
+    // Issue #132: a binary round-trip with fs — bytes are written, fs.readb returns
+    // exactly those bytes (the image/PDF scenario).
     #[test]
     fn bytes_fs_integratsiya() {
         run(r#"
 yol = "/tmp/fluxon_bytes_it_" + (rand.str 10) + ".bin"
 fs.write yol (crypto.b64db "AP/+iA==")
 b = fs.readb yol
-((bytes.len b) == 4) | (fail "fs.readb uzunlik buzildi")
-((crypto.b64 b) == "AP/+iA==") | (fail "fs ikkilik aylanasi buzildi")
+((bytes.len b) == 4) | (fail "fs.readb uzunlik broke")
+((crypto.b64 b) == "AP/+iA==") | (fail "fs ikkilik aylanasi broke")
 fs.del yol
-((fs.readb yol) == nil) | (fail "o'chirilgan fayl nil bo'lishi kerak")
+((fs.readb yol) == nil) | (fail "deleted fayl nil should be")
 "#);
     }
 
-    // Issue #132: json.enc bytes'ni base64 matn sifatida kodlaydi (yo'qotishsiz).
+    // Issue #132: json.enc encodes bytes as base64 text (without loss).
     #[test]
     fn bytes_json_enc_base64() {
         run(r#"
 b = crypto.b64db "AP/+iA=="
-((json.enc {fayl:b}) == "{\"fayl\":\"AP/+iA==\"}") | (fail "json.enc bytes buzildi")
+((json.enc {fayl:b}) == "{\"fayl\":\"AP/+iA==\"}") | (fail "json.enc bytes broke")
 "#);
     }
 
-    // Issue #138: REPL bitta blokni bajarib oxirgi ifoda QIYMATINI qaytaradi
-    // (chop etish uchun). `run` () qaytaradi — bu farq REPL natijasini ko'rsatishga
-    // imkon beradi. lex_parse + run_repl_chunk REPL'da aynan shu yo'l bilan ishlaydi.
+    // Issue #138: the REPL runs one block and returns the last expression's VALUE
+    // (to print). `run` returns () — this difference lets the REPL show the result.
+    // lex_parse + run_repl_chunk is exactly how the REPL works.
     fn repl_chunk(interp: &interp::Interp, src: &str) -> Result<value::Value, String> {
         interp.run_repl_chunk(&lex_parse(src)?)
     }
 
-    // Value Debug/PartialEq derive QILMAYDI (closure'lar) — qiymatni `repr()` matni
-    // bilan solishtiramiz (REPL ham aynan repr'ni chop etadi).
+    // Value does NOT derive Debug/PartialEq (closures) — we compare the value via its
+    // `repr()` text (the REPL also prints exactly the repr).
     #[test]
     fn repl_oxirgi_ifoda_qiymatini_qaytaradi() {
         let interp = interp::Interp::new_arc();
-        // Ifoda qiymati qaytadi
+        // An expression value returns
         assert_eq!(repl_chunk(&interp, "1 + 2").unwrap().repr(), "3");
-        // Bind (e'lon) nil qaytaradi — REPL bunday natijani chop ETMAYDI
+        // A bind (declaration) returns nil — the REPL does NOT print such a result
         assert!(matches!(
             repl_chunk(&interp, "x = 10").unwrap(),
             value::Value::Nil
         ));
-        // Oxirgi stmt qiymati: oldingi chunk'dagi `x` ko'rinadi (state saqlanadi)
+        // Last stmt value: `x` from the previous chunk is visible (state persists)
         assert_eq!(repl_chunk(&interp, "x * 3").unwrap().repr(), "30");
-        // String qiymat repr'da tirnoq bilan ko'rsatiladi
+        // A string value is shown with quotes in repr
         assert_eq!(
-            repl_chunk(&interp, r#""salom""#).unwrap().repr(),
-            "\"salom\""
+            repl_chunk(&interp, r#""hello""#).unwrap().repr(),
+            "\"hello\""
         );
     }
 
     #[test]
     fn repl_state_chunklar_orasida_saqlanadi() {
         let interp = interp::Interp::new_arc();
-        // fn ta'rifi bir chunk'da, chaqiruvi keyingisida — bitta interp'da yashaydi.
+        // The fn definition in one chunk, the call in the next — they live in one interp.
         repl_chunk(&interp, "fn sq n\n  ret n * n").unwrap();
         assert_eq!(repl_chunk(&interp, "sq 9").unwrap().repr(), "81");
-        // <- bilan o'zgaruvchi va keyin uni o'qish
+        // a variable with <- and then reading it
         repl_chunk(&interp, "c <- 0").unwrap();
         repl_chunk(&interp, "c <- c + 5").unwrap();
         assert_eq!(repl_chunk(&interp, "c").unwrap().repr(), "5");
@@ -3829,21 +3821,21 @@ b = crypto.b64db "AP/+iA=="
     #[test]
     fn repl_xato_qaytadi_sessiya_oldinmas() {
         let interp = interp::Interp::new_arc();
-        // Noma'lum nom xato qaytaradi (panic emas) — REPL buni stderr'ga chiqarib
-        // davom etadi. Keyingi chunk normal ishlaydi (interp buzilmaydi).
+        // An unknown name returns an error (not a panic) — the REPL prints it to stderr
+        // and continues. The next chunk works normally (the interp is not corrupted).
         assert!(repl_chunk(&interp, "nosuchvar + 1").is_err());
         assert_eq!(repl_chunk(&interp, "1 + 1").unwrap().repr(), "2");
     }
 
     #[test]
     fn repl_multiline_block_heuristikasi() {
-        // Bir qatorli ifoda — blok emas (parse o'tishi bilan darhol eval bo'ladi).
+        // A single-line expression — not a block (evaluated as soon as it parses).
         assert!(!is_multiline_block("1 + 2"));
-        // if + indentatsiyali body — blok (else/davom kelishi mumkin, kutiladi).
-        assert!(is_multiline_block("if x > 5\n  \"katta\""));
-        // tab bilan chekinish ham blok hisoblanadi.
+        // if + an indented body — a block (else/continuation may come, awaited).
+        assert!(is_multiline_block("if x > 5\n  \"big\""));
+        // tab indentation also counts as a block.
         assert!(is_multiline_block("fn f\n\tret 1"));
-        // Bo'sh bufer — blok emas.
+        // An empty buffer — not a block.
         assert!(!is_multiline_block(""));
     }
 }

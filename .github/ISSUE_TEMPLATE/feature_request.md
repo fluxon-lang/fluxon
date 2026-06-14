@@ -1,30 +1,30 @@
 ---
-name: Imkoniyat / battery taklifi
-about: Yangi til imkoniyati yoki battery
+name: Feature / battery proposal
+about: A new language feature or battery
 title: ''
 labels: enhancement
 assignees: ''
 ---
 
-## Taklif
+## Proposal
 
-<!-- Nima qo'shilsin va nega kerak. -->
+<!-- What should be added and why it's needed. -->
 
-## Spec'da bormi
+## Is it in the spec
 
-- [ ] Ha — `docs/fluxon-agent.md` da spetsifikatsiyalangan (qaysi bo'lim: ...)
-- [ ] Yo'q — yangi dizayn (sintaksis taklifi pastda)
+- [ ] Yes — specified in `docs/fluxon-agent.md` (which section: ...)
+- [ ] No — new design (syntax proposal below)
 
-> Eslatma: spec'dagi barcha batareyalar (`http`, `db`, `ai`, `auth`, `ws`,
-> `cron`, `queue`, `reg`) allaqachon implementatsiya qilingan — bu taklif
-> mavjud xulq-atvorni kengaytiradimi yoki yangimi, aniqlashtiring.
+> Note: all batteries in the spec (`http`, `db`, `ai`, `auth`, `ws`,
+> `cron`, `queue`, `reg`) are already implemented — clarify whether this proposal
+> extends existing behavior or is new.
 
-## Taklif qilingan Fluxon sintaksisi
+## Proposed Fluxon syntax
 
 ```fx
-# foydalanuvchi buni qanday yozadi
+# how the user would write this
 ```
 
-## Qo'shimcha
+## Additional
 
-<!-- Bir ish = bir yo'l falsafasiga qanday mos kelishi, muqobillar. -->
+<!-- How it fits the "one task = one way" philosophy, alternatives. -->

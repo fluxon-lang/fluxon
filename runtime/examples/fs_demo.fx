@@ -1,36 +1,36 @@
-# fs battery demo — lokal fayl tizimi primitivlari.
-# Ishga: cargo run -- run examples/fs_demo.fx
+# fs battery demo — local filesystem primitives.
+# Run: cargo run -- run examples/fs_demo.fx
 #
-# Bloklamaydi (server emas) — smoke-test sifatida ham yaroqli. Vaqtinchalik
-# papkada ishlaydi va oxirida o'zini tozalaydi.
+# Non-blocking (not a server) — also usable as a smoke-test. Works in a temporary
+# folder and cleans up after itself at the end.
 
 dir = "/tmp/fluxon_fs_demo"
 
-# Papkani tayyorlash (idempotent — bor bo'lsa xato emas).
+# Prepare the folder (idempotent — not an error if it already exists).
 fs.mkdirp dir
-log "papka tayyor:" dir
+log "folder ready:" dir
 
-# Konfig yozish (json.enc bilan) va qayta o'qish.
+# Write a config (with json.enc) and read it back.
 conf = "${dir}/conf.json"
 fs.write conf (json.enc {port:8080 name:"fluxon"})
 cfg = json.dec (fs.read conf)
-log "o'qilgan port:" cfg.port
+log "read port:" cfg.port
 
-# Log fayliga ketma-ket qo'shish.
+# Append to a log file sequentially.
 audit = "${dir}/audit.log"
-fs.append audit "boshlandi\n"
-fs.append audit "tugadi\n"
-log "audit mazmuni:" (fs.read audit)
+fs.append audit "started\n"
+fs.append audit "finished\n"
+log "audit contents:" (fs.read audit)
 
-# Yo'q faylni o'qish — nil (xato emas).
-yoq = fs.read "${dir}/yoq.txt"
-log "yo'q fayl:" yoq
+# Reading a missing file — nil (not an error).
+missing = fs.read "${dir}/missing.txt"
+log "missing file:" missing
 
-# Papka ichini ko'rish.
-log "fayllar:" (fs.ls dir)
+# List the folder contents.
+log "files:" (fs.ls dir)
 
-# Tozalash.
+# Cleanup.
 fs.del conf
 fs.del audit
 fs.del dir
-log "tozalandi, papka mavjudmi:" (fs.exists dir)
+log "cleaned up, folder exists:" (fs.exists dir)

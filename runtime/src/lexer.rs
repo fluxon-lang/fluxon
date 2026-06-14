@@ -1,12 +1,12 @@
-// Fluxon lexer — manba matnni tokenlar oqimiga aylantiradi.
+// Fluxon lexer — turns source text into a token stream.
 //
-// Eng muhim mas'uliyat: indentation'ni INDENT/DEDENT tokenlariga aylantirish.
-// Fluxon bloklari 2-bo'shliqli chekinish bilan ochiladi (`{}` yo'q). Lexer har
-// mazmunli qator boshida joriy chekinishni stack bilan solishtiradi:
-//   - chuqurroq  -> Indent
-//   - sayozroq   -> har pog'ona uchun bitta Dedent
-//   - teng       -> hech narsa
-// Bo'sh qatorlar va faqat-izoh qatorlar indentatsiyaga ta'sir qilmaydi.
+// Most important responsibility: turning indentation into INDENT/DEDENT tokens.
+// Fluxon blocks open with 2-space indentation (no `{}`). At the start of each
+// meaningful line the lexer compares the current indent against a stack:
+//   - deeper   -> Indent
+//   - shallower -> one Dedent per level popped
+//   - equal    -> nothing
+// Blank lines and comment-only lines do not affect indentation.
 
 use crate::token::{StrPart, Tok, Token};
 
@@ -15,13 +15,13 @@ pub struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
-    indents: Vec<usize>, // chekinish darajalari stacki (bo'shliq soni)
+    indents: Vec<usize>, // stack of indent levels (space counts)
     tokens: Vec<Token>,
-    // Qavs ichida ekanmizmi? Qavs ichida newline/indent e'tiborga olinmaydi
-    // (ko'p qatorli list/map literallari uchun).
+    // Are we inside parentheses? Inside them newline/indent are ignored
+    // (for multi-line list/map literals).
     paren_depth: usize,
-    // Keyingi push qilinadigan token oldidan bo'shliq (yoki tab/newline) bormi.
-    // Bo'shliq ko'rilganda true bo'ladi, token push'da o'qilib reset qilinadi.
+    // Whether whitespace (or a tab/newline) precedes the next token to be pushed.
+    // Set to true when whitespace is seen; read and reset when a token is pushed.
     pending_space: bool,
 }
 
@@ -37,13 +37,13 @@ impl<'a> Lexer<'a> {
             indents: vec![0],
             tokens: Vec::new(),
             paren_depth: 0,
-            pending_space: true, // fayl boshi ham "bo'shliqdan keyin" kabi
+            pending_space: true, // start of file also counts as "after whitespace"
         }
     }
 
     pub fn tokenize(mut self) -> LexResult<Vec<Token>> {
-        // Faylni qatorma-qator emas, oqim sifatida o'qiymiz, lekin qator
-        // boshida indentatsiyani aniqlaymiz.
+        // We read the file as a stream rather than line by line, but detect
+        // indentation at the start of each line.
         self.handle_line_start()?;
         while !self.at_end() {
             let c = self.peek();
@@ -60,10 +60,11 @@ impl<'a> Lexer<'a> {
                     self.advance_newline();
                     self.pending_space = true;
                     if self.paren_depth == 0 {
-                        // Davomiy qator: keyingi qator `|>` bilan boshlansa, bu
-                        // oldingi ifoda davomi (pipe zanjiri) — Newline ham,
-                        // INDENT ham chiqarmaymiz, token oqimi uzluksiz qoladi.
-                        // Builder zanjirlari ko'p qatorga yoziladi (issue #78).
+                        // Line continuation: if the next line starts with `|>`,
+                        // it is a continuation of the previous expression (a pipe
+                        // chain) — we emit neither Newline nor INDENT, keeping the
+                        // token stream contiguous. Builder chains span multiple
+                        // lines (issue #78).
                         if self.next_line_starts_with_pipe() {
                             continue;
                         }
@@ -74,7 +75,7 @@ impl<'a> Lexer<'a> {
                 _ => self.scan_token()?,
             }
         }
-        // Fayl oxiri: oxirgi newline va qolgan bloklarni yopish.
+        // End of file: emit a final newline and close any remaining blocks.
         if !matches!(
             self.tokens.last().map(|t| &t.tok),
             Some(Tok::Newline) | None
@@ -89,7 +90,7 @@ impl<'a> Lexer<'a> {
         Ok(self.tokens)
     }
 
-    // --- qator boshida indentatsiya hisoblash ---
+    // --- compute indentation at the start of a line ---
     fn handle_line_start(&mut self) -> LexResult<()> {
         if self.paren_depth > 0 {
             return Ok(());
@@ -105,21 +106,21 @@ impl<'a> Lexer<'a> {
                     }
                     b'\t' => {
                         return Err(format!(
-                            "{}-qatorda tab ishlatilgan; Fluxon faqat bo'shliq qabul qiladi",
+                            "tab used on line {}; Fluxon only accepts spaces",
                             self.line
                         ));
                     }
                     _ => break,
                 }
             }
-            // Bo'sh yoki faqat-izoh qator: indentatsiyani e'tiborsiz qoldiramiz.
+            // Blank or comment-only line: ignore its indentation.
             if self.at_end() {
                 return Ok(());
             }
             match self.peek() {
                 b'\n' => {
                     self.advance_newline();
-                    continue; // keyingi qatorni qayta tekshir
+                    continue; // re-check the next line
                 }
                 b'#' => {
                     self.skip_comment();
@@ -137,14 +138,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // Joriy pozitsiyadan (newline'dan keyin) oldinga qarab — bo'shliq, bo'sh
-    // qator va izohlarni o'tkazib — keyingi mazmunli qator `|>` bilan
-    // boshlanadimi? Pozitsiyani O'ZGARTIRMAYDI (faqat indeks bilan ko'rib chiqadi).
-    // Davomiy pipe qatorini aniqlash uchun (issue #78 builder zanjiri).
+    // Looking ahead from the current position (after a newline) — skipping
+    // whitespace, blank lines and comments — does the next meaningful line start
+    // with `|>`? Does NOT mutate position (only scans by index). Used to detect a
+    // pipe continuation line (issue #78 builder chains).
     fn next_line_starts_with_pipe(&self) -> bool {
         let mut i = self.pos;
         loop {
-            // joriy qatordagi boshlang'ich bo'shliqlar
+            // leading whitespace on the current line
             while i < self.src.len() && (self.src[i] == b' ' || self.src[i] == b'\t') {
                 i += 1;
             }
@@ -152,19 +153,19 @@ impl<'a> Lexer<'a> {
                 return false;
             }
             match self.src[i] {
-                // bo'sh qator — keyingisiga o'tamiz
+                // blank line — move to the next one
                 b'\n' => {
                     i += 1;
                     continue;
                 }
-                // izoh qatori — qator oxirigacha o'tkazamiz, keyin keyingisiga
+                // comment line — skip to end of line, then to the next one
                 b'#' => {
                     while i < self.src.len() && self.src[i] != b'\n' {
                         i += 1;
                     }
                     continue;
                 }
-                // mazmunli qator boshi: `|>` bo'lsa davomiy
+                // start of a meaningful line: continuation if it is `|>`
                 b'|' => return self.src.get(i + 1) == Some(&b'>'),
                 _ => return false,
             }
@@ -183,14 +184,15 @@ impl<'a> Lexer<'a> {
             }
             if *self.indents.last().unwrap() != width {
                 return Err(format!(
-                    "{}-qatorda chekinish mos kelmadi (kutilgan darajalar: {:?}, topildi: {})",
+                    "indentation mismatch on line {} (expected levels: {:?}, found: {})",
                     self.line, self.indents, width
                 ));
             }
-            // Dedent statement chegarasi hamdir: blok yopilgandan keyin keyingi
-            // qator yangi statement. Aks holda qavssiz chaqirish (juxtaposition
-            // call) blok-tanali lambda/if'dan keyingi qatorni argument deb
-            // yutib yuborardi (masalan ketma-ket `http.on ... \req ->` bloklari).
+            // A Dedent is also a statement boundary: after a block closes, the
+            // next line is a new statement. Otherwise a parenthesis-free
+            // (juxtaposition) call would swallow the line after a block-bodied
+            // lambda/if as an argument (e.g. consecutive `http.on ... \req ->`
+            // blocks).
             self.push(Tok::Newline);
         }
         Ok(())
@@ -202,7 +204,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // --- bitta tokenni o'qish ---
+    // --- scan a single token ---
     fn scan_token(&mut self) -> LexResult<()> {
         let line = self.line;
         let col = self.col;
@@ -210,18 +212,19 @@ impl<'a> Lexer<'a> {
         match c {
             b'0'..=b'9' => return self.scan_number(),
             b'"' => {
-                // `"""` — ko'p qatorli blok satr (issue #130), aks holda oddiy satr.
+                // `"""` — multi-line block string (issue #130), otherwise a plain string.
                 if self.peek_or(1) == b'"' && self.peek_or(2) == b'"' {
                     return self.scan_block_string();
                 }
                 return self.scan_string();
             }
             b':' => {
-                // Noaniqlik: `:open` symbolmi yoki `key:` map ajratuvchimi?
-                // Qoida (misollardan): agar `:` BEVOSITA atom oxiriga (ident/son/
-                // `)`/`]`/`"`) yopishgan bo'lsa — bu map ajratuvchi (Colon).
-                // Aks holda (oldin bo'shliq, `(`, `[`, `,` yoki qator boshi) va
-                // keyin ident kelsa — symbol. `status::open` -> Colon + Sym.
+                // Ambiguity: is `:open` a symbol or `key:` a map separator?
+                // Rule (from the examples): if `:` is glued DIRECTLY to the end of
+                // an atom (ident/number/`)`/`]`/`"`) it is a map separator (Colon).
+                // Otherwise (preceded by whitespace, `(`, `[`, `,` or start of
+                // line) and followed by an ident — it is a symbol.
+                // `status::open` -> Colon + Sym.
                 let prev = if self.pos > 0 {
                     self.src[self.pos - 1]
                 } else {
@@ -242,7 +245,7 @@ impl<'a> Lexer<'a> {
             _ => {}
         }
 
-        // Operatorlar va punktuatsiya — ko'p belgilarini avval tekshiramiz.
+        // Operators and punctuation — check multi-char ones first.
         self.advance();
         let tok = match c {
             b'+' => Tok::Plus,
@@ -306,7 +309,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Tok::Question2
                 } else {
-                    return Err(format!("{}-qatorda kutilmagan '?'", line));
+                    return Err(format!("unexpected '?' on line {}", line));
                 }
             }
             b'.' => {
@@ -349,7 +352,7 @@ impl<'a> Lexer<'a> {
             b',' => Tok::Comma,
             _ => {
                 return Err(format!(
-                    "{}-qatorda kutilmagan belgi: '{}'",
+                    "unexpected character on line {}: '{}'",
                     line, c as char
                 ));
             }
@@ -366,10 +369,11 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
         let mut is_float = false;
-        // member-indeks konteksti: `m.0.1` da `.1` ni float kasri deb yutmaymiz —
-        // oldingi token `.` bo'lsa, bu son indeks (`(m.0).1`), float emas.
+        // member-index context: in `m.0.1` we do not swallow `.1` as a float
+        // fraction — if the previous token is `.`, this number is an index
+        // (`(m.0).1`), not a float.
         let after_dot = matches!(self.tokens.last(), Some(t) if t.tok == Tok::Dot);
-        // float nuqtasi, lekin '..' (range) emas
+        // a float dot, but not '..' (range)
         if !after_dot
             && !self.at_end()
             && self.peek() == b'.'
@@ -386,12 +390,12 @@ impl<'a> Lexer<'a> {
         if is_float {
             let v: f64 = text
                 .parse()
-                .map_err(|_| format!("{}-qatorda noto'g'ri float: {}", line, text))?;
+                .map_err(|_| format!("invalid float on line {}: {}", line, text))?;
             self.push_at(Tok::Flt(v), line, col);
         } else {
             let v: i64 = text
                 .parse()
-                .map_err(|_| format!("{}-qatorda juda katta son: {}", line, text))?;
+                .map_err(|_| format!("number too large on line {}: {}", line, text))?;
             self.push_at(Tok::Int(v), line, col);
         }
         Ok(())
@@ -439,16 +443,16 @@ impl<'a> Lexer<'a> {
             .to_string()
     }
 
-    // String literal: oddiy matn + ${expr} / $ident interpolatsiya.
+    // String literal: plain text + ${expr} / $ident interpolation.
     fn scan_string(&mut self) -> LexResult<()> {
         let line = self.line;
         let col = self.col;
-        self.advance(); // ochuvchi "
+        self.advance(); // opening "
         let mut parts: Vec<StrPart> = Vec::new();
         let mut buf = String::new();
         loop {
             if self.at_end() {
-                return Err(format!("{}-qatorda yopilmagan satr", line));
+                return Err(format!("unterminated string on line {}", line));
             }
             let c = self.peek();
             match c {
@@ -459,10 +463,10 @@ impl<'a> Lexer<'a> {
                 b'\\' => self.scan_escape(&mut buf),
                 b'$' => self.scan_dollar(&mut buf, &mut parts),
                 b'\n' => {
-                    return Err(format!("{}-qatorda satr ko'p qatorga cho'zildi", line));
+                    return Err(format!("string spans multiple lines on line {}", line));
                 }
                 _ => {
-                    // UTF-8 xavfsiz: baytni to'g'ri belgiga yig'amiz
+                    // UTF-8 safe: accumulate the byte into a proper character
                     self.push_utf8_char(&mut buf);
                 }
             }
@@ -474,7 +478,7 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    // Satr ichidagi `\x` escape ketma-ketligini buf ga ochadi.
+    // Expands a `\x` escape sequence in a string into buf.
     fn scan_escape(&mut self, buf: &mut String) {
         self.advance(); // '\'
         let e = self.peek_or(0);
@@ -493,20 +497,20 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // Satr ichidagi `$` ni qayta ishlaydi: `${expr}` / `$ident` interpolatsiya,
-    // aks holda oddiy `$` belgi. Oddiy va blok satrlar uchun umumiy.
+    // Handles a `$` inside a string: `${expr}` / `$ident` interpolation,
+    // otherwise a plain `$` character. Shared by plain and block strings.
     fn scan_dollar(&mut self, buf: &mut String, parts: &mut Vec<StrPart>) {
         let expr_line = self.line;
         self.advance();
         if self.peek_or(0) == b'{' {
-            // ${ ifoda }
+            // ${ expr }
             self.advance(); // {
             if !buf.is_empty() {
                 parts.push(StrPart::Lit(std::mem::take(buf)));
             }
-            // Chegarani topishda ichki string literallarni hisobga
-            // olamiz — aks holda `${"a } b"}` dagi string ichidagi
-            // `}` interpolatsiyani erta yopadi (issue #106).
+            // When finding the boundary we account for inner string literals —
+            // otherwise a `}` inside the string in `${"a } b"}` would close the
+            // interpolation early (issue #106).
             let mut depth = 1;
             let mut in_str = false;
             let estart = self.pos;
@@ -514,8 +518,8 @@ impl<'a> Lexer<'a> {
                 let c = self.peek();
                 if in_str {
                     match c {
-                        // escape: `\` + keyingi belgi birga o'tadi,
-                        // string ichidagi `\"` yopuvchi emas.
+                        // escape: `\` + the next char are consumed together,
+                        // so a `\"` inside the string is not a closing quote.
                         b'\\' => {
                             self.advance();
                             if self.peek_or(0) == b'\n' {
@@ -541,7 +545,7 @@ impl<'a> Lexer<'a> {
                         _ => {}
                     }
                 }
-                // Ko'p qatorli `${...}` da qator hisobini saqlaymiz.
+                // In a multi-line `${...}` we keep the line count accurate.
                 if c == b'\n' {
                     self.advance_newline();
                 } else {
@@ -551,10 +555,10 @@ impl<'a> Lexer<'a> {
             let expr = std::str::from_utf8(&self.src[estart..self.pos])
                 .unwrap()
                 .to_string();
-            self.advance(); // yopuvchi }
+            self.advance(); // closing }
             parts.push(StrPart::Expr(expr, expr_line));
         } else if self.is_ident_start(self.peek_or(0)) {
-            // $ident qisqartma
+            // $ident shorthand
             if !buf.is_empty() {
                 parts.push(StrPart::Lit(std::mem::take(buf)));
             }
@@ -565,43 +569,44 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // Ko'p qatorli blok satr: `"""` ... `"""` (issue #130).
+    // Multi-line block string: `"""` ... `"""` (issue #130).
     //
-    // Qoidalar (kanonik bitta yo'l):
-    //   - ochuvchi `"""` dan keyin shu qatorda kontent bo'lmaydi — yangi qatordan;
-    //   - bo'sh bo'lmagan qatorlarning eng kichik umumiy chekinishi kesiladi
-    //     (blok kod indentatsiyasiga tabiiy joylashadi);
-    //   - yopuvchi `"""` o'z qatorida bo'lsa, o'sha qator kontentga kirmaydi —
-    //     natijada oxirida `\n` qolmaydi;
-    //   - `${expr}` / `$ident` interpolatsiya va `\x` escape'lar oddiy satrdagidek;
-    //   - `"` va `""` erkin yoziladi; uchta ketma-ket `"` kerak bo'lsa `\"""`.
+    // Rules (the one canonical way):
+    //   - no content on the line after the opening `"""` — it starts on a new line;
+    //   - the smallest common indentation of non-blank lines is stripped
+    //     (so the block fits naturally into the surrounding code indentation);
+    //   - if the closing `"""` is on its own line, that line is not part of the
+    //     content — so there is no trailing `\n`;
+    //   - `${expr}` / `$ident` interpolation and `\x` escapes work as in plain strings;
+    //   - `"` and `""` may be written freely; for three consecutive `"` use `\"""`.
     fn scan_block_string(&mut self) -> LexResult<()> {
         let line = self.line;
         let col = self.col;
         self.advance(); // "
         self.advance(); // "
         self.advance(); // "
-        // Ochuvchi `"""` qatorining qolgan qismi faqat bo'shliq bo'lishi mumkin.
+        // The rest of the opening `"""` line may only be whitespace.
         while !self.at_end() && (self.peek() == b' ' || self.peek() == b'\r') {
             self.advance();
         }
         if self.at_end() || self.peek() != b'\n' {
             return Err(format!(
-                "{}-qatorda \"\"\" dan keyin matn — blok satr kontenti yangi qatordan boshlanadi",
+                "text after \"\"\" on line {} — block string content starts on a new line",
                 line
             ));
         }
         self.advance_newline();
 
-        // Chekinishni keyin kesish uchun har qator alohida yig'iladi. Escape
-        // bilan kiritilgan `\n` Lit ichida qoladi va qator hisoblanmaydi.
+        // Each line is collected separately so indentation can be stripped later.
+        // A `\n` introduced via an escape stays inside a Lit and does not count
+        // as a line break.
         let mut lines: Vec<Vec<StrPart>> = Vec::new();
         let mut parts: Vec<StrPart> = Vec::new();
         let mut buf = String::new();
         loop {
             if self.at_end() {
                 return Err(format!(
-                    "{}-qatorda yopilmagan blok satr (\"\"\" yetishmaydi)",
+                    "unterminated block string on line {} (missing \"\"\")",
                     line
                 ));
             }
@@ -619,7 +624,7 @@ impl<'a> Lexer<'a> {
                     }
                     lines.push(std::mem::take(&mut parts));
                 }
-                // CRLF fayllarda `\r` qator oxiri belgisi — kontentga kirmaydi.
+                // In CRLF files the `\r` is a line-ending marker — not content.
                 b'\r' if self.peek_or(1) == b'\n' => self.advance(),
                 b'\\' => self.scan_escape(&mut buf),
                 b'$' => self.scan_dollar(&mut buf, &mut parts),
@@ -635,7 +640,7 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    // Joriy pozitsiyadagi bitta UTF-8 belgini buf ga qo'shadi.
+    // Appends the single UTF-8 character at the current position into buf.
     fn push_utf8_char(&mut self, buf: &mut String) {
         let b = self.peek();
         let len = utf8_len(b);
@@ -648,7 +653,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // --- past darajali yordamchilar ---
+    // --- low-level helpers ---
     fn at_end(&self) -> bool {
         self.pos >= self.src.len()
     }
@@ -690,10 +695,10 @@ impl<'a> Lexer<'a> {
     }
 }
 
-// Blok satr qatorlarini yakuniy StrPart oqimiga yig'adi: yopuvchi `"""`
-// qatorini chiqarib tashlaydi, umumiy minimal chekinishni kesadi va
-// qatorlarni `\n` bilan ulaydi. Bo'sh (faqat bo'shliq) qatorlar `\n` ga
-// aylanadi — ulardagi chekinish chiqishga o'tmaydi va min hisobiga kirmaydi.
+// Assembles block-string lines into the final StrPart stream: drops the closing
+// `"""` line, strips the common minimal indentation, and joins lines with `\n`.
+// Blank (whitespace-only) lines become `\n` — their indentation does not reach
+// the output and is not counted in the minimum.
 fn dedent_block_lines(mut lines: Vec<Vec<StrPart>>) -> Vec<StrPart> {
     fn is_blank(line: &[StrPart]) -> bool {
         match line {
@@ -702,13 +707,13 @@ fn dedent_block_lines(mut lines: Vec<Vec<StrPart>>) -> Vec<StrPart> {
             _ => false,
         }
     }
-    // Yopuvchi `"""` o'z qatorida bo'lsa, oxirgi "qator" faqat uning
-    // chekinishidan iborat — kontent emas (va trailing `\n` ham bo'lmaydi).
+    // If the closing `"""` is on its own line, the last "line" consists only of
+    // its indentation — not content (and there is no trailing `\n`).
     if lines.last().is_some_and(|l| is_blank(l)) {
         lines.pop();
     }
-    // Min chekinish: qator boshi Lit bilan boshlansa — bosh bo'shliqlar soni,
-    // interpolatsiya bilan boshlansa — 0 (manbada chekinish yo'q degani).
+    // Minimum indent: if a line starts with a Lit, it is the count of leading
+    // spaces; if it starts with interpolation, it is 0 (meaning no source indent).
     let mut min_indent = usize::MAX;
     for l in &lines {
         if is_blank(l) {
@@ -737,7 +742,7 @@ fn dedent_block_lines(mut lines: Vec<Vec<StrPart>>) -> Vec<StrPart> {
             match p {
                 StrPart::Lit(mut s) => {
                     if j == 0 {
-                        // faqat bosh bo'shliqlar — ASCII, bayt chegarasi xavfsiz
+                        // only leading spaces — ASCII, so the byte boundary is safe
                         s.drain(..min_indent);
                     }
                     buf.push_str(&s);
@@ -775,9 +780,9 @@ pub fn lex(src: &str) -> LexResult<Vec<Token>> {
     Lexer::new(src).tokenize()
 }
 
-// Manbani berilgan qatordan boshlab lex qiladi. String interpolatsiya
-// ifodalarini qayta lex qilishda ishlatiladi — chiqarilgan tokenlar (va
-// ulardan kelib chiqadigan xatolar) asl qator raqamini saqlaydi.
+// Lexes the source starting from the given line. Used when re-lexing string
+// interpolation expressions — the emitted tokens (and any errors derived from
+// them) preserve the original line number.
 pub fn lex_at(src: &str, start_line: usize) -> LexResult<Vec<Token>> {
     let mut lexer = Lexer::new(src);
     lexer.line = start_line;

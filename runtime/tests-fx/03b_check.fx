@@ -1,6 +1,6 @@
-# 03b-check — rollback'dan keyin ikkinchi jarayonda qator sonini tasdiqlaydi.
-# Avvalgi jarayon "ghost" qatorini tx+fail bilan qo'shmoqchi bo'lgan.
-# Rollback to'g'ri ishlasa → faqat "asl" qoladi (len == 1).
+# 03b-check - verifies the row count in a second process after rollback.
+# The previous process tried to add a "ghost" row via tx+fail.
+# If rollback works correctly -> only the "original" remains (len == 1).
 use db
 
 tbl items
@@ -9,6 +9,6 @@ tbl items
 
 rows = db.q "select * from items"
 if rows.len == 1
-  log "=== 03b_rollback: ROLLBACK-OK (qator soni 1, ghost qo'shilmadi) ==="
+  log "=== 03b_rollback: ROLLBACK-OK (row count 1, ghost not added) ==="
 else
-  log "=== 03b_rollback: FAIL — qator soni ${rows.len} (rollback ishlamadi) ==="
+  log "=== 03b_rollback: FAIL - row count ${rows.len} (rollback did not work) ==="

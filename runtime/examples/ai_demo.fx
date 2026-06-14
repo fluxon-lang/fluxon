@@ -1,65 +1,65 @@
-# AI demo — LLM birlamchi primitivlari (Anthropic Messages API).
+# AI demo — LLM primitives (Anthropic Messages API).
 #
-# Ishga tushirishdan oldin $AI_KEY ni belgilang (OS env yoki .env faylda):
+# Before running, set $AI_KEY (OS env or in the .env file):
 #   export AI_KEY=sk-ant-...
 #   fluxon run examples/ai_demo.fx
 #
-# Model: $AI_MODEL ?? "claude-opus-4-8". Boshqa model uchun:
+# Model: $AI_MODEL ?? "claude-opus-4-8". For a different model:
 #   export AI_MODEL=claude-sonnet-4-6
 #
-# DIQQAT: bu misol haqiqiy API chaqiradi (token sarflaydi). Kalit yo'q bo'lsa
-# aniq xato beradi, tarmoqqa chiqmaydi.
+# NOTE: this example calls the real API (spends tokens). If there is no key
+# it gives a clear error and does not reach the network.
 
 use ai reg
 
-# 1) ai.ask — oddiy savol, matn javob.
-javob = ai.ask "Bir jumlada: Fluxon tili nima uchun yaxshi?"
-log "ask: ${javob}"
+# 1) ai.ask — a simple question, text answer.
+answer = ai.ask "In one sentence: why is the Fluxon language good?"
+log "ask: ${answer}"
 
-# 2) ai.json — strukturalangan chiqish. Schema map beriladi, model unga MOS
-#    JSON qaytaradi. Natijada `_` metadata (conf/tokens/cost/ms) ham bo'ladi.
-r = ai.json "Ushbu buyurtmani ajrat: 3 dona olma, 2 dona non" {
-  mahsulotlar: [{nom:str soni:int}]
+# 2) ai.json — structured output. A schema map is given, the model returns
+#    JSON that MATCHES it. The result also contains `_` metadata (conf/tokens/cost/ms).
+r = ai.json "Parse this order: 3 apples, 2 loaves of bread" {
+  products: [{name:str count:int}]
 }
-log "json natija: ${r.mahsulotlar}"
-log "ishonch: ${r._.conf}  tokenlar: ${r._.tokens}  narx: ${r._.cost}  vaqt(ms): ${r._.ms}"
+log "json result: ${r.products}"
+log "confidence: ${r._.conf}  tokens: ${r._.tokens}  cost: ${r._.cost}  time(ms): ${r._.ms}"
 
-# Ishonch bo'yicha qaror (spec naqshi):
+# Decision based on confidence (spec pattern):
 if r._.conf > 0.85
-  log "yuqori ishonch -> avtomatik qabul"
+  log "high confidence -> accept automatically"
 elif r._.conf >= 0.6
-  log "o'rta ishonch -> tasdiqlash so'rash"
+  log "medium confidence -> ask for confirmation"
 else
-  log "past ishonch -> odamga uzatish"
+  log "low confidence -> hand off to a human"
 
-# 3) ai.run — tool-loop'ning BIR qadami. Tool'ni model O'ZI bajarmaydi:
-#    loop sizniki (log/narx/tasdiq nazorati). Tool'ni reg.call orqali Fluxon
-#    tomonda chaqirasiz, natijani msgs'ga qo'shasiz.
+# 3) ai.run — ONE step of the tool-loop. The model does NOT run the tool itself:
+#    the loop is yours (log/cost/confirmation control). You call the tool on the
+#    Fluxon side via reg.call and add the result to msgs.
 
-# Tool funksiyasini registrga qo'shamiz (reg dinamik dispatch).
-reg.add "ob_havo" \args ->
-  # Haqiqiy holatda bu http.get qilardi; demo uchun qat'iy javob.
-  "${args.shahar}da 25 daraja, quyoshli"
+# Register the tool function (reg dynamic dispatch).
+reg.add "weather" \args ->
+  # In a real case this would do http.get; for the demo, a fixed answer.
+  "25 degrees and sunny in ${args.city}"
 
-# Tool ta'rifi: nom, tavsif, parametrlar (sodda {nom:tip} -> JSON-schema).
+# Tool definition: name, description, parameters (simple {name:type} -> JSON-schema).
 tools = [{
-  name: "ob_havo"
-  desc: "Berilgan shahardagi joriy ob-havo"
-  params: {shahar:str}
+  name: "weather"
+  desc: "Current weather in the given city"
+  params: {city:str}
 }]
 
-# Suhbat tarixi — birinchi xabar.
-msgs <- [{role::user content:"Toshkentda ob-havo qanday?"}]
+# Conversation history — first message.
+msgs <- [{role::user content:"What is the weather in Tashkent?"}]
 
-# Tool-loop: model :final qaytarmaguncha (yoki limit) aylanamiz.
+# Tool-loop: spin until the model returns :final (or hits the limit).
 each i in 1..10
   r = ai.run msgs tools
   if r.kind == :final
-    log "yakuniy javob: ${r.text}"
+    log "final answer: ${r.text}"
     ret r.text
-  # r.kind == :call -> model tool chaqirmoqchi, uni Fluxon tomonda bajaramiz.
-  log "tool chaqiruvi: ${r.tool} args=${r.args}"
-  natija = reg.call r.tool r.args
-  # Model javobini (tool_use) va tool natijasini tarixga qo'shamiz.
+  # r.kind == :call -> the model wants to call a tool, we run it on the Fluxon side.
+  log "tool call: ${r.tool} args=${r.args}"
+  result = reg.call r.tool r.args
+  # Add the model reply (tool_use) and the tool result to the history.
   msgs <- msgs.push {role::assistant content:[{type:"tool_use" id:r.id name:r.tool input:r.args}]}
-  msgs <- msgs.push {role::tool id:r.id content:natija}
+  msgs <- msgs.push {role::tool id:r.id content:result}

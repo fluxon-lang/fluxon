@@ -1,52 +1,52 @@
 # Fluxon Runtime
 
-Fluxon tilining interpretatori (Rust, tree-walking). **Til yadrosi** va
-`docs/fluxon-agent.md` da spetsifikatsiyalangan **barcha batareyalar** ishlaydi:
-`http` (server + klient), `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`.
-(`db` hozircha faqat SQLite backend; `postgres`/`mysql` stub.)
+The interpreter for the Fluxon language (Rust, tree-walking). The **language
+core** and **all batteries** specified in `docs/fluxon-agent.md` work:
+`http` (server + client), `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`.
+(`db` currently has only the SQLite backend; `postgres`/`mysql` are stubs.)
 
-## Qurish va ishga tushirish
+## Build and run
 
 ```sh
 cargo build --release
 cargo run -- run examples/demo.fx
-# yoki
+# or
 ./target/release/fluxon run examples/demo.fx
 ```
 
-### Buyruqlar
+### Commands
 
-- `fluxon run <fayl.fx>` — faylni bajaradi (lex → parse → interp). Parse yoki
-  runtime xato → `exit 1`.
-- `fluxon check <fayl.fx>` — faqat sintaksisni tekshiradi (lex + parse, kodni
-  **bajarmaydi** → side-effect yo'q). To'g'ri → `exit 0`; parse/lex xato →
-  `exit 2`. Bu `run`ning `exit 1`idan farqli, shuning uchun chaqiruvchi qaysi
-  bosqichda yiqilganini bila oladi (AI self-repair gate uchun qulay).
-- `fluxon --version` yoki `fluxon -V` — build qilingan package versiyasini
-  chiqaradi (`Cargo.toml` dagi `package.version`).
-- `fluxon --help` yoki `fluxon -h` — foydalanish yo'riqnomasini chiqaradi.
+- `fluxon run <file.fx>` — executes the file (lex → parse → interp). A parse or
+  runtime error → `exit 1`.
+- `fluxon check <file.fx>` — only checks the syntax (lex + parse, **does not
+  run** the code → no side effects). OK → `exit 0`; parse/lex error →
+  `exit 2`. This differs from `run`'s `exit 1`, so the caller can tell which
+  stage failed (handy for an AI self-repair gate).
+- `fluxon --version` or `fluxon -V` — prints the built package version
+  (`package.version` from `Cargo.toml`).
+- `fluxon --help` or `fluxon -h` — prints usage instructions.
 
-## Hozir nima ishlaydi
+## What works now
 
-Til yadrosining to'liq qismi:
+The full language core:
 
-- **Tiplar:** int, flt, str, bool, nil, sym, list, map
-- **Bindings:** `=` (o'zgarmas), `<-` (o'zgaruvchan)
-- **Funksiyalar:** `fn`, bir qatorli `->`, lambda `\x ->`, closure, `ret`, oxirgi-ifoda qaytarish, rekursiya
-- **Boshqaruv:** `if`/`elif`/`else`, `each` (list/map/range/str), `skip`/`stop`, `match` (symbol/son/`_`)
-- **Operatorlar:** arifmetik (`+ - * / %`), taqqoslash, mantiqiy (`& | !`), `??`, `|>`, `..`, member/indeks (`.` `[]`)
-- **String interpolatsiya:** `"$x"`, `"${expr}"`
-- **List metodlari:** `len push has filter map reduce slice join`
-- **Map metodlari:** `len has keys vals set del` + spread `{...m}` + dinamik kalit `{[k]:v}`
-- **Yadro modullari:** `str` (len up low slice split has int str), `math` (floor ceil abs round), `rand` (int str), `json` (enc dec), `time`, `env`, `io`, `fs`, `sh`
-- **Batareyalar:** `http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg` — `use <nom>` bilan ulanadi
-- **`log`** — stderr'ga chiqarish
-- **Xatolar:** `fail [status] "..."`, `!` (propagate o'tkazgich)
+- **Types:** int, flt, str, bool, nil, sym, list, map
+- **Bindings:** `=` (immutable), `<-` (mutable)
+- **Functions:** `fn`, one-liner `->`, lambda `\x ->`, closure, `ret`, last-expression return, recursion
+- **Control:** `if`/`elif`/`else`, `each` (list/map/range/str), `skip`/`stop`, `match` (symbol/number/`_`)
+- **Operators:** arithmetic (`+ - * / %`), comparison, logical (`& | !`), `??`, `|>`, `..`, member/index (`.` `[]`)
+- **String interpolation:** `"$x"`, `"${expr}"`
+- **List methods:** `len push has filter map reduce slice join`
+- **Map methods:** `len has keys vals set del` + spread `{...m}` + dynamic key `{[k]:v}`
+- **Core modules:** `str` (len up low slice split has int str), `math` (floor ceil abs round), `rand` (int str), `json` (enc dec), `time`, `env`, `io`, `fs`, `sh`
+- **Batteries:** `http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg` — enabled with `use <name>`
+- **`log`** — print to stderr
+- **Errors:** `fail [status] "..."`, `!` (propagate operator)
 
-`tbl` schema `db` battery tomonidan o'qiladi — `CREATE TABLE IF NOT EXISTS`
-auto-migration va ustun tip konversiyasi uchun ishlatiladi.
+The `tbl` schema is read by the `db` battery — used for `CREATE TABLE IF NOT EXISTS`
+auto-migration and column type conversion.
 
-### `http` battery (server + klient)
+### `http` battery (server + client)
 
 ```fluxon
 use http
@@ -56,71 +56,69 @@ http.on :post "/notes" \req -> rep 201 {received:req.body}
 http.serve 8080
 ```
 
-- `http.on :metod "/yo'l" handler` — marshrut. `:get :post :put :del`. Yo'lda
-  `:id` — parametr (`req.params.id`).
-- `req` map: `method path query{} headers{} params{} body`. `Content-Type:
-  application/json` bo'lsa `body` avtomat map'ga dekod bo'ladi.
-- `rep status body` — javob. body map/list bo'lsa avtomat JSON, str bo'lsa matn.
-- `fail status "msg"` — handler ichida xato javob (`{"error":"msg"}` + status).
-- `http.serve port` — serverni **bloklab** ishga tushiradi. Ixtiyoriy opsiya:
-  `http.serve port {max_body: BAYT}` — so'rov tanasi o'lcham chegarasi (default
-  10 MiB, oshsa `413`; `max_body: 0` — cheklovsiz).
-- Klient: `http.get url`, `http.post url body`, `http.put url body`,
-  `http.del url` (body map -> JSON). Natija `{status, body}`; javob JSON
-  bo'lsa `body` dekod qilinadi.
-- `http.get/post/put/del` chaqiruvlari bitta global Hyper klientni qayta
-  ishlatadi. Shu sabab ketma-ket yoki parallel chaqiruvlarda yangi klient har
-  safar qurilmaydi, Hyper connection pool esa bir xil hostlarga ulanishlarni
-  qayta ishlatadi.
+- `http.on :method "/path" handler` — a route. `:get :post :put :del`. In the
+  path, `:id` is a parameter (`req.params.id`).
+- `req` map: `method path query{} headers{} params{} body`. If `Content-Type:
+  application/json`, `body` is automatically decoded into a map.
+- `rep status body` — a response. If body is a map/list, auto JSON; if str, text.
+- `fail status "msg"` — an error response inside a handler (`{"error":"msg"}` + status).
+- `http.serve port` — starts the server, **blocking**. Optional option:
+  `http.serve port {max_body: BYTES}` — request body size limit (default
+  10 MiB, over it → `413`; `max_body: 0` — unlimited).
+- Client: `http.get url`, `http.post url body`, `http.put url body`,
+  `http.del url` (body map -> JSON). The result is `{status, body}`; if the
+  response is JSON, `body` is decoded.
+- `http.get/post/put/del` calls reuse one global Hyper client. So a new client
+  isn't built each time on sequential or parallel calls, and Hyper's connection
+  pool reuses connections to the same hosts.
 
-**Parallellik:** server tokio + hyper ustida, har request `spawn_blocking`'da
-alohida bajariladi (haqiqiy parallel). Runtime thread-safe (`Arc`/`RwLock`),
-global scope `http.serve` paytida lock-free snapshot'ga muzlatiladi. Misol:
-`examples/server.fx` (`curl localhost:8080/health` bilan sinaladi). Klient
-API soddaligi va pool reuse uchun `examples/http_client_pool.fx` lokal serverga
-ketma-ket `http.get` qiladi; fayl boshidagi `for ... & ... wait` komandasi shu
-Fluxon klientini parallel ishga tushirib ham tekshiradi.
+**Parallelism:** the server is built on tokio + hyper, each request runs
+separately in `spawn_blocking` (truly parallel). The runtime is thread-safe
+(`Arc`/`RwLock`), and the global scope is frozen into a lock-free snapshot during
+`http.serve`. Example: `examples/server.fx` (test with `curl localhost:8080/health`).
+For client API simplicity and pool reuse, `examples/http_client_pool.fx` does
+sequential `http.get`s against a local server; the `for ... & ... wait` command
+at the top of the file also tests this Fluxon client by running it in parallel.
 
-## Arxitektura
+## Architecture
 
 ```
 src/
-  token.rs    — token tiplari (+ INDENT/DEDENT, string bo'laklari)
-  lexer.rs    — manba -> tokenlar; indentatsiya -> INDENT/DEDENT
-  ast.rs      — AST tugunlari
-  parser.rs   — tokenlar -> AST (precedence climbing + qavssiz chaqirish)
-  value.rs    — runtime qiymatlar
-  interp.rs   — AST'ni walk qilib bajaruvchi (scope, control flow, chaqiruv)
-  builtins.rs — yadro modullari (str/math/rand/json/time/io/fs/sh) + metodlar + `rep`
-  http_mod.rs — `http` battery: server (on/serve), routing, req/rep, middleware, klient
+  token.rs    — token types (+ INDENT/DEDENT, string fragments)
+  lexer.rs    — source -> tokens; indentation -> INDENT/DEDENT
+  ast.rs      — AST nodes
+  parser.rs   — tokens -> AST (precedence climbing + paren-free calls)
+  value.rs    — runtime values
+  interp.rs   — walks the AST and executes (scope, control flow, calls)
+  builtins.rs — core modules (str/math/rand/json/time/io/fs/sh) + methods + `rep`
+  http_mod.rs — `http` battery: server (on/serve), routing, req/rep, middleware, client
   db_mod.rs   — `db` battery: SQLite, pool, tx, schema auto-migration
   ai_mod.rs   — `ai` battery: LLM (Anthropic Messages API)
-  auth_mod.rs — `auth` battery: JWT HS256 + parol hash (argon2id)
+  auth_mod.rs — `auth` battery: JWT HS256 + password hash (argon2id)
   ws_mod.rs   — `ws` battery: websocket server, room/data
-  cron_mod.rs — `cron` battery: rejalashtirilgan vazifalar
-  queue_mod.rs— `queue` battery: fon ishlari navbati
+  cron_mod.rs — `cron` battery: scheduled tasks
+  queue_mod.rs— `queue` battery: background job queue
   reg_mod.rs  — `reg` battery: tool registry
-  serve_mod.rs— deferred serverlarni boshqarish (http/ws/cron birga)
-  main.rs     — CLI + integratsiya testlari
+  serve_mod.rs— managing deferred servers (http/ws/cron together)
+  main.rs     — CLI + integration tests
 ```
 
-Frontend (lexer/parser/AST) kelajakda bytecode VM'ga ham qayta ishlatilishi
-mumkin.
+The frontend (lexer/parser/AST) can be reused for a bytecode VM in the future.
 
-## Testlar
+## Tests
 
 ```sh
 cargo test
 ```
 
-Hozir ~197 ta test bor: modul ichidagi Rust unit testlari (`builtins.rs`,
-`interp.rs`, `db_mod.rs` va h.k.) + `src/main.rs::mod tests` dagi integratsiya
-testlari (`.fx` kodini run qilib natijani tekshirish). Bundan tashqari
-`tests-fx/` da Fluxon'ning o'zida yozilgan e2e testlar (`run_all.sh`).
+There are ~197 tests right now: Rust unit tests inside modules (`builtins.rs`,
+`interp.rs`, `db_mod.rs`, etc.) + integration tests in `src/main.rs::mod tests`
+(running `.fx` code and checking the result). In addition, `tests-fx/` has e2e
+tests written in Fluxon itself (`run_all.sh`).
 
-## Keyingi qadam
+## Next step
 
-Spec'dagi barcha batareyalar (`http`, `db`, `ai`, `auth`, `ws`, `cron`,
-`queue`, `reg`) implementatsiya qilingan. Keyingi ishlar — mavjud
-batareyalarni chuqurlashtirish (masalan `db` uchun postgres/mysql backend) va
-yangi til imkoniyatlari. Naqsh uchun → [`ARCHITECTURE.md`](../ARCHITECTURE.md).
+All batteries in the spec (`http`, `db`, `ai`, `auth`, `ws`, `cron`,
+`queue`, `reg`) are implemented. Next steps — deepening the existing batteries
+(e.g. a postgres/mysql backend for `db`) and new language features. For the
+pattern → [`ARCHITECTURE.md`](../ARCHITECTURE.md).

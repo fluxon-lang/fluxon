@@ -1,17 +1,17 @@
-# products.fluxon — mahsulot endpointlari
+# products.fluxon — product endpoints
 # list (filter + pagination), get one, create, update stock.
 use http db
 
-# Sahifa hajmi (har sahifada nechta mahsulot).
+# Page size (how many products per page).
 page_size = 20
 
 # GET /products  ?category=  ?search=  ?page=
-# Filterlarni dinamik quramiz. Param indekslari ($1, $2...) ketma-ket.
+# Build filters dynamically. Param indexes ($1, $2...) are sequential.
 http.on :get "/products" \req ->
   page = str.int (req.query.page ?? "1")
   offset = (page - 1) * page_size
 
-  # WHERE shartlarini va parametrlarni dinamik to'playmiz.
+  # Collect WHERE conditions and parameters dynamically.
   conds <- []
   params <- []
   idx <- 0
@@ -26,7 +26,7 @@ http.on :get "/products" \req ->
     conds <- conds.push "name ilike $${idx}"
     params <- params.push "%${req.query.search}%"
 
-  # WHERE bo'limini yig'amiz (shart bo'lsa). Indeks bo'yicha " and " bilan ulaymiz.
+  # Assemble the WHERE clause (if any). Join conditions with " and ".
   where <- ""
   if conds.len > 0
     joined <- ""
@@ -39,7 +39,7 @@ http.on :get "/products" \req ->
       pos <- pos + 1
     where <- " where " + joined
 
-  # LIMIT va OFFSET parametrlarini qo'shamiz.
+  # Add the LIMIT and OFFSET parameters.
   idx <- idx + 1
   lim_idx = idx
   idx <- idx + 1
@@ -51,7 +51,7 @@ http.on :get "/products" \req ->
   rows = db.q sql params
   rep 200 {page:page page_size:page_size items:rows}
 
-# GET /products/:id — bitta mahsulot.
+# GET /products/:id — a single product.
 http.on :get "/products/:id" \req ->
   p = db.one "select * from products where id=$1" [req.params.id]
   if p == nil
@@ -59,7 +59,7 @@ http.on :get "/products/:id" \req ->
   else
     rep 200 p
 
-# POST /products — yangi mahsulot yaratish.
+# POST /products — create a new product.
 http.on :post "/products" \req ->
   b = req.body
   if b.name == nil | b.price == nil
@@ -74,7 +74,7 @@ http.on :post "/products" \req ->
     }
     rep 201 p
 
-# PUT /products/:id/stock — faqat zaxirani yangilash.
+# PUT /products/:id/stock — update stock only.
 http.on :put "/products/:id/stock" \req ->
   p = db.one "select * from products where id=$1" [req.params.id]
   if p == nil

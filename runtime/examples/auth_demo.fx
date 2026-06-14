@@ -1,41 +1,41 @@
-# auth battery — JWT imzolash/tekshirish + parol hash (issue #69).
+# auth battery — JWT signing/verification + password hash (issue #69).
 #
-# Imzo kaliti $AUTH_SECRET env'dan AVTO topiladi (db -> $DATABASE_URL,
-# ai -> ANTHROPIC_API_KEY naqshiga mos). Hech narsa sozlash shart emas:
+# The signing key $AUTH_SECRET is found AUTOMATICALLY from env (matching the
+# db -> $DATABASE_URL, ai -> ANTHROPIC_API_KEY pattern). Nothing to configure:
 #
-#   export AUTH_SECRET=sirli-kalit
+#   export AUTH_SECRET=secret-key
 #   fluxon run examples/auth_demo.fx
 #
-# (Server BLOKLAMAYDI — bu demo to'g'ridan-to'g'ri chiqib ketadi. Haqiqiy
-#  auth oqimi uchun examples/middleware.fx ga qarang.)
+# (The server does NOT BLOCK — this demo exits directly. For a real
+#  auth flow see examples/middleware.fx.)
 
 use auth
 
-# --- Parol hash (ro'yxatdan o'tish / kirish) ---
-# Salt avtomatik, doimiy-vaqt taqqoslash — agent xato qila olmaydi.
-hash = auth.hash "user-paroli-123"
+# --- Password hash (registration / login) ---
+# Salt is automatic, constant-time comparison — the agent cannot get it wrong.
+hash = auth.hash "user-password-123"
 log "hash: ${hash}"
 
-ok = auth.check "user-paroli-123" hash
-log "to'g'ri parol -> ${ok}"                  # true
+ok = auth.check "user-password-123" hash
+log "correct password -> ${ok}"               # true
 
-xato = auth.check "boshqa-parol" hash
-log "noto'g'ri parol -> ${xato}"              # false
+wrong = auth.check "other-password" hash
+log "incorrect password -> ${wrong}"          # false
 
-# --- JWT imzolash (login muvaffaqiyatli bo'lgach) ---
-# payload map'iga iat (berilgan vaqt) + exp (muddat, default 24 soat) avto qo'shiladi.
+# --- JWT signing (after a successful login) ---
+# iat (issued at) + exp (expiry, default 24 hours) are auto-added to the payload map.
 token = auth.jwt {sub: "u_42" tenant: "acme" role: "admin"}
 log "token: ${token}"
 
-# Qisqa muddat (1 soat) kerak bo'lsa — ikkinchi {exp:sekund} opt:
-qisqa = auth.jwt {sub: "u_42"} {exp: 3600}
-log "1 soatlik token uzunligi: ${(str.split qisqa ".").len} segment"
+# If you need a short expiry (1 hour) — second {exp:seconds} opt:
+short = auth.jwt {sub: "u_42"} {exp: 3600}
+log "1-hour token length: ${(str.split short ".").len} segments"
 
-# --- JWT tekshirish (har himoyalangan so'rovda) ---
-# Imzo + muddat (exp) AVTOMATIK tekshiriladi. Noto'g'ri bo'lsa err -> 401.
+# --- JWT verification (on every protected request) ---
+# Signature + expiry (exp) are checked AUTOMATICALLY. If invalid err -> 401.
 claims = auth.verify token
 log "claims.sub = ${claims.sub}"
 log "claims.tenant = ${claims.tenant}"
 log "claims.role = ${claims.role}"
 
-log "auth demo tugadi"
+log "auth demo finished"

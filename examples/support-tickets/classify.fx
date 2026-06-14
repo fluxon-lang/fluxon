@@ -1,13 +1,13 @@
-# AI yordamchi — ticketni klassifikatsiya qilish va javob qoralash
+# AI helper — classify a ticket and draft a reply
 
 use ai
 
-# Ticketni klassifikatsiya qiladi: kategoriya, ustuvorlik, ishonch darajasi
-# r._.conf metadata'sini natija map'iga qo'shib qaytaradi
+# Classifies a ticket: category, priority, confidence level.
+# Returns the r._.conf metadata merged into the result map.
 exp fn classify subject body
-  r = ai.json "Quyidagi qo'llab-quvvatlash so'rovini tasnifla. subject: ${subject}. body: ${body}" {category::other priority::medium}
+  r = ai.json "Classify the following support request. subject: ${subject}. body: ${body}" {category::other priority::medium}
   ret {category:r.category priority:r.priority conf:r._.conf}
 
-# AI avtomatik javob qoralaydi
+# AI drafts an automatic reply
 exp fn draft_reply subject body
-  ret ai.ask "Quyidagi mijoz so'roviga professional, qisqa qo'llab-quvvatlash javobini yoz. Mavzu: ${subject}. So'rov: ${body}"
+  ret ai.ask "Write a professional, concise support reply to the following customer request. Subject: ${subject}. Request: ${body}"

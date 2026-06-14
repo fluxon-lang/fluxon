@@ -1,8 +1,8 @@
-# Kunlik hisobot cron'i
+# Daily report cron
 
 use db
 
-# Ochiq ticketlar, ustuvorlik bo'yicha soni, so'nggi 24 soatda AI auto-javob soni
+# Open tickets, counts by priority, and AI auto-replies in the last 24 hours
 exp fn daily_report
   open = db.q "select count(*) as n from tickets where status != 'answered'"!
   open_n = open.0.n ?? 0
@@ -15,10 +15,10 @@ exp fn daily_report
   med_n = med.0.n ?? 0
   low_n = low.0.n ?? 0
 
-  # So'nggi 24 soatda AI tomonidan avtomatik javob berilgan ticketlar
+  # Tickets answered automatically by the AI in the last 24 hours
   ai_ans = db.q "select count(distinct ticket) as n from replies where is_ai=true and created > now() - interval '24 hours'"!
   ai_n = ai_ans.0.n ?? 0
 
-  log "Kunlik hisobot — Ochiq ticketlar: ${open_n}"
-  log "Ustuvorlik bo'yicha — high: ${high_n}, medium: ${med_n}, low: ${low_n}"
-  log "So'nggi 24 soatda AI auto-javob: ${ai_n}"
+  log "Daily report — Open tickets: ${open_n}"
+  log "By priority — high: ${high_n}, medium: ${med_n}, low: ${low_n}"
+  log "AI auto-replies in the last 24 hours: ${ai_n}"

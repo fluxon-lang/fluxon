@@ -1,12 +1,12 @@
-// Fluxon HTTP battery — server (http.on/http.serve/rep) va klient (http.get/post).
+// Fluxon HTTP battery — server (http.on/http.serve/rep) and client (http.get/post).
 //
-// Server tokio + hyper ustida quriladi. Fluxon handler'lari sinxron tree-walking
-// bo'lgani uchun har request `spawn_blocking` ichida bajariladi — bu CPU ishini
-// tokio worker'larini bloklamasdan HAQIQIY PARALLEL qiladi (Value: Send+Sync,
-// thread-safety refactor shuni ta'minlaydi).
+// The server is built on tokio + hyper. Because Fluxon handlers are synchronous
+// tree-walking, each request runs inside `spawn_blocking` — this makes the CPU
+// work TRULY PARALLEL without blocking tokio workers (Value: Send+Sync, the
+// thread-safety refactor guarantees this).
 //
 // `rep status body` -> {__resp:true status body} map (builtins.rs::install).
-// `fail status "msg"` -> Flow::Fail -> JSON xato javob.
+// `fail status "msg"` -> Flow::Fail -> JSON error response.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -30,9 +30,9 @@ use crate::builtins::{json_decode, json_encode};
 use crate::interp::{Flow, Interp};
 use crate::value::Value;
 
-// --- marshrut tuzilmasi ---
+// --- route structure ---
 
-// Yo'l segmenti: literal (`notes`) yoki parametr (`:id`).
+// Path segment: literal (`notes`) or parameter (`:id`).
 #[derive(Clone)]
 pub enum Seg {
     Lit(String),
@@ -46,24 +46,24 @@ pub struct Route {
     pub handler: Value, // Value::Fn (closure)
 }
 
-// Rate-limit holati: kalit -> (window_id, count). Fixed-window — `window_id =
-// now_sek / window_sek`. Arc<Mutex> shuning uchun limiter REGISTRATSIYA paytida
-// bir marta yaratiladi, har request shu BITTA holatni ulashadi (Middleware klonida
-// Arc nusxalanadi — pointer bir xil), shu sababli parallel request'lar atomik
-// sanaydi (issue #79: thread-safe). Holat in-memory — bitta instance uchun (docs).
+// Rate-limit state: key -> (window_id, count). Fixed-window — `window_id =
+// now_sec / window_sec`. Arc<Mutex> so the limiter is created once at
+// REGISTRATION time, and every request shares this SINGLE state (cloning a
+// Middleware copies the Arc — same pointer), which is why parallel requests count
+// atomically (issue #79: thread-safe). State is in-memory — for a single instance (docs).
 //
-// Xotira chegarasi: kalit funksiyasi foydalanuvchi nazoratidagi qiymatga
-// (`req.headers.x_api_key`) asoslansa, har yangi qiymat HashMap'ga kirib qoladi.
-// Public endpoint'da mijoz har so'rovda yangi kalit yuborib holatni cheksiz
-// o'stira oladi. Buni oldini olish uchun `LimitBucket` har `SWEEP_EVERY`
-// operatsiyada bir marta ESKI OYNADAGI kalitlarni tozalaydi (amortizatsiyalangan
-// O(1): tozalash sikli kamdan-kam ishlaydi). Eski oyna kaliti baribir keyingi
-// so'rovda count=0 dan qayta boshlanardi — shuning uchun o'chirish xavfsiz.
+// Memory bound: if the key function is based on a user-controlled value
+// (`req.headers.x_api_key`), every new value lands in the HashMap. On a public
+// endpoint a client can grow the state without bound by sending a new key on
+// every request. To prevent this, `LimitBucket` sweeps OLD-WINDOW keys once every
+// `SWEEP_EVERY` operations (amortized O(1): the cleanup loop runs rarely). An
+// old-window key would restart from count=0 on the next request anyway — so
+// removing it is safe.
 //
-// pub: `pub enum MwKind` (Middleware orqali) LimitState turini oshkor qiladi.
+// pub: `pub enum MwKind` (via Middleware) exposes the LimitState type.
 pub struct LimitBucket {
     counts: HashMap<String, (u64, u32)>,
-    // Oxirgi tozalashdan beri operatsiyalar soni (sweep'ni amortizatsiya qiladi).
+    // Number of operations since the last cleanup (amortizes the sweep).
     ops: u32,
 }
 
@@ -76,41 +76,41 @@ impl LimitBucket {
     }
 }
 
-// Necha operatsiyada bir marta eski oyna kalitlarini tozalaymiz.
+// How often (in operations) we sweep old-window keys.
 const SWEEP_EVERY: u32 = 1024;
 
-// HTTP server uchun standart so'rov tanasi (body) o'lcham chegarasi (issue #91).
-// Chegarasiz `collect()` butun tanani xotiraga yig'adi — mijoz ulkan body yuborib
-// server xotirasini to'ldira oladi (DoS). Default 10 MiB; `http.serve PORT
-// {max_body: N}` bilan sozlanadi. `max_body: 0` chegarani o'chiradi (cheklovsiz —
-// faqat ishonchli, ichki tarmoq orqasida ishlating).
+// Default request body size limit for the HTTP server (issue #91). An unbounded
+// `collect()` gathers the entire body into memory — a client can fill server
+// memory by sending a huge body (DoS). Default 10 MiB; configured via `http.serve
+// PORT {max_body: N}`. `max_body: 0` disables the limit (unbounded — use only
+// behind a trusted, internal network).
 const DEFAULT_MAX_BODY: usize = 10 * 1024 * 1024;
 
-// HTTP klient (http.get/post/...) standart timeout'i (issue #92). Timeout'siz
-// qotgan upstream butun skriptni (yoki handler ichida chaqirilsa, o'sha request
-// thread'ini) ABADIY bloklaydi. Default 30s; `http.get url {timeout: N}` (soniya)
-// bilan sozlanadi, `timeout: 0` — timeout'siz (faqat ishonchli upstream uchun).
-// Timeout butun so'rovni qamraydi: connect + yuborish + javob (redirect'lar bilan
-// birga) — qaysidir bosqichda osilib qolsa ham vaqt tugashi bilan xato qaytadi.
+// Default timeout for the HTTP client (http.get/post/...) (issue #92). Without a
+// timeout, a stuck upstream blocks the whole script FOREVER (or, if called inside
+// a handler, that request thread). Default 30s; configured via `http.get url
+// {timeout: N}` (seconds); `timeout: 0` — no timeout (only for trusted upstreams).
+// The timeout covers the whole request: connect + send + response (including
+// redirects) — even if it hangs at some stage, an error is returned once time runs out.
 const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 30;
 
-// HTTP server header o'qish timeout'i (issue #92). Slowloris-uslubdagi ulanish
-// header'larni juda sekin (yoki umuman) yubormay socket/task'ni cheksiz ushlab
-// turishi mumkin. hyper header'larni shu muddatda to'liq olmasa ulanishni yopadi.
-// (header_read_timeout faqat Builder::timer o'rnatilgan bo'lsa kuchga kiradi.)
+// HTTP server header-read timeout (issue #92). A slowloris-style connection may
+// send headers very slowly (or not at all), holding the socket/task indefinitely.
+// If hyper does not receive the headers fully within this period it closes the
+// connection. (header_read_timeout only takes effect when Builder::timer is set.)
 const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 
 pub type LimitState = Arc<Mutex<LimitBucket>>;
 
-// Middleware turi: oddiy fn (use/before) yoki rate-limiter (http.limit). Limit
-// ham SHU ro'yxatga qo'shiladi (alohida emas) — shunda u boshqa middleware bilan
-// DEKLARATSIYA TARTIBIDA ishlaydi: undan oldin e'lon qilingan auth `req.ctx`'ga
-// tenant_id yozsa, kalit funksiyasi `\req -> req.ctx.tenant_id` uni ko'radi (#79).
+// Middleware kind: a plain fn (use/before) or a rate-limiter (http.limit). Limit
+// is added to THIS SAME list (not separately) — so it runs in DECLARATION ORDER
+// relative to other middleware: if an auth declared before it writes tenant_id
+// into `req.ctx`, the key function `\req -> req.ctx.tenant_id` sees it (#79).
 #[derive(Clone)]
 pub enum MwKind {
-    // http.use / http.before — handler'ni chaqiradi; `fail`/`rep` zanjirni to'xtatadi.
+    // http.use / http.before — calls the handler; `fail`/`rep` stops the chain.
     Fn,
-    // http.limit — handler KALIT funksiyasi (req -> kalit). Limit oshsa 429.
+    // http.limit — the handler is the KEY function (req -> key). On exceeding the limit, 429.
     Limit {
         limit: u32,
         window_secs: u64,
@@ -118,9 +118,9 @@ pub enum MwKind {
     },
 }
 
-// Middleware (issue #67). `scope` = None — global (`http.use`, barcha yo'lga);
-// Some(shablon) — prefiks bo'yicha (`http.before "/api/*"`). Ro'yxatda
-// deklaratsiya tartibida saqlanadi (use/before/limit aralashsa ham tartib aniq).
+// Middleware (issue #67). `scope` = None — global (`http.use`, applies to every
+// path); Some(pattern) — by prefix (`http.before "/api/*"`). Stored in the list
+// in declaration order (the order is well-defined even when use/before/limit are mixed).
 #[derive(Clone)]
 pub struct Middleware {
     pub scope: Option<String>,
@@ -128,40 +128,40 @@ pub struct Middleware {
     pub kind: MwKind,
 }
 
-// CORS sozlamasi (issue #135). `http.cors` to'ldiradi; yoqilgan bo'lsa OPTIONS
-// preflight avtomatik javob oladi va har javobga `Access-Control-Allow-*`
-// header'lar qo'shiladi.
+// CORS config (issue #135). Filled in by `http.cors`; when enabled, OPTIONS
+// preflight is answered automatically and every response gets
+// `Access-Control-Allow-*` headers.
 //
-//   http.cors "*"                                   # hammaga ochiq (dev)
-//   http.cors ["https://app.example.com"]           # ruxsat etilgan origin'lar
+//   http.cors "*"                                   # open to all (dev)
+//   http.cors ["https://app.example.com"]           # allowed origins
 //   http.cors ["https://app.example.com"] {creds: true}   # cookie/Authorization
 //
-// `origins`: None — har qanday origin ("*"). Some(set) — faqat ro'yxatdagilar.
-// Wildcard "*" va `creds: true` birga ishlatib bo'lmaydi (brauzer rad etadi),
-// shuning uchun creds yoqilsa javob so'rovning aniq Origin'ini aks ettiradi.
+// `origins`: None — any origin ("*"). Some(set) — only the listed ones.
+// Wildcard "*" and `creds: true` cannot be combined (the browser rejects it),
+// so when creds is on, the response reflects the request's exact Origin.
 #[derive(Clone)]
 pub struct CorsConfig {
-    // Ruxsat etilgan origin'lar. None — "*" (har qanday). Some — aniq ro'yxat.
+    // Allowed origins. None — "*" (any). Some — an explicit list.
     origins: Option<Vec<String>>,
-    // Ruxsat etilgan metodlar (Access-Control-Allow-Methods). Default keng to'plam.
+    // Allowed methods (Access-Control-Allow-Methods). A wide default set.
     methods: String,
-    // Ruxsat etilgan so'rov header'lari (Access-Control-Allow-Headers).
+    // Allowed request headers (Access-Control-Allow-Headers).
     headers: String,
-    // Cookie/Authorization (credentials) ulashishga ruxsat (Allow-Credentials).
+    // Allow sharing cookies/Authorization (credentials) (Allow-Credentials).
     creds: bool,
-    // Preflight javobini brauzer necha soniya kesh qiladi (Max-Age).
+    // How many seconds the browser caches the preflight response (Max-Age).
     max_age: u64,
 }
 
-// Origin so'rovga ruxsat berilganmi? Ruxsat berilsa, javobning
-// `Access-Control-Allow-Origin` qiymati qaytadi (aniq origin yoki "*").
+// Is the request's origin allowed? If so, the response's
+// `Access-Control-Allow-Origin` value is returned (the exact origin or "*").
 impl CorsConfig {
-    // So'rovning Origin header'iga qarab Allow-Origin qiymatini hisoblaydi.
-    // None qaytsa — bu origin ruxsat etilmagan (CORS header qo'shilmaydi).
+    // Computes the Allow-Origin value based on the request's Origin header.
+    // None means this origin is not allowed (no CORS header is added).
     fn allow_origin_for(&self, req_origin: Option<&str>) -> Option<String> {
         match &self.origins {
-            // Har qanday origin ruxsat. creds=true bo'lsa "*" ishlatib bo'lmaydi —
-            // so'rov origin'ini aks ettiramiz (bo'lmasa "*").
+            // Any origin allowed. With creds=true "*" cannot be used —
+            // we reflect the request origin (falling back to "*").
             None => {
                 if self.creds {
                     req_origin.map(|o| o.to_string())
@@ -169,7 +169,7 @@ impl CorsConfig {
                     Some("*".to_string())
                 }
             }
-            // Aniq ro'yxat — so'rov origin'i ichida bo'lsa o'shani aks ettiramiz.
+            // Explicit list — if the request origin is in it, reflect that.
             Some(list) => match req_origin {
                 Some(o) if list.iter().any(|a| a == o) => Some(o.to_string()),
                 _ => None,
@@ -177,18 +177,19 @@ impl CorsConfig {
         }
     }
 
-    // Javobning HeaderMap'iga CORS header'larini qo'shadi (preflight'siz oddiy
-    // javoblar uchun ham). Origin ruxsat etilmagan bo'lsa hech narsa qo'shilmaydi.
+    // Adds CORS headers to the response's HeaderMap (including for plain
+    // non-preflight responses). If the origin is not allowed, nothing is added.
     fn apply_to(&self, hmap: &mut hyper::HeaderMap, req_origin: Option<&str>) {
         let Some(allow) = self.allow_origin_for(req_origin) else {
             return;
         };
         set_header(hmap, "access-control-allow-origin", &allow);
-        // Allow-Origin so'rov origin'iga qarab o'zgaradi — kesh to'g'ri bo'lishi
-        // uchun Vary'ga Origin qo'shamiz (aks holda proksi bir origin javobini
-        // boshqasiga beradi). insert EMAS — handler `rep ... {vary:"Accept-Encoding"}`
-        // bilan qo'ygan Vary'ni saqlab, Origin'ni BIRLASHTIRAMIZ (codex P2: insert
-        // mavjud kesh kalitini buzardi). "*" — javob origin'ga bog'liq emas, Vary shart emas.
+        // Allow-Origin varies by request origin — to keep caches correct we add
+        // Origin to Vary (otherwise a proxy would serve one origin's response to
+        // another). NOT insert — we preserve a Vary the handler set with
+        // `rep ... {vary:"Accept-Encoding"}` and MERGE Origin into it (codex P2:
+        // insert clobbered the existing cache key). "*" — the response does not
+        // depend on origin, so Vary is unnecessary.
         if allow != "*" {
             add_vary_origin(hmap);
         }
@@ -198,19 +199,19 @@ impl CorsConfig {
     }
 }
 
-// Javobning `Vary` header'iga `Origin` qo'shadi, mavjud qiymatlarni saqlab.
-// `Vary` allaqachon `Origin` (yoki `*`) ni o'z ichiga olsa — o'zgartirmaydi
-// (takror oldini olish). Aks holda vergul bilan birlashtiradi.
+// Adds `Origin` to the response's `Vary` header, preserving existing values.
+// If `Vary` already contains `Origin` (or `*`) it is left unchanged (avoids
+// duplication). Otherwise it joins with a comma.
 fn add_vary_origin(hmap: &mut hyper::HeaderMap) {
     use hyper::header::{HeaderValue, VARY};
-    // Mavjud Vary qiymatlarini o'qiymiz (bir nechta Vary qatori bo'lishi mumkin).
+    // Read the existing Vary values (there may be several Vary lines).
     let existing: Vec<String> = hmap
         .get_all(VARY)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .collect();
-    // Allaqachon Origin yoki * bor bo'lsa — qo'shilgan, qaytamiz.
+    // Already has Origin or * — nothing to add, return.
     let already = existing.iter().any(|line| {
         line.split(',').any(|tok| {
             let t = tok.trim();
@@ -223,7 +224,7 @@ fn add_vary_origin(hmap: &mut hyper::HeaderMap) {
     if existing.is_empty() {
         hmap.insert(VARY, HeaderValue::from_static("Origin"));
     } else {
-        // Mavjud qiymat(lar)ni bitta qatorga birlashtirib Origin qo'shamiz.
+        // Merge the existing value(s) into one line and append Origin.
         let merged = format!("{}, Origin", existing.join(", "));
         if let Ok(hv) = HeaderValue::from_str(&merged) {
             hmap.insert(VARY, hv);
@@ -231,10 +232,10 @@ fn add_vary_origin(hmap: &mut hyper::HeaderMap) {
     }
 }
 
-// Javobga CORS header'larini qo'shadi (yoqilgan bo'lsa) va javobni qaytaradi.
-// Body-read xato javoblari (400/413), 404 va handler javobi — hammasi shu
-// orqali yakunlanadi, shunda CORS yoqilganda HAR javob `Access-Control-Allow-*`
-// oladi (codex P2: oldin erta-return xatolari header'siz qaytardi).
+// Adds CORS headers to the response (when enabled) and returns it. Body-read
+// error responses (400/413), 404, and the handler response all finalize through
+// here, so when CORS is enabled EVERY response gets `Access-Control-Allow-*`
+// (codex P2: early-return errors used to return without headers).
 fn cors_finalize(
     mut resp: Response<Full<Bytes>>,
     cors: &Option<CorsConfig>,
@@ -246,9 +247,9 @@ fn cors_finalize(
     resp
 }
 
-// HeaderMap'ga bitta header'ni insert qiladi (eskisini bosadi). Buzuq nom/qiymat
-// jim o'tkazib yuboriladi. CORS header'lari uchun yordamchi (closure borrow
-// muammosini chetlab o'tadi).
+// Inserts a single header into the HeaderMap (overwriting the old one). A
+// malformed name/value is silently skipped. Helper for CORS headers (sidesteps
+// the closure borrow problem).
 fn set_header(hmap: &mut hyper::HeaderMap, name: &str, val: &str) {
     use hyper::header::{HeaderName, HeaderValue};
     if let (Ok(n), Ok(v)) = (
@@ -259,7 +260,7 @@ fn set_header(hmap: &mut hyper::HeaderMap, name: &str, val: &str) {
     }
 }
 
-// "/notes/:id" -> [Lit("notes"), Param("id")]. Bo'sh segmentlar tashlanadi.
+// "/notes/:id" -> [Lit("notes"), Param("id")]. Empty segments are dropped.
 fn parse_pattern(path: &str) -> Vec<Seg> {
     path.split('/')
         .filter(|s| !s.is_empty())
@@ -273,12 +274,12 @@ fn parse_pattern(path: &str) -> Vec<Seg> {
         .collect()
 }
 
-// So'rov yo'lini segmentlarga bo'ladi (query'siz).
+// Splits the request path into segments (without the query).
 fn path_segments(path: &str) -> Vec<&str> {
     path.split('/').filter(|s| !s.is_empty()).collect()
 }
 
-// method+path bo'yicha birinchi mos marshrutni topadi; topilsa params map qaytadi.
+// Finds the first route matching method+path; on a match returns a params map.
 fn match_route(
     routes: &[Route],
     method: &str,
@@ -303,12 +304,12 @@ fn match_route(
                     }
                 }
                 Seg::Param(name) => {
-                    // Path segmentlarida ham non-ASCII percent-encode qilinadi
-                    // (masalan `/users/:name` -> `%D0%9A...`) — dekod qilamiz
-                    // (issue #100). Path'da `+` literal, shuning uchun bo'shliqqa
-                    // almashtirilmaydi (faqat query'da form-encoding qoidasi).
-                    // `keep_path_seps=true`: `%2F`/`%5C` xom qoladi (segment
-                    // invarianti — qiymatga `/` kirmasin, codex revyu).
+                    // Path segments also percent-encode non-ASCII (e.g.
+                    // `/users/:name` -> `%D0%9A...`) — we decode it (issue #100).
+                    // In a path `+` is literal, so it is not turned into a space
+                    // (the form-encoding rule applies only in the query).
+                    // `keep_path_seps=true`: `%2F`/`%5C` stay raw (segment
+                    // invariant — no `/` inside the value, codex review).
                     params.insert(name.clone(), Value::Str(percent_decode(seg, true)));
                 }
             }
@@ -320,35 +321,37 @@ fn match_route(
     None
 }
 
-// http.before shabloni so'rov yo'liga mosmi? (issue #67)
-// "/api/*" -> "/api" yoki "/api/..." bilan boshlanuvchi yo'llar (segment chegarasi).
-// "*"siz shablon -> aniq mos. "/apix" "/api/*" ga MOS EMAS (segment ajratiladi).
+// Does an http.before pattern match the request path? (issue #67)
+// "/api/*" -> paths that are "/api" or start with "/api/..." (segment boundary).
+// A pattern without "*" -> exact match. "/apix" does NOT match "/api/*"
+// (the prefix is split on a segment boundary).
 fn prefix_matches(pat: &str, path: &str) -> bool {
     if let Some(prefix) = pat.strip_suffix("/*") {
-        // "/api/*" → "/api" ning o'zi yoki "/api/" bilan boshlanuvchilar.
+        // "/api/*" → "/api" itself or anything starting with "/api/".
         path == prefix || path.starts_with(&format!("{}/", prefix))
     } else {
-        // Shablonsiz — aniq yo'l mosligi.
+        // No pattern — exact path match.
         pat == path
     }
 }
 
-// --- static fayl mount (issue #134) ---
+// --- static file mount (issue #134) ---
 
-// `http.static prefiks katalog` mount'i. Prefiks segmentlarga bo'lib saqlanadi
-// ("/assets" -> ["assets"], "/" -> []) — moslik segment chegarasida tekshiriladi
-// ("/assetsx" "/assets" mount'iga tushmasin). `dir` registratsiya paytida
-// canonicalize qilingan mutlaq yo'l (skript katalogiga nisbatan hal qilinadi).
+// An `http.static prefix dir` mount. The prefix is stored split into segments
+// ("/assets" -> ["assets"], "/" -> []) — matching is checked on a segment
+// boundary (so "/assetsx" does not fall under the "/assets" mount). `dir` is an
+// absolute path canonicalized at registration time (resolved relative to the
+// script directory).
 #[derive(Clone)]
 pub struct StaticMount {
     pub prefix: Vec<String>,
     pub dir: PathBuf,
-    // SPA fallback: prefiks ostidagi yo'l faylga mos kelmasa `dir/index.html`
-    // qaytadi (frontend router o'zi hal qiladi).
+    // SPA fallback: if a path under the prefix matches no file, `dir/index.html`
+    // is returned (the frontend router handles it itself).
     pub spa: bool,
 }
 
-// "/assets/img" -> ["assets", "img"]; "/" -> []. Bo'sh segmentlar tashlanadi.
+// "/assets/img" -> ["assets", "img"]; "/" -> []. Empty segments are dropped.
 fn parse_static_prefix(prefix: &str) -> Vec<String> {
     prefix
         .split('/')
@@ -357,8 +360,8 @@ fn parse_static_prefix(prefix: &str) -> Vec<String> {
         .collect()
 }
 
-// Mount prefiksi so'rov segmentlarining boshiga mosmi? Mos bo'lsa prefiksdan
-// keyingi qism (fayl yo'li) qaytadi.
+// Does the mount prefix match the start of the request segments? If so, returns
+// the part after the prefix (the file path).
 fn strip_mount_prefix<'a>(prefix: &[String], segs: &'a [String]) -> Option<&'a [String]> {
     if segs.len() < prefix.len() {
         return None;
@@ -370,11 +373,11 @@ fn strip_mount_prefix<'a>(prefix: &[String], segs: &'a [String]) -> Option<&'a [
     }
 }
 
-// Segmentlarni mount katalogiga MAJBURIY traversal himoyasi bilan ulaydi.
-// Har segment percent-dekoddan KEYIN tekshiriladi (shu sabab `%2e%2e` ham
-// ushlanadi): faqat oddiy nom (Component::Normal) bo'lishi shart — `..`, `.`,
-// bo'sh, mutlaq yoki Windows prefiks (`C:`) segmentlari rad etiladi. Qo'shimcha
-// `\`/NUL tekshiruvi: bunday nom fayl tizimida baribir kutilmagan, jim 404.
+// Joins segments onto the mount directory with MANDATORY traversal protection.
+// Each segment is checked AFTER percent-decoding (so `%2e%2e` is caught too):
+// it must be a plain name (Component::Normal) — `..`, `.`, empty, absolute, or
+// Windows-prefix (`C:`) segments are rejected. An extra `\`/NUL check: such a
+// name is unexpected on the filesystem anyway, so a silent 404.
 fn safe_join(dir: &Path, rest: &[String]) -> Option<PathBuf> {
     let mut p = dir.to_path_buf();
     for seg in rest {
@@ -391,8 +394,9 @@ fn safe_join(dir: &Path, rest: &[String]) -> Option<PathBuf> {
     Some(p)
 }
 
-// Kengaytmadan Content-Type (issue talabi: avtomatik). Ro'yxatda yo'q kengaytma
-// -> octet-stream (brauzer yuklab oladi, lekin mazmun buzilmaydi).
+// Content-Type from the extension (issue requirement: automatic). An extension
+// not in the list -> octet-stream (the browser downloads it, but the content is
+// not corrupted).
 fn mime_for(path: &Path) -> &'static str {
     let ext = path
         .extension()
@@ -428,14 +432,14 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
-// Kandidatni canonicalize qilib mount ildizi OSTIDA oddiy fayl ekanini
-// tasdiqlaydi (codex P2): safe_join faqat leksik segmentlarni tekshiradi,
-// metadata esa symlink'ni kuzatadi — papka ichidagi symlink ildizdan tashqari
-// faylga (masalan /etc/passwd) ishora qilsa, leksik himoya chetlab o'tilardi.
-// `root` registratsiyada canonicalize qilingan, shuning uchun prefiks
-// taqqoslash to'g'ri ishlaydi. Ildiz ichidagi symlink (canonical manzili ham
-// ildiz ostida) avvalgidek xizmat qilinadi. Qaytgan yo'l canonical — keyingi
-// o'qish ham aynan tekshirilgan faylni oladi.
+// Canonicalizes the candidate and confirms it is a plain file UNDER the mount
+// root (codex P2): safe_join only checks lexical segments, while metadata
+// follows symlinks — if a symlink inside the folder points to a file outside
+// the root (e.g. /etc/passwd), the lexical protection would be bypassed. `root`
+// is canonicalized at registration, so the prefix comparison works correctly.
+// A symlink inside the root (whose canonical target is also under the root) is
+// served as before. The returned path is canonical — the subsequent read also
+// gets exactly the file that was checked.
 async fn confined_file(p: &Path, root: &Path) -> Option<(PathBuf, u64)> {
     let canon = tokio::fs::canonicalize(p).await.ok()?;
     if !canon.starts_with(root) {
@@ -450,13 +454,14 @@ async fn confined_file(p: &Path, root: &Path) -> Option<(PathBuf, u64)> {
     }
 }
 
-// So'rov segmentlarini (percent-dekod qilingan — chaqiruvchi tayyorlaydi)
-// mount'lar bo'yicha faylga aylantiradi. Uzun prefiks ustun ("/assets" mount'i
-// "/" mount'idan oldin tekshiriladi) — eng aniq mount yutadi. Ikki bosqich:
-// (1) aniq fayl (katalog so'ralsa ichidagi index.html); (2) topilmasa —
-// prefiksi mos SPA mount'larning `index.html` fallback'i. Hajm (bayt)
-// metadata'dan birga qaytadi — HEAD javobi faylni o'qimasdan Content-Length
-// bera olsin (codex P2). Har kandidat confined_file orqali ildizga qamaladi.
+// Resolves the request segments (already percent-decoded — the caller prepares
+// them) to a file across the mounts. A longer prefix wins (the "/assets" mount
+// is checked before the "/" mount) — the most specific mount takes it. Two
+// stages: (1) the exact file (if a directory is requested, its index.html);
+// (2) if not found — the `index.html` fallback of SPA mounts whose prefix
+// matches. The size (bytes) is returned together from metadata — so a HEAD
+// response can give Content-Length without reading the file (codex P2). Each
+// candidate is confined to the root via confined_file.
 async fn resolve_static(
     mounts: &[StaticMount],
     segs: &[String],
@@ -471,14 +476,14 @@ async fn resolve_static(
         let Some(p) = safe_join(&m.dir, rest) else {
             continue;
         };
-        // Aniq fayl. Mime canonical yo'ldan — symlink nomi emas, haqiqiy fayl
-        // kengaytmasi javob turini belgilaydi.
+        // Exact file. Mime from the canonical path — the real file extension,
+        // not the symlink name, determines the response type.
         if let Some((canon, len)) = confined_file(&p, &m.dir).await {
             let mime = mime_for(&canon);
             return Some((canon, mime, len));
         }
-        // Katalog so'ralgan bo'lishi mumkin (yoki prefiksning o'zi) —
-        // ichidagi index.html'ga urinish. p fayl bo'lsa bu jim muvaffaqiyatsiz.
+        // A directory (or the prefix itself) may have been requested — try its
+        // index.html. If p is a file, this silently fails.
         if let Some((canon, len)) = confined_file(&p.join("index.html"), &m.dir).await {
             let mime = mime_for(&canon);
             return Some((canon, mime, len));
@@ -496,7 +501,7 @@ async fn resolve_static(
     None
 }
 
-// Static fayl javobi: 200 + kengaytmadan aniqlangan Content-Type.
+// Static file response: 200 + Content-Type determined from the extension.
 fn static_response(data: Vec<u8>, mime: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
@@ -505,9 +510,9 @@ fn static_response(data: Vec<u8>, mime: &str) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
-// HEAD uchun static javob: fayl O'QILMAYDI (katta asset'da behuda disk I/O va
-// xotira — codex P2), faqat metadata'dagi hajm Content-Length sifatida qo'lda
-// qo'yiladi (bo'sh body avtomatik 0 berardi). hyper HEAD'ga tana yozmaydi.
+// Static response for HEAD: the file is NOT read (wasted disk I/O and memory on
+// a large asset — codex P2), only the size from metadata is set manually as
+// Content-Length (an empty body would auto-give 0). hyper writes no body on HEAD.
 fn static_head_response(len: u64, mime: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
@@ -519,8 +524,8 @@ fn static_head_response(len: u64, mime: &str) -> Response<Full<Bytes>> {
 
 // --- rate-limit (issue #79) ---
 
-// Oyna birligi symbol'ini soniyaga aylantiradi. Faqat :sec/:min/:hr — kam token,
-// AI eslab qoladigan canonical to'plam (yangi birlik kerak bo'lsa shu yerga).
+// Converts a window-unit symbol to seconds. Only :sec/:min/:hr — few tokens, a
+// canonical set the AI remembers (add a new unit here if needed).
 fn window_to_secs(unit: &str) -> Option<u64> {
     match unit {
         "sec" => Some(1),
@@ -530,22 +535,22 @@ fn window_to_secs(unit: &str) -> Option<u64> {
     }
 }
 
-// Fixed-window hisobgich: kalit uchun joriy oynadagi so'rovni sanaydi va oshirib
-// bo'lgach tekshiradi. Limit oshsa Some(retry_after_sek) (oyna tugashigacha),
-// aks holda None. Mutex bitta lock ostida read-modify-write qiladi — shuning
-// uchun parallel request'lar bir kalitni atomik sanaydi (race yo'q).
+// Fixed-window counter: counts the request for a key in the current window and
+// checks after incrementing. If the limit is exceeded, Some(retry_after_secs)
+// (until the window ends), otherwise None. The Mutex does read-modify-write under
+// one lock — so parallel requests count a key atomically (no race).
 fn check_and_count(state: &LimitState, key: &str, limit: u32, window_secs: u64) -> Option<u64> {
-    // Devor-soat vaqti (Instant emas): oyna chegarasi epoch'ga bog'langan, shunda
-    // Retry-After ham (window_id+1)*window_secs - now sifatida aniq chiqadi.
+    // Wall-clock time (not Instant): the window boundary is tied to the epoch, so
+    // Retry-After also comes out exactly as (window_id+1)*window_secs - now.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let window_id = now / window_secs;
     let mut bucket = state.lock().unwrap();
-    // Davriy tozalash: eski oyna (window_id'i joriyidan kichik) kalitlarini
-    // olib tashlaymiz, shunda foydalanuvchi nazoratidagi kalitlar xotirani
-    // cheksiz o'stirmaydi. Faqat SWEEP_EVERY operatsiyada bir marta — O(1) amortized.
+    // Periodic cleanup: remove keys from old windows (window_id smaller than the
+    // current one) so user-controlled keys do not grow memory without bound. Only
+    // once every SWEEP_EVERY operations — O(1) amortized.
     bucket.ops = bucket.ops.saturating_add(1);
     if bucket.ops >= SWEEP_EVERY {
         bucket.ops = 0;
@@ -555,23 +560,24 @@ fn check_and_count(state: &LimitState, key: &str, limit: u32, window_secs: u64) 
         .counts
         .entry(key.to_string())
         .or_insert((window_id, 0));
-    // Yangi oynaga o'tdik — hisobni nolga tushiramiz.
+    // Moved to a new window — reset the count to zero.
     if entry.0 != window_id {
         *entry = (window_id, 0);
     }
     entry.1 = entry.1.saturating_add(1);
     if entry.1 > limit {
-        // Oyna (window_id+1)*window_secs epoch'da yangilanadi; now undan kichik,
-        // shuning uchun farq doim >= 1.
+        // The window resets at epoch (window_id+1)*window_secs; now is smaller,
+        // so the difference is always >= 1.
         Some((window_id + 1) * window_secs - now)
     } else {
         None
     }
 }
 
-// Kalit funksiyasi nil/bo'sh qaytarsa — mijoz IP'siga qaytamiz (kalitsiz so'rovni
-// ham cheklash uchun). "ip:" prefiksi tenant_id/api-key qiymati bilan tasodifan
-// to'qnashmaslik uchun (bitta limiter holatida ikkalasi bir HashMap'da yashaydi).
+// If the key function returns nil/empty — fall back to the client IP (so even a
+// keyless request is limited). The "ip:" prefix avoids accidental collisions
+// with a tenant_id/api-key value (in one limiter's state both live in the same
+// HashMap).
 fn client_fallback_key(req: &Value) -> String {
     let ip = match req {
         Value::Map(m) => match m.get("ip") {
@@ -583,13 +589,13 @@ fn client_fallback_key(req: &Value) -> String {
     format!("ip:{}", ip)
 }
 
-// Limit oshganda qaytariladigan javob: `429` + `Retry-After` header (PRD format).
-// __resp map sifatida — handle_request uni boshqa rep javoblari kabi yuboradi.
+// Response returned when the limit is exceeded: `429` + a `Retry-After` header
+// (PRD format). As a __resp map — handle_request sends it like other rep responses.
 fn rate_limited_response(retry_after: u64) -> Value {
     let mut body = BTreeMap::new();
     body.insert(
         "error".to_string(),
-        Value::Str("rate limit oshib ketdi".to_string()),
+        Value::Str("rate limit exceeded".to_string()),
     );
     let mut headers = BTreeMap::new();
     headers.insert(
@@ -604,20 +610,21 @@ fn rate_limited_response(retry_after: u64) -> Value {
     Value::Map(m)
 }
 
-// Percent-encoded UTF-8 baytlarni (`%D0%9A`) dekod qiladi: `%XX` juftliklarni
-// baytga aylantirib yig'adi, qolgan baytlarni o'zgarmas qoldiradi. Yig'ilgan
-// baytlar UTF-8 deb talqin qilinadi — `from_utf8_lossy` yaroqsiz ketma-ketlikni
-// U+FFFD bilan almashtiradi (panic yo'q). Yaroqsiz `%` (masalan, `%zz` yoki
-// satr oxiridagi `%`) literal `%` sifatida qoladi. Brauzer query va path'dagi
-// non-ASCII (kirill/o'zbekcha) qiymatlarni doim percent-encode qiladi — bu
-// funksiyasiz `req.query.q` xom `%D1%81...` holicha qolardi (issue #100).
+// Decodes percent-encoded UTF-8 bytes (`%D0%9A`): turns `%XX` pairs into bytes
+// and accumulates them, leaving other bytes unchanged. The accumulated bytes are
+// interpreted as UTF-8 — `from_utf8_lossy` replaces an invalid sequence with
+// U+FFFD (no panic). An invalid `%` (e.g. `%zz` or a `%` at the end of the
+// string) stays as a literal `%`. The browser always percent-encodes non-ASCII
+// (Cyrillic/Uzbek) values in the query and path — without this function
+// `req.query.q` would stay raw as `%D1%81...` (issue #100).
 //
-// `keep_path_seps` — `true` bo'lsa `%2F` (`/`) va `%5C` (`\`) DEKOD QILINMAYDI,
-// xom `%2F`/`%5C` holicha qoladi (path param uchun). Sabab: `:param` qiymati
-// bitta segmentdan keladi degan invariant — encoded slash dekod qilinsa qiymatga
-// `/` kirib, uni haqiqiy yo'l ajratuvchisidan farqlab bo'lmaydi, va param'ni ID
-// yoki xavfsiz yo'l komponenti deb ishlatadigan handler kutilmaganda ichki slash
-// oladi (codex revyu). Query qiymatlarida bu xavf yo'q — u yerda `false`.
+// `keep_path_seps` — when `true`, `%2F` (`/`) and `%5C` (`\`) are NOT decoded
+// and stay raw as `%2F`/`%5C` (for path params). Reason: the invariant that a
+// `:param` value comes from a single segment — if an encoded slash were decoded,
+// `/` would enter the value and could not be told apart from a real path
+// separator, and a handler using the param as an ID or safe path component would
+// unexpectedly get an inner slash (codex review). Query values have no such risk
+// — there it is `false`.
 fn percent_decode(s: &str, keep_path_seps: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -628,8 +635,8 @@ fn percent_decode(s: &str, keep_path_seps: bool) -> String {
             let lo = (bytes[i + 2] as char).to_digit(16);
             if let (Some(hi), Some(lo)) = (hi, lo) {
                 let byte = (hi * 16 + lo) as u8;
-                // Path param'da slash/backslash'ni xom qoldiramiz (segment
-                // invariantini buzmaslik uchun) — uch baytni o'zgarmas o'tkazamiz.
+                // In a path param keep slash/backslash raw (to not break the
+                // segment invariant) — pass the three bytes through unchanged.
                 if keep_path_seps && (byte == b'/' || byte == b'\\') {
                     out.extend_from_slice(&bytes[i..i + 3]);
                     i += 3;
@@ -646,9 +653,9 @@ fn percent_decode(s: &str, keep_path_seps: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-// "a=1&b=2" -> {a:"1" b:"2"}. Kalit va qiymatga `+` -> bo'shliq (form-encoding)
-// va percent-dekod qo'llanadi (issue #100) — kalitlarda ham non-ASCII bo'lishi
-// mumkin, shuning uchun ikkalasi ham dekod qilinadi.
+// "a=1&b=2" -> {a:"1" b:"2"}. Both key and value get `+` -> space
+// (form-encoding) and percent-decode (issue #100) — keys can also contain
+// non-ASCII, so both are decoded.
 fn parse_query(q: &str) -> Value {
     let mut m = BTreeMap::new();
     for pair in q.split('&') {
@@ -668,9 +675,9 @@ fn parse_query(q: &str) -> Value {
 
 // --- multipart/form-data (issue #133) ---
 
-// Content-Type'dan multipart boundary'ni ajratadi. multipart/form-data
-// bo'lmasa yoki boundary topilmasa None — chaqiruvchi oddiy body yo'liga
-// qaytadi. Boundary qo'shtirnoqli bo'lishi mumkin (RFC 2046 ruxsat beradi).
+// Extracts the multipart boundary from Content-Type. If it is not
+// multipart/form-data, or no boundary is found, None — the caller falls back to
+// the plain body path. The boundary may be quoted (RFC 2046 allows it).
 fn multipart_boundary(ct: &str) -> Option<String> {
     let lower = ct.to_ascii_lowercase();
     if !lower.contains("multipart/form-data") {
@@ -690,8 +697,8 @@ fn multipart_boundary(ct: &str) -> Option<String> {
     }
 }
 
-// Baytlar ichidan pastki ketma-ketlikni qidiradi (memmem). Multipart tana
-// ikkilik bo'lishi mumkin — str metodlari yaroqsiz, shuning uchun bayt darajasida.
+// Searches for a sub-sequence within bytes (memmem). A multipart body may be
+// binary — str methods are invalid, so we work at the byte level.
 fn find_sub(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || hay.len() < from + needle.len() {
         return None;
@@ -702,11 +709,11 @@ fn find_sub(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .map(|i| i + from)
 }
 
-// Content-Disposition qatoridan parametr qiymatini oladi (`name="x"`,
-// `filename="a.png"`). `name` qidirilganda `filename=` ichidagi "name=" ga
-// adashib tushmaslik uchun mos kelgan joydan OLDINGI belgi ajratuvchi
-// (`;`/bo'shliq) ekani tekshiriladi. Qiymat qo'shtirnoqsiz ham bo'lishi mumkin
-// (eski klientlar) — u holda `;` gacha o'qiladi.
+// Reads a parameter value from a Content-Disposition line (`name="x"`,
+// `filename="a.png"`). When searching for `name`, to avoid mistakenly matching
+// the "name=" inside `filename=` we check that the char BEFORE the match is a
+// separator (`;`/space). The value may be unquoted too (old clients) — in that
+// case it is read up to `;`.
 fn cd_param(line: &str, key: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
     let pat = format!("{}=", key);
@@ -718,7 +725,7 @@ fn cd_param(line: &str, key: &str) -> Option<String> {
             return Some(if let Some(r) = rest.strip_prefix('"') {
                 match r.find('"') {
                     Some(e) => r[..e].to_string(),
-                    None => r.to_string(), // yopilmagan qo'shtirnoq — oxirigacha
+                    None => r.to_string(), // unclosed quote — read to the end
                 }
             } else {
                 let e = rest.find(';').unwrap_or(rest.len());
@@ -730,11 +737,11 @@ fn cd_param(line: &str, key: &str) -> Option<String> {
     None
 }
 
-// Boundary qatori shu yerda haqiqatan tugayaptimi? RFC 2046: `--boundary` dan
-// keyin yo yopuvchi `--`, yo ixtiyoriy transport padding (bo'shliq/tab) + CRLF
-// keladi. Tekshiruvsiz fayl mazmunidagi tasodifiy `\r\n--abcXYZ` (boundary
-// `abc` ning prefiksi) chegara deb olinib qism noto'g'ri kesilardi (codex P2
-// revyu) — bunday holatda bu valid mazmun, chegara emas.
+// Does a boundary line really end here? RFC 2046: after `--boundary` comes
+// either a closing `--`, or optional transport padding (space/tab) + CRLF.
+// Without this check, a chance `\r\n--abcXYZ` in file content (a prefix of
+// boundary `abc`) would be taken as a boundary and the part wrongly cut (codex
+// P2 review) — in that case it is valid content, not a boundary.
 fn boundary_line_ends(rest: &[u8]) -> bool {
     if rest.starts_with(b"--") {
         return true;
@@ -746,9 +753,9 @@ fn boundary_line_ends(rest: &[u8]) -> bool {
     rest[i..].starts_with(b"\r\n")
 }
 
-// To'liq boundary qatorini qidiradi: `marker` dan keyingi baytlar ham chegara
-// qatorini tasdiqlashi shart (boundary_line_ends). Mos kelmagan prefiks
-// uchrashlar (fayl mazmunidagi `--boundaryX...`) o'tkazib yuboriladi.
+// Searches for a complete boundary line: the bytes after `marker` must also
+// confirm a boundary line (boundary_line_ends). Non-matching prefix occurrences
+// (`--boundaryX...` in file content) are skipped.
 fn find_boundary(body: &[u8], marker: &[u8], from: usize) -> Option<usize> {
     let mut search = from;
     loop {
@@ -760,47 +767,47 @@ fn find_boundary(body: &[u8], marker: &[u8], from: usize) -> Option<usize> {
     }
 }
 
-// multipart/form-data tanani qismlarga ajratadi: oddiy form maydonlari ->
-// fields map (req.body — JSON bilan simmetrik), fayl qismlari (filename bor) ->
-// files ro'yxati ({name filename content size}). Tana formatga mos kelmasa
-// (boundary topilmadi, buzuq struktura) None — chaqiruvchi xom body'ga qaytadi,
-// shunda buzuq so'rov ma'lumotni yo'qotmaydi.
+// Splits a multipart/form-data body into parts: plain form fields -> a fields
+// map (req.body — symmetric with JSON), file parts (with a filename) -> a files
+// list ({name filename content size}). If the body does not match the format
+// (no boundary found, broken structure) None — the caller falls back to the raw
+// body, so a malformed request does not lose data.
 //
-// Fayl mazmuni req.body bilan bir xil qoidaga amal qiladi: UTF-8 matn -> str,
-// ikkilik -> bytes (issue #132) — AI bitta naqshni o'rganadi. `size` doim BAYT
-// soni (str.len belgi sanaydi — fayl o'lchami uchun noto'g'ri bo'lardi).
+// File content follows the same rule as req.body: UTF-8 text -> str, binary ->
+// bytes (issue #132) — the AI learns one pattern. `size` is always the BYTE
+// count (str.len counts characters — which would be wrong for a file size).
 #[allow(clippy::type_complexity)]
 fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Value>, Vec<Value>)> {
     let delim = format!("--{}", boundary).into_bytes();
-    // Qism oxiri belgisi: CRLF + boundary (CRLF qism mazmuniga kirmaydi).
+    // Part-end marker: CRLF + boundary (the CRLF is not part of the content).
     let mut end_marker = b"\r\n".to_vec();
     end_marker.extend_from_slice(&delim);
 
     let mut fields = BTreeMap::new();
     let mut files = Vec::new();
 
-    // Birinchi boundary (RFC 2046 undan oldin preamble'ga ruxsat beradi).
-    // Tana to'g'ridan-to'g'ri `--boundary` bilan boshlansa CRLF prefiksi yo'q —
-    // alohida tekshiramiz; aks holda qator boshidagi (CRLF'dan keyingi)
-    // to'liq chegarani qidiramiz.
+    // The first boundary (RFC 2046 allows a preamble before it). If the body
+    // starts directly with `--boundary` there is no CRLF prefix — check that
+    // separately; otherwise search for the full boundary at a line start
+    // (after a CRLF).
     let mut pos = if body.starts_with(&delim) && boundary_line_ends(&body[delim.len()..]) {
         delim.len()
     } else {
         find_boundary(body, &end_marker, 0)? + end_marker.len()
     };
     loop {
-        // Boundary'dan keyin `--` — yakuniy chegara, tugadik.
+        // `--` after the boundary — the final boundary, we are done.
         if body[pos..].starts_with(b"--") {
             break;
         }
-        // Boundary qatori CRLF bilan tugaydi (orada transport padding mumkin).
+        // The boundary line ends with CRLF (transport padding may be in between).
         let nl = find_sub(body, b"\r\n", pos)?;
         let part_start = nl + 2;
         let part_end = find_boundary(body, &end_marker, part_start)?;
         let part = &body[part_start..part_end];
 
-        // Qism: header'lar + bo'sh qator + mazmun. Header'lar matn (ASCII) —
-        // lossy o'qish xavfsiz; mazmun esa xom baytlar bo'lib qoladi.
+        // A part: headers + a blank line + content. The headers are text (ASCII)
+        // — lossy reading is safe; the content stays as raw bytes.
         if let Some(hdr_end) = find_sub(part, b"\r\n\r\n", 0) {
             let headers_raw = String::from_utf8_lossy(&part[..hdr_end]);
             let content = &part[hdr_end + 4..];
@@ -815,8 +822,8 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Valu
                     Err(_) => Value::Bytes(Arc::new(content.to_vec())),
                 };
                 match cd_param(cd, "filename") {
-                    // filename bor — fayl qismi (bo'sh filename ham fayl:
-                    // brauzer bo'sh file input'ni shunday yuboradi).
+                    // Has filename — a file part (an empty filename is a file
+                    // too: that is how the browser sends an empty file input).
                     Some(filename) => {
                         let mut fm = BTreeMap::new();
                         fm.insert("name".to_string(), Value::Str(name));
@@ -825,7 +832,7 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Valu
                         fm.insert("size".to_string(), Value::Int(content.len() as i64));
                         files.push(Value::Map(fm));
                     }
-                    // Oddiy form maydoni — req.body'ga (matn deb qaraladi).
+                    // A plain form field — goes to req.body (treated as text).
                     None => {
                         fields.insert(
                             name,
@@ -843,13 +850,13 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Option<(BTreeMap<String, Valu
 // --- request -> Value::Map ---
 
 // req = {method, path, query:{}, headers:{}, params:{}, body:(JSON map/str), files:[], ctx}
-// ctx — shared request-scoped store (issue #68): middleware `req.ctx <- {...}`
-// yozadi, handler `req.ctx` o'qiydi. ctx'ni caller (`handle_request`) qo'shadi
-// (`with_ctx`), chunki u har so'rovga yangi Arc<Mutex> yaratadi — middleware va
-// handler bir xil cell'ni ko'rishi uchun.
-// req maydonlari ko'p (method/path/query/headers/params/ip/body) — bularni alohida
-// struct'ga yig'ish faqat bitta chaqiruv joyi uchun ortiqcha bo'lardi, shuning uchun
-// pozitsion argument qoldiramiz (too_many_arguments lintini bu yerda o'chiramiz).
+// ctx — a shared request-scoped store (issue #68): middleware writes
+// `req.ctx <- {...}`, the handler reads `req.ctx`. The caller (`handle_request`)
+// adds ctx (`with_ctx`), because it creates a fresh Arc<Mutex> per request — so
+// middleware and handler see the same cell.
+// req has many fields (method/path/query/headers/params/ip/body) — gathering
+// them into a separate struct would be overkill for a single call site, so we
+// keep positional arguments (disabling the too_many_arguments lint here).
 #[allow(clippy::too_many_arguments)]
 fn build_req(
     method: String,
@@ -862,9 +869,9 @@ fn build_req(
     is_json: bool,
     multipart: Option<String>,
 ) -> Value {
-    // multipart/form-data (issue #133): oddiy maydonlar req.body'ga (JSON bilan
-    // simmetrik), fayllar req.files'ga. Parse muvaffaqiyatsiz bo'lsa (buzuq
-    // tana) quyidagi oddiy yo'lga tushamiz — xom body yo'qolmaydi.
+    // multipart/form-data (issue #133): plain fields go to req.body (symmetric
+    // with JSON), files to req.files. If the parse fails (a malformed body) we
+    // fall through to the plain path below — the raw body is not lost.
     let parsed_multipart = multipart
         .as_deref()
         .and_then(|b| parse_multipart(&body_bytes, b));
@@ -876,23 +883,23 @@ fn build_req(
         Value::Nil
     } else {
         match std::str::from_utf8(&body_bytes) {
-            // Content-Type JSON bo'lsa, YOKI tana `{`/`[` bilan boshlansa — JSON
-            // parse'ga urinamiz. Sabab: `curl -d` standart holda
-            // x-www-form-urlencoded yuboradi, lekin tana ko'rinishidan JSON; agar
-            // Content-Type'ga qat'i bog'lansak, dasturchi sababsiz string oladi va
-            // `body.field` access chalg'ituvchi "str.field metodi" xatosi beradi.
+            // If Content-Type is JSON, OR the body starts with `{`/`[` — try a
+            // JSON parse. Reason: `curl -d` sends x-www-form-urlencoded by
+            // default, yet the body looks like JSON; if we bound strictly to
+            // Content-Type, the developer would needlessly get a string and a
+            // `body.field` access would give the misleading "str.field method" error.
             Ok(s) => {
                 let looks_like_json =
                     matches!(s.trim_start().as_bytes().first(), Some(b'{') | Some(b'['));
                 if is_json || looks_like_json {
-                    // JSON dekod xato bo'lsa — xom matn sifatida qoldiramiz.
+                    // If JSON decoding fails — keep it as raw text.
                     json_decode(s).unwrap_or_else(|_| Value::Str(s.to_string()))
                 } else {
                     Value::Str(s.to_string())
                 }
             }
-            // UTF-8 bo'lmagan tana — ikkilik yuklama (rasm, gzip): bytes
-            // (issue #132). Avval lossy o'qish ma'lumotni jim buzardi.
+            // A non-UTF-8 body — binary payload (image, gzip): bytes
+            // (issue #132). Lossy reading used to silently corrupt the data.
             Err(_) => Value::Bytes(Arc::new(body_bytes.to_vec())),
         }
     };
@@ -903,20 +910,20 @@ fn build_req(
     m.insert("query".to_string(), parse_query(&query));
     m.insert("headers".to_string(), Value::Map(headers));
     m.insert("params".to_string(), Value::Map(params));
-    // req.ip — mijoz IP (TCP peer). rate-limit kalit funksiyasi nil qaytarsa
-    // shunga qaytamiz; foydalanuvchi ham `req.ip` o'qishi mumkin. Proksi orqasida
-    // bu proksi IP'si bo'ladi (X-Forwarded-For v1'da boshqarilmaydi — docs).
+    // req.ip — the client IP (TCP peer). If the rate-limit key function returns
+    // nil we fall back to this; the user can also read `req.ip`. Behind a proxy
+    // this is the proxy's IP (X-Forwarded-For is not handled in v1 — docs).
     m.insert("ip".to_string(), Value::Str(ip));
     m.insert("body".to_string(), body);
-    // req.files doim list (multipart bo'lmasa bo'sh) — `each f in req.files`
-    // nil tekshiruvisiz ishlaydi (issue #133).
+    // req.files is always a list (empty when not multipart) — `each f in
+    // req.files` works without a nil check (issue #133).
     m.insert("files".to_string(), Value::List(files));
     Value::Map(m)
 }
 
-// req map'iga shared ctx cell'ni (`req.ctx`) qo'shadi (issue #68). build_req'dan
-// alohida — har so'rovga yangi cell yaratiladi (caller'da), bu funksiya uni
-// req'ning "ctx" kalitiga joylaydi.
+// Adds the shared ctx cell (`req.ctx`) to the req map (issue #68). Separate from
+// build_req — a fresh cell is created per request (in the caller), and this
+// function places it in req's "ctx" key.
 fn with_ctx(req: Value, ctx: Arc<Mutex<BTreeMap<String, Value>>>) -> Value {
     if let Value::Map(mut m) = req {
         m.insert("ctx".to_string(), Value::Ctx(ctx));
@@ -928,27 +935,27 @@ fn with_ctx(req: Value, ctx: Arc<Mutex<BTreeMap<String, Value>>>) -> Value {
 
 // --- Value/Flow -> hyper::Response ---
 
-// Fluxon `Int` statusni (rep/fail) yaroqli HTTP status u16'ga aylantiradi.
-// Tekshiruv ASL i64 ustida bo'lishi shart: `as u16` cast oldin wrap qiladi —
-// `rep 65736` u16'da 200 ga, ba'zi manfiy qiymatlar 3xx/4xx ga tushib jim
-// muvaffaqiyatga aldardi (issue #108). Diapazondan tashqari yoki HTTP bo'lmagan
-// kod → 500 + log, shunda mijoz handler xatosini muvaffaqiyat deb o'qimaydi.
+// Converts a Fluxon `Int` status (rep/fail) to a valid HTTP status u16. The
+// check MUST be on the ORIGINAL i64: an `as u16` cast wraps first — `rep 65736`
+// would wrap to 200 in u16, and some negative values would land in 3xx/4xx,
+// faking success silently (issue #108). An out-of-range or non-HTTP code -> 500
+// + a log, so the client does not read a handler error as success.
 fn checked_status(n: i64) -> u16 {
     match u16::try_from(n) {
         Ok(s) if StatusCode::from_u16(s).is_ok() => s,
         _ => {
-            eprintln!("Fluxon HTTP: noto'g'ri status kodi {} → 500", n);
+            eprintln!("Fluxon HTTP: invalid status code {} → 500", n);
             500
         }
     }
 }
 
-// u16 status → StatusCode. Builder darajasidagi himoya to'ri: chaqiruvchilar
-// allaqachon yaroqli kod beradi (literal yoki `checked_status`), bu faqat
-// kutilmagan holatda panic o'rniga 500 qaytaradi.
+// u16 status -> StatusCode. A builder-level safety net: callers already pass a
+// valid code (a literal or `checked_status`); this only returns 500 instead of
+// panicking in an unexpected case.
 fn status_or_500(status: u16) -> StatusCode {
     StatusCode::from_u16(status).unwrap_or_else(|_| {
-        eprintln!("Fluxon HTTP: noto'g'ri status kodi {} → 500", status);
+        eprintln!("Fluxon HTTP: invalid status code {} → 500", status);
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
@@ -969,34 +976,32 @@ fn text_response(status: u16, body: String) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
-// 413 Payload Too Large — so'rov tanasi o'lcham chegarasidan oshib ketdi (#91).
+// 413 Payload Too Large — the request body exceeded the size limit (#91).
 fn payload_too_large(limit: usize) -> Response<Full<Bytes>> {
     let mut m = BTreeMap::new();
     m.insert(
         "error".to_string(),
-        Value::Str(format!(
-            "so'rov tanasi juda katta (chegara: {} bayt)",
-            limit
-        )),
+        Value::Str(format!("request body too large (limit: {} bytes)", limit)),
     );
     json_response(413, json_encode(&Value::Map(m)))
 }
 
-// 400 Bad Request — so'rov tanasini o'qishda xato (masalan uzilgan ulanish) (#91).
+// 400 Bad Request — error reading the request body (e.g. a dropped connection) (#91).
 fn bad_request(msg: &str) -> Response<Full<Bytes>> {
     let mut m = BTreeMap::new();
     m.insert("error".to_string(), Value::Str(msg.to_string()));
     json_response(400, json_encode(&Value::Map(m)))
 }
 
-// Qiymat `rep`-javobmi? `rep status body` -> {__resp:true ...} map (builtins.rs).
-// Middleware shu javobni qaytarsa zanjir to'xtaydi (P1: rep auth rad etishi).
+// Is the value a `rep` response? `rep status body` -> {__resp:true ...} map
+// (builtins.rs). If middleware returns this response, the chain stops (P1: rep
+// auth rejection).
 fn is_resp(v: &Value) -> bool {
     matches!(v, Value::Map(m) if matches!(m.get("__resp"), Some(Value::Bool(true))))
 }
 
-// Handler muvaffaqiyatli qaytargan qiymatni javobga aylantiradi.
-// `rep` -> {__resp:true status body}. Aks holda 200 + qiymat.
+// Converts a value the handler returned successfully into a response.
+// `rep` -> {__resp:true status body}. Otherwise 200 + the value.
 fn value_to_response(v: Value) -> Response<Full<Bytes>> {
     if is_resp(&v)
         && let Value::Map(m) = &v
@@ -1006,11 +1011,12 @@ fn value_to_response(v: Value) -> Response<Full<Bytes>> {
             _ => 200,
         };
         let body = m.get("body").cloned().unwrap_or(Value::Nil);
-        // 3-argument custom header'lar (issue #16): `rep status body {hdr:val}`.
+        // 3rd-argument custom headers (issue #16): `rep status body {hdr:val}`.
         let custom = m.get("headers");
-        // Redirect: `rep 30x {location:url}` → body map'idagi location'ni Location
-        // header'ga chiqaramiz (spec: "Redirect: rep 302 {location:url}"). Eski
-        // qulaylik xulqi — custom headers'siz ham ishlaydi, body bo'sh qaytadi.
+        // Redirect: `rep 30x {location:url}` -> emit the location from the body
+        // map into the Location header (spec: "Redirect: rep 302 {location:url}").
+        // A legacy convenience behavior — works even without custom headers, and
+        // the body is returned empty.
         if (300..400).contains(&status)
             && let Value::Map(bm) = &body
             && let Some(Value::Str(loc)) = bm.get("location")
@@ -1025,13 +1031,13 @@ fn value_to_response(v: Value) -> Response<Full<Bytes>> {
         apply_headers_mut(resp.headers_mut(), custom);
         return resp;
     }
-    // rep ishlatilmagan — qiymatning o'zini 200 bilan qaytaramiz.
+    // rep was not used — return the value itself with 200.
     body_value_to_response(200, v)
 }
 
-// Custom header map'ini Response::Builder'ga qo'shadi (redirect yo'li uchun —
-// u hali builder bosqichida). Noto'g'ri header nomi/qiymati jim o'tkazib
-// yuboriladi: yagona buzuq header butun javobni 500 qilmasligi kerak.
+// Adds the custom header map to a Response::Builder (for the redirect path —
+// it is still at the builder stage). A malformed header name/value is silently
+// skipped: a single broken header must not turn the whole response into a 500.
 fn apply_headers(
     mut b: hyper::http::response::Builder,
     headers: Option<&Value>,
@@ -1044,34 +1050,34 @@ fn apply_headers(
     b
 }
 
-// Custom header map'ini tayyor Response'ning HeaderMap'iga qo'shadi.
+// Adds the custom header map to a ready Response's HeaderMap.
 //
-// Qiymat str bo'lsa — bitta sarlavha. List bo'lsa — har element alohida
-// sarlavha qatori (takror header, masalan bir nechta Set-Cookie; RFC 7230 ga
-// ko'ra Set-Cookie vergulli ro'yxat bilan birlashmaydi). content-type kabi
-// turdagi sarlavhalar body'ning standart sarlavhasini bosib o'tadi (append
-// emas, insert): canonical body sarlavhasi ustidan dasturchi niyati ustun.
+// If the value is a str — a single header. If a List — each element is a
+// separate header line (a repeated header, e.g. several Set-Cookie; per RFC 7230
+// Set-Cookie does not merge into a comma list). Headers like content-type
+// override the body's default header (insert, not append): the developer's
+// intent wins over the canonical body header.
 //
-// Kalitda `_` → `-` ga aylanadi: Fluxon map kalitida defis bo'lolmaydi
-// (`content-type` uchta token sifatida parse bo'ladi), shuning uchun
-// `{content_type:"..."}` yoziladi. Bu o'qish bilan simmetrik — server
-// req.headers'da ham `-` → `_` qiladi (build_req), AI bitta naqshni o'rganadi.
-// Defisli string kalit (`{"set-cookie":...}`) ham ishlaydi: defisda `_` yo'q.
+// In the key `_` -> `-`: a Fluxon map key cannot contain a hyphen
+// (`content-type` would parse as three tokens), so you write
+// `{content_type:"..."}`. This is symmetric with reading — the server also does
+// `-` -> `_` in req.headers (build_req), and the AI learns one pattern. A hyphenated
+// string key (`{"set-cookie":...}`) also works: a hyphen has no `_`.
 fn apply_headers_mut(hmap: &mut hyper::HeaderMap, headers: Option<&Value>) {
     use hyper::header::{HeaderName, HeaderValue};
     let Some(Value::Map(hm)) = headers else {
         return;
     };
     for (k, v) in hm {
-        // Header nomi case-insensitive (RFC 7230) — lowercase kanonik shaklda
-        // saqlaymiz. Buzuq nomni jim o'tkazib yuboramiz.
+        // Header name is case-insensitive (RFC 7230) — we store the lowercase
+        // canonical form. Skip a malformed name silently.
         let canon = k.to_lowercase().replace('_', "-");
         let Ok(name) = HeaderName::from_bytes(canon.as_bytes()) else {
             continue;
         };
         match v {
-            // List — takror sarlavha: birinchisi insert (eskisini bosadi),
-            // qolganlari append.
+            // List — a repeated header: the first is insert (overwrites the old
+            // one), the rest are append.
             Value::List(items) => {
                 let mut first = true;
                 for item in items.iter() {
@@ -1085,7 +1091,7 @@ fn apply_headers_mut(hmap: &mut hyper::HeaderMap, headers: Option<&Value>) {
                     }
                 }
             }
-            // Boshqa har qanday qiymat matn sifatida — bitta sarlavha.
+            // Any other value as text — a single header.
             other => {
                 if let Ok(hv) = HeaderValue::from_str(&other.to_text()) {
                     hmap.insert(name, hv);
@@ -1095,15 +1101,15 @@ fn apply_headers_mut(hmap: &mut hyper::HeaderMap, headers: Option<&Value>) {
     }
 }
 
-// HeaderMap -> Fluxon header map (kalitlar lowercase). O'qish tomonidagi yagona
-// yo'l — server req.headers ham, klient res.headers ham shu orqali quriladi.
+// HeaderMap -> Fluxon header map (lowercase keys). The single read-side path —
+// both the server's req.headers and the client's res.headers are built through it.
 //
-// Bir nomli takror header'lar yo'qolmasligi uchun (issue #101) qiymatlar
-// RFC 9110 §5.3 bo'yicha ", " bilan birlashtiriladi. Ikki istisno:
-//   - `cookie` "; " bilan (RFC 6265 — cookie-pair ajratkichi vergul emas);
-//   - `set-cookie` umuman birlashtirilmaydi (Expires sanasida vergul bor) —
-//     takror bo'lsa List qaytadi, yozish tomonidagi List bilan simmetrik.
-// UTF-8 bo'lmagan baytlar lossy o'qiladi (oldin jim bo'sh string bo'lardi).
+// So that repeated same-name headers are not lost (issue #101), values are
+// joined with ", " per RFC 9110 §5.3. Two exceptions:
+//   - `cookie` with "; " (RFC 6265 — the cookie-pair separator is not a comma);
+//   - `set-cookie` is not merged at all (the Expires date contains a comma) —
+//     if repeated it returns a List, symmetric with the write-side List.
+// Non-UTF-8 bytes are read lossy (it used to silently become an empty string).
 fn headers_to_map(hmap: &hyper::HeaderMap) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     for key in hmap.keys() {
@@ -1125,8 +1131,8 @@ fn headers_to_map(hmap: &hyper::HeaderMap) -> BTreeMap<String, Value> {
     out
 }
 
-// Javob tanasini tipiga qarab formatlash: map/list -> JSON, str -> matn,
-// nil -> bo'sh, qolgani -> JSON.
+// Formats the response body by type: map/list -> JSON, str -> text,
+// nil -> empty, otherwise -> JSON.
 fn body_value_to_response(status: u16, body: Value) -> Response<Full<Bytes>> {
     match body {
         Value::Nil => Response::builder()
@@ -1134,8 +1140,8 @@ fn body_value_to_response(status: u16, body: Value) -> Response<Full<Bytes>> {
             .body(Full::new(Bytes::new()))
             .unwrap(),
         Value::Str(s) => text_response(status, s),
-        // Ikkilik javob (rasm, PDF, arxiv — issue #132). Standart tur
-        // octet-stream; aniq tur 3-arg bilan: rep 200 b {content_type:"image/png"}.
+        // Binary response (image, PDF, archive — issue #132). Default type is
+        // octet-stream; an explicit type via the 3rd arg: rep 200 b {content_type:"image/png"}.
         Value::Bytes(b) => Response::builder()
             .status(status_or_500(status))
             .header("content-type", "application/octet-stream")
@@ -1146,13 +1152,13 @@ fn body_value_to_response(status: u16, body: Value) -> Response<Full<Bytes>> {
     }
 }
 
-// fail/error -> JSON xato javob.
+// fail/error -> JSON error response.
 fn flow_to_response(flow: Flow) -> Response<Full<Bytes>> {
     let (status, message) = match flow {
         Flow::Fail { status, message } => (checked_status(status.unwrap_or(400)), message),
         Flow::Error(e) => (500, e),
-        Flow::Return(v) => return value_to_response(v), // handler ichida `ret`
-        Flow::Skip | Flow::Stop => (500, "handler skip/stop ishlatdi".to_string()),
+        Flow::Return(v) => return value_to_response(v), // `ret` inside the handler
+        Flow::Skip | Flow::Stop => (500, "handler used skip/stop".to_string()),
     };
     let mut m = BTreeMap::new();
     m.insert("error".to_string(), Value::Str(message));
@@ -1162,7 +1168,7 @@ fn flow_to_response(flow: Flow) -> Response<Full<Bytes>> {
 // --- Interp HTTP dispatch ---
 
 impl Interp {
-    // http.<func> chaqiruvlari. eval_call shu yerga yo'naltiradi.
+    // http.<func> calls. eval_call routes here.
     pub fn http_dispatch(self: &Arc<Self>, func: &str, args: Vec<Value>) -> Result<Value, Flow> {
         match func {
             "on" => self.http_on(args),
@@ -1176,10 +1182,7 @@ impl Interp {
             "post" => http_client("POST", args, true),
             "put" => http_client("PUT", args, true),
             "del" => http_client("DELETE", args, false),
-            _ => Err(Flow::err(format!(
-                "http modulida '{}' funksiyasi yo'q",
-                func
-            ))),
+            _ => Err(Flow::err(format!("http module has no '{}' function", func))),
         }
     }
 
@@ -1189,17 +1192,17 @@ impl Interp {
             Some(Value::Sym(s)) | Some(Value::Str(s)) => s.to_lowercase(),
             _ => {
                 return Err(Flow::err(
-                    "http.on: 1-argument metod (:get/:post...) bo'lishi kerak",
+                    "http.on: argument 1 must be a method (:get/:post...)",
                 ));
             }
         };
         let path = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
-            _ => return Err(Flow::err("http.on: 2-argument yo'l (str) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.on: argument 2 must be a path (str)")),
         };
         let handler = match args.get(2) {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
-            _ => return Err(Flow::err("http.on: 3-argument handler (fn) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.on: argument 3 must be a handler (fn)")),
         };
         self.routes.lock().unwrap().push(Route {
             method,
@@ -1209,12 +1212,12 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // http.use \req -> ...  — barcha route'larga global middleware (issue #67).
-    // Bir nechta chaqiruv zanjir hosil qiladi (deklaratsiya tartibida ishlaydi).
+    // http.use \req -> ...  — global middleware for all routes (issue #67).
+    // Multiple calls form a chain (running in declaration order).
     fn http_use(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let handler = match args.first() {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
-            _ => return Err(Flow::err("http.use: argument handler (fn) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.use: argument must be a handler (fn)")),
         };
         self.middlewares.lock().unwrap().push(Middleware {
             scope: None,
@@ -1224,23 +1227,19 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // http.before "/api/*" \req -> ...  — yo'l prefiks bo'yicha middleware (#67).
-    // Shablon "/api/*" → /api bilan boshlanuvchi yo'llar; "*"siz → aniq mos.
+    // http.before "/api/*" \req -> ...  — middleware by path prefix (#67).
+    // Pattern "/api/*" -> paths starting with /api; without "*" -> exact match.
     fn http_before(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let pat = match args.first() {
             Some(Value::Str(s)) => s.clone(),
             _ => {
-                return Err(Flow::err(
-                    "http.before: 1-argument yo'l (str) bo'lishi kerak",
-                ));
+                return Err(Flow::err("http.before: argument 1 must be a path (str)"));
             }
         };
         let handler = match args.get(1) {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
             _ => {
-                return Err(Flow::err(
-                    "http.before: 2-argument handler (fn) bo'lishi kerak",
-                ));
+                return Err(Flow::err("http.before: argument 2 must be a handler (fn)"));
             }
         };
         self.middlewares.lock().unwrap().push(Middleware {
@@ -1251,26 +1250,26 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // http.cors origins [opts]  — deklarativ CORS (issue #135).
+    // http.cors origins [opts]  — declarative CORS (issue #135).
     //
-    //   http.cors "*"                                # hammaga ochiq (dev)
-    //   http.cors ["https://app.example.com"]        # ruxsat etilgan origin'lar
+    //   http.cors "*"                                # open to all (dev)
+    //   http.cors ["https://app.example.com"]        # allowed origins
     //   http.cors ["https://app.example.com"] {creds: true}
     //
-    // 1-argument: "*" (str) — har qanday origin, yoki origin'lar ro'yxati (list).
-    // 2-argument (ixtiyoriy): opsiyalar map'i:
-    //   creds:   true → Allow-Credentials (cookie/Authorization). "*" bilan birga
-    //            ishlatilsa javob so'rov origin'ini aks ettiradi (brauzer talabi).
-    //   methods: ruxsat etilgan metodlar (str). Default keng to'plam.
-    //   headers: ruxsat etilgan so'rov header'lari (str). Default keng to'plam.
-    //   max_age: preflight kesh muddati soniyada (int). Default 86400 (1 kun).
+    // 1st arg: "*" (str) — any origin, or a list of origins.
+    // 2nd arg (optional): an options map:
+    //   creds:   true -> Allow-Credentials (cookie/Authorization). When combined
+    //            with "*" the response reflects the request origin (browser rule).
+    //   methods: allowed methods (str). A wide default set.
+    //   headers: allowed request headers (str). A wide default set.
+    //   max_age: preflight cache duration in seconds (int). Default 86400 (1 day).
     fn http_cors(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let origins = match args.first() {
-            // "*" — har qanday origin (None ichki ifoda).
+            // "*" — any origin (None internally).
             Some(Value::Str(s)) if s == "*" => None,
-            // Bitta origin str sifatida ham qabul qilamiz (qulaylik).
+            // Accept a single origin as a str too (convenience).
             Some(Value::Str(s)) => Some(vec![s.clone()]),
-            // Origin'lar ro'yxati.
+            // A list of origins.
             Some(Value::List(items)) => {
                 let mut list = Vec::with_capacity(items.len());
                 for it in items.iter() {
@@ -1278,7 +1277,7 @@ impl Interp {
                         Value::Str(s) => list.push(s.clone()),
                         _ => {
                             return Err(Flow::err(
-                                "http.cors: origin ro'yxati str elementlardan iborat bo'lishi kerak",
+                                "http.cors: origin list must consist of str elements",
                             ));
                         }
                     }
@@ -1287,14 +1286,14 @@ impl Interp {
             }
             _ => {
                 return Err(Flow::err(
-                    "http.cors: 1-argument \"*\" yoki origin'lar ro'yxati bo'lishi kerak",
+                    "http.cors: argument 1 must be \"*\" or a list of origins",
                 ));
             }
         };
 
         let mut cfg = CorsConfig {
             origins,
-            // Keng standart to'plam — agent alohida sozlamasdan ishlaydi.
+            // A wide default set — works without the agent configuring it.
             methods: "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),
             headers: "Content-Type, Authorization".to_string(),
             creds: false,
@@ -1318,7 +1317,7 @@ impl Interp {
             }
         } else if args.len() > 1 && !matches!(args.get(1), Some(Value::Nil)) {
             return Err(Flow::err(
-                "http.cors: 2-argument opsiyalar map'i bo'lishi kerak ({creds: true})",
+                "http.cors: argument 2 must be an options map ({creds: true})",
             ));
         }
 
@@ -1326,22 +1325,22 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // http.static prefiks katalog [opts]  — papkadan static fayl tarqatish (#134).
+    // http.static prefix dir [opts]  — serve static files from a folder (#134).
     //
     //   http.static "/assets" "./public"        # /assets/app.css -> ./public/app.css
-    //   http.static "/" "./dist" {spa: true}    # topilmasa -> ./dist/index.html
+    //   http.static "/" "./dist" {spa: true}    # if not found -> ./dist/index.html
     //
-    // Katalog skript fayli katalogiga nisbatan hal qilinadi (`use ./fayl` bilan
-    // bir xil qoida) va registratsiyada canonicalize qilinadi — yo'q katalog
-    // start'dayoq xato beradi (deploy paytida jim 404 o'rniga fail fast).
-    // Content-Type kengaytmadan avtomatik; `../` traversal (percent-encoded ham)
-    // majburiy bloklanadi; route prioriteti: aniq route > static.
+    // The directory is resolved relative to the script file's directory (the same
+    // rule as `use ./file`) and canonicalized at registration — a missing
+    // directory errors at startup (fail fast instead of a silent 404 at deploy
+    // time). Content-Type is automatic from the extension; `../` traversal (also
+    // percent-encoded) is mandatorily blocked; route priority: exact route > static.
     fn http_static(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let prefix = match args.first() {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 return Err(Flow::err(
-                    "http.static: 1-argument prefiks (str) bo'lishi kerak, masalan \"/assets\"",
+                    "http.static: argument 1 must be a prefix (str), for example \"/assets\"",
                 ));
             }
         };
@@ -1349,7 +1348,7 @@ impl Interp {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 return Err(Flow::err(
-                    "http.static: 2-argument katalog (str) bo'lishi kerak, masalan \"./public\"",
+                    "http.static: argument 2 must be a directory (str), for example \"./public\"",
                 ));
             }
         };
@@ -1361,7 +1360,7 @@ impl Interp {
             ),
             _ => {
                 return Err(Flow::err(
-                    "http.static: 3-argument opsiyalar map'i bo'lishi kerak ({spa: true})",
+                    "http.static: argument 3 must be an options map ({spa: true})",
                 ));
             }
         };
@@ -1371,11 +1370,15 @@ impl Interp {
         } else {
             self.base_dir().join(p)
         };
-        let canon = std::fs::canonicalize(&resolved)
-            .map_err(|e| Flow::err(format!("http.static: '{}' katalogi ochilmadi: {}", dir, e)))?;
+        let canon = std::fs::canonicalize(&resolved).map_err(|e| {
+            Flow::err(format!(
+                "http.static: could not open directory '{}': {}",
+                dir, e
+            ))
+        })?;
         if !canon.is_dir() {
             return Err(Flow::err(format!(
-                "http.static: '{}' katalog emas (fayl ko'rsatilgan)",
+                "http.static: '{}' is not a directory (a file was given)",
                 dir
             )));
         }
@@ -1387,17 +1390,18 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // http.limit [path] N :sec|:min|:hr \req -> kalit  — deklarativ rate-limit (#79).
+    // http.limit [path] N :sec|:min|:hr \req -> key  — declarative rate-limit (#79).
     //
-    //   http.limit 100 :min \req -> req.ctx.tenant_id          # per-tenant, barcha yo'l
-    //   http.limit "/api/*" 100 :min \req -> req.headers.x_api_key  # per-key, prefiks
+    //   http.limit 100 :min \req -> req.ctx.tenant_id          # per-tenant, all paths
+    //   http.limit "/api/*" 100 :min \req -> req.headers.x_api_key  # per-key, prefix
     //
-    // Path (str) ixtiyoriy 1-argument — bo'lsa http.before kabi prefiks bo'yicha
-    // ulanadi, bo'lmasa http.use kabi global. Kalit funksiyasi har request uchun
-    // chaqirilib mijozni aniqlaydi; nil/bo'sh qaytarsa req.ip'ga qaytamiz. Limit
-    // oshsa avtomatik `429` + `Retry-After` (oyna tugashigacha soniya).
+    // Path (str) is an optional 1st arg — if present it attaches by prefix like
+    // http.before, otherwise it is global like http.use. The key function is
+    // called per request to identify the client; if it returns nil/empty we fall
+    // back to req.ip. On exceeding the limit, an automatic `429` + `Retry-After`
+    // (seconds until the window ends).
     fn http_limit(&self, args: Vec<Value>) -> Result<Value, Flow> {
-        // 1-argument str bo'lsa — path scope (http.before kabi). Aks holda global.
+        // If the 1st arg is a str — path scope (like http.before). Otherwise global.
         let (scope, i) = match args.first() {
             Some(Value::Str(s)) => (Some(s.clone()), 1),
             _ => (None, 0),
@@ -1406,7 +1410,7 @@ impl Interp {
             Some(Value::Int(n)) if *n > 0 => *n as u32,
             _ => {
                 return Err(Flow::err(
-                    "http.limit: limit musbat int bo'lishi kerak (masalan 100)",
+                    "http.limit: limit must be a positive int (for example 100)",
                 ));
             }
         };
@@ -1414,14 +1418,12 @@ impl Interp {
             Some(Value::Sym(s)) | Some(Value::Str(s)) => match window_to_secs(s) {
                 Some(secs) => secs,
                 None => {
-                    return Err(Flow::err(
-                        "http.limit: oyna :sec, :min yoki :hr bo'lishi kerak",
-                    ));
+                    return Err(Flow::err("http.limit: window must be :sec, :min or :hr"));
                 }
             },
             _ => {
                 return Err(Flow::err(
-                    "http.limit: oyna birligi (:sec/:min/:hr) bo'lishi kerak",
+                    "http.limit: window unit (:sec/:min/:hr) is required",
                 ));
             }
         };
@@ -1429,7 +1431,7 @@ impl Interp {
             Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
             _ => {
                 return Err(Flow::err(
-                    "http.limit: kalit funksiyasi (\\req -> ...) bo'lishi kerak",
+                    "http.limit: key function (\\req -> ...) is required",
                 ));
             }
         };
@@ -1445,32 +1447,30 @@ impl Interp {
         Ok(Value::Nil)
     }
 
-    // http.serve port — bloklovchi tokio multi-thread server.
-    // `http.serve PORT` — serverni DARHOL bloklamaydi, balki kutilayotgan
-    // serverlar ro'yxatiga qo'shadi (deferred). Top-level kod tugagach
-    // (`serve_mod::run_pending`) hammasi BITTA umumiy tokio runtime'da
-    // spawn qilinadi — shunda HTTP + WS bir jarayonda birga ishlaydi.
+    // http.serve port — a blocking tokio multi-thread server.
+    // `http.serve PORT` does NOT block immediately; instead it adds to the list
+    // of pending servers (deferred). After top-level code finishes
+    // (`serve_mod::run_pending`) they are all spawned on ONE shared tokio
+    // runtime — so HTTP + WS run together in one process.
     fn http_serve(self: &Arc<Self>, args: Vec<Value>) -> Result<Value, Flow> {
         let port = match args.first() {
             Some(Value::Int(n)) => *n as u16,
-            _ => return Err(Flow::err("http.serve: port (int) bo'lishi kerak")),
+            _ => return Err(Flow::err("http.serve: port (int) is required")),
         };
-        // Ixtiyoriy ikkinchi argument — opsiyalar map'i: `{max_body: BAYT}`.
-        // Berilmasa default DEFAULT_MAX_BODY; `max_body: 0` chegarani o'chiradi.
+        // Optional second argument — an options map: `{max_body: BYTES}`.
+        // If omitted, default DEFAULT_MAX_BODY; `max_body: 0` disables the limit.
         let max_body = match args.get(1) {
             None => DEFAULT_MAX_BODY,
             Some(Value::Map(m)) => match m.get("max_body") {
                 None => DEFAULT_MAX_BODY,
                 Some(Value::Int(n)) if *n >= 0 => *n as usize,
                 _ => {
-                    return Err(Flow::err(
-                        "http.serve: max_body manfiy bo'lmagan int bo'lishi kerak",
-                    ));
+                    return Err(Flow::err("http.serve: max_body must be a non-negative int"));
                 }
             },
             _ => {
                 return Err(Flow::err(
-                    "http.serve: ikkinchi argument opsiyalar map'i bo'lishi kerak ({max_body: N})",
+                    "http.serve: second argument must be an options map ({max_body: N})",
                 ));
             }
         };
@@ -1482,21 +1482,21 @@ impl Interp {
     }
 }
 
-// Port'ni bind qiladi (deferred: top-level tugagandan keyin, `serve_mod`).
-// Bind xatosini `Flow::Error` sifatida qaytaradi — `run_pending` uni yuqoriga
-// ko'taradi, shunda port band bo'lsa jarayon exit code ≠ 0 bilan tugaydi
-// (issue #108: deploy/supervisor xatoni sezsin). Accept loop'dan oldin
-// chaqiriladi, shuning uchun bind muvaffaqiyatsizligi spawn'dan oldin chiqadi.
+// Binds the port (deferred: after top-level finishes, in `serve_mod`). Returns a
+// bind error as `Flow::Error` — `run_pending` propagates it up, so if the port
+// is busy the process exits with code != 0 (issue #108: let deploy/supervisor
+// notice the error). Called before the accept loop, so a bind failure surfaces
+// before the spawn.
 pub async fn bind(port: u16) -> Result<TcpListener, Flow> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     TcpListener::bind(addr)
         .await
-        .map_err(|e| Flow::err(format!("Fluxon HTTP port {} bind xatosi: {}", port, e)))
+        .map_err(|e| Flow::err(format!("Fluxon HTTP port {} bind error: {}", port, e)))
 }
 
-// Bitta HTTP server uchun accept loop — umumiy event-loop ichida spawn qilinadi
-// (`serve_mod`). Listener oldindan `bind` bilan ochilgan (bind xatosi spawn'dan
-// oldin ko'tariladi).
+// The accept loop for a single HTTP server — spawned inside the shared
+// event-loop (`serve_mod`). The listener was opened beforehand with `bind`
+// (a bind error is raised before the spawn).
 pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: usize) {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
     eprintln!("Fluxon HTTP server: http://localhost:{}", port);
@@ -1505,14 +1505,15 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: us
         let (stream, peer) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("http accept xatosi: {}", e);
+                eprintln!("http accept error: {}", e);
                 continue;
             }
         };
         let io = TokioIo::new(stream);
         let interp = interp.clone();
-        // Mijoz IP (rate-limit fallback + req.ip). peer SocketAddr — IP'sini
-        // ulanish bo'yi bir marta olamiz (har request shu connection'da bir IP).
+        // Client IP (rate-limit fallback + req.ip). From the peer SocketAddr —
+        // we read the IP once per connection (every request on this connection
+        // shares one IP).
         let client_ip = peer.ip().to_string();
         tokio::spawn(async move {
             let service = service_fn(move |req: Request<Incoming>| {
@@ -1520,29 +1521,30 @@ pub async fn serve_loop(interp: Arc<Interp>, listener: TcpListener, max_body: us
                 let client_ip = client_ip.clone();
                 async move { handle_request(interp, req, client_ip, max_body).await }
             });
-            // header_read_timeout slowloris ulanishlarini (header'larni juda sekin
-            // yuboradigan) cheklaydi (issue #92). Timer o'rnatilmasa sozlama jim
-            // e'tiborsiz qoladi (yoki panic) — TokioTimer beramiz.
+            // header_read_timeout limits slowloris connections (those sending
+            // headers very slowly) (issue #92). Without a timer set, the option
+            // is silently ignored (or panics) — so we provide a TokioTimer.
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
                 .header_read_timeout(Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS))
                 .serve_connection(io, service)
                 .await
             {
-                eprintln!("ulanish xatosi: {}", e);
+                eprintln!("connection error: {}", e);
             }
         });
     }
 }
 
-// Middleware zanjirini ishlatadi (sinxron — spawn_blocking ichida chaqiriladi).
-// Har middleware req klonini oladi (ctx Arc ulashilgan). Natija:
-//   - Ok(Some(v)) — biri javob qaytardi (`rep` yoki limit 429), zanjir to'xtadi,
-//     handler CHAQIRILMAYDI; aks holda auth `rep 401` e'tiborsiz qolardi.
-//   - Ok(None)   — hammasi o'tdi (ctx yozish, log), handler davom etadi.
-//   - Err(flow)  — `fail`/xato, zanjir to'xtadi.
-// Route handler'lari ham, static fayllar ham (issue #134) SHU zanjir orqali
-// o'tadi — http.before auth static papkani ham himoya qiladi.
+// Runs the middleware chain (synchronous — called inside spawn_blocking).
+// Each middleware gets a req clone (the ctx Arc is shared). Result:
+//   - Ok(Some(v)) — one returned a response (`rep` or limit 429), the chain
+//     stopped, the handler is NOT called; otherwise an auth `rep 401` would be
+//     ignored.
+//   - Ok(None)   — all passed (ctx writes, logging), the handler continues.
+//   - Err(flow)  — `fail`/error, the chain stopped.
+// Both route handlers and static files (issue #134) go through THIS chain — so
+// http.before auth protects the static folder too.
 fn run_middleware_chain(
     interp: &Interp,
     chain: Vec<Middleware>,
@@ -1550,21 +1552,21 @@ fn run_middleware_chain(
 ) -> Result<Option<Value>, Flow> {
     for mw in chain {
         match mw.kind {
-            // Oddiy middleware (use/before): handler'ni chaqiramiz.
+            // Plain middleware (use/before): call the handler.
             MwKind::Fn => match interp.apply(mw.handler, vec![request_value.clone()]) {
-                Ok(v) if is_resp(&v) => return Ok(Some(v)), // rep -> javob, zanjir to'xta
-                Ok(_) => {}                                 // davom (ctx/log)
-                Err(flow) => return Err(flow),              // fail/xato -> to'xta
+                Ok(v) if is_resp(&v) => return Ok(Some(v)), // rep -> response, chain stops
+                Ok(_) => {}                                 // continue (ctx/log)
+                Err(flow) => return Err(flow),              // fail/error -> stop
             },
-            // Rate-limit (http.limit): kalit funksiyasini chaqirib mijozni
-            // aniqlaymiz, keyin hisobgichni tekshiramiz. Oshsa 429 -> zanjir to'xta.
+            // Rate-limit (http.limit): call the key function to identify the
+            // client, then check the counter. If exceeded, 429 -> chain stops.
             MwKind::Limit {
                 limit,
                 window_secs,
                 state,
             } => {
                 let key = match interp.apply(mw.handler, vec![request_value.clone()]) {
-                    // nil -> mijoz IP'siga qaytamiz (kalitsiz so'rovni ham cheklash).
+                    // nil -> fall back to the client IP (limit keyless requests too).
                     Ok(Value::Nil) => client_fallback_key(request_value),
                     Ok(v) => {
                         let t = v.to_text();
@@ -1574,7 +1576,7 @@ fn run_middleware_chain(
                             t
                         }
                     }
-                    Err(flow) => return Err(flow), // kalit fn xato berdi -> to'xta
+                    Err(flow) => return Err(flow), // the key fn errored -> stop
                 };
                 if let Some(retry) = check_and_count(&state, &key, limit, window_secs) {
                     return Ok(Some(rate_limited_response(retry)));
@@ -1585,11 +1587,11 @@ fn run_middleware_chain(
     Ok(None)
 }
 
-// Static fayl urinishi (issue #134) — faqat aniq route topilmaganda chaqiriladi
-// (route prioriteti). None — static mos kelmadi, chaqiruvchi 404 qaytaradi.
-// Faqat GET/HEAD (fayl o'qish idempotent; boshqa metodlar API semantikasi).
-// Middleware zanjiri bu yerda ham ishlaydi — `http.before "/admin/*"` auth
-// static papkani ham himoya qilsin (zanjir javob qaytarsa fayl o'qilmaydi).
+// Static file attempt (issue #134) — called only when no exact route is found
+// (route priority). None — static did not match, the caller returns 404.
+// Only GET/HEAD (reading a file is idempotent; other methods are API semantics).
+// The middleware chain runs here too — so `http.before "/admin/*"` auth protects
+// the static folder as well (if the chain returns a response, no file is read).
 async fn try_serve_static(
     interp: &Arc<Interp>,
     method: &str,
@@ -1605,14 +1607,14 @@ async fn try_serve_static(
     if mounts.is_empty() {
         return None;
     }
-    // Segmentlar percent-dekod qilinadi (brauzer non-ASCII nomni encode qiladi);
-    // `keep_path_seps=true` — `%2F` xom qoladi, dekoddan yangi `/` tug'ilmaydi.
+    // Segments are percent-decoded (the browser encodes non-ASCII names);
+    // `keep_path_seps=true` — `%2F` stays raw, decoding spawns no new `/`.
     let segs: Vec<String> = path_segments(path)
         .iter()
         .map(|s| percent_decode(s, true))
         .collect();
-    // Hech bir mount prefiksi mos kelmasa — static hududi emas, oddiy 404
-    // (middleware'siz, route-404 bilan bir xil xulq).
+    // If no mount prefix matches — not the static area, a plain 404
+    // (no middleware, same behavior as the route-404).
     if !mounts
         .iter()
         .any(|m| strip_mount_prefix(&m.prefix, &segs).is_some())
@@ -1620,10 +1622,11 @@ async fn try_serve_static(
         return None;
     }
 
-    // Middleware zanjiri fayl MAVJUDLIGIDAN OLDIN ishlaydi (codex P2): aks
-    // holda himoyalangan mount ostida bor fayl 401, yo'q fayl 404 qaytarib,
-    // auth'siz mijoz fayl nomlarini status farqidan topa olardi. Prefiks mos
-    // kelgan har so'rov — fayl bor-yo'qligidan qat'i nazar — zanjirdan o'tadi.
+    // The middleware chain runs BEFORE checking whether the file EXISTS (codex
+    // P2): otherwise, under a protected mount an existing file would give 401 and
+    // a missing one 404, letting an unauthenticated client discover file names
+    // from the status difference. Every request whose prefix matches passes
+    // through the chain — regardless of whether the file exists.
     let chain: Vec<Middleware> = interp
         .middlewares
         .lock()
@@ -1636,7 +1639,7 @@ async fn try_serve_static(
         .cloned()
         .collect();
     if !chain.is_empty() {
-        // GET/HEAD tanasi bo'sh — body o'qilmaydi (route yo'lidan farqli).
+        // GET/HEAD has an empty body — the body is not read (unlike the route path).
         let ctx = Arc::new(Mutex::new(BTreeMap::new()));
         let request_value = with_ctx(
             build_req(
@@ -1658,7 +1661,7 @@ async fn try_serve_static(
         })
         .await;
         match mw_result {
-            Ok(Ok(None)) => {} // zanjir o'tdi — faylga o'tamiz
+            Ok(Ok(None)) => {} // chain passed — move on to the file
             Ok(Ok(Some(v))) => return Some(value_to_response(v)),
             Ok(Err(flow)) => return Some(flow_to_response(flow)),
             Err(join_err) => {
@@ -1670,21 +1673,21 @@ async fn try_serve_static(
         }
     }
     let (file, mime, len) = resolve_static(&mounts, &segs).await?;
-    // HEAD — mazmun kerak emas: faylni O'QIMASDAN metadata hajmi bilan javob
-    // (katta asset'da behuda disk I/O / xotira bo'lmasin — codex P2).
+    // HEAD — no content needed: respond with the metadata size WITHOUT reading
+    // the file (avoid wasted disk I/O / memory on a large asset — codex P2).
     if method == "head" {
         return Some(static_head_response(len, mime));
     }
     match tokio::fs::read(&file).await {
         Ok(data) => Some(static_response(data, mime)),
-        // metadata fayl deb ko'rsatdi, lekin o'qish baribir xato (race/ruxsat) —
-        // jim 404 ga tushamiz (fayl mavjudligi haqida ma'lumot sizdirmaymiz).
+        // metadata reported a file, but the read still errors (race/permission) —
+        // fall to a silent 404 (do not leak whether the file exists).
         Err(_) => None,
     }
 }
 
-// Bitta so'rovni boshqaradi: marshrut topish -> req qurish -> handler'ni
-// spawn_blocking'da (sinxron interp) chaqirish -> javob.
+// Handles a single request: find the route -> build req -> call the handler in
+// spawn_blocking (synchronous interp) -> response.
 async fn handle_request(
     interp: Arc<Interp>,
     req: Request<Incoming>,
@@ -1696,33 +1699,32 @@ async fn handle_request(
     let path = uri.path().to_string();
     let query = uri.query().unwrap_or("").to_string();
 
-    // Sarlavhalarni map'ga yig'amiz (kalitlar lowercase, '-' -> '_' shunda
-    // Fluxon'da req.headers.x_user_id sifatida o'qiladi). Takror nomlar
-    // headers_to_map ichida birlashtiriladi (issue #101).
+    // Gather headers into a map (lowercase keys, '-' -> '_' so they read as
+    // req.headers.x_user_id in Fluxon). Repeated names are merged inside
+    // headers_to_map (issue #101).
     let headers: BTreeMap<String, Value> = headers_to_map(req.headers())
         .into_iter()
         .map(|(k, v)| (k.replace('-', "_"), v))
         .collect();
-    // CORS sozlamasi (issue #135) — yoqilgan bo'lsa Origin'ga qarab preflight'ga
-    // javob beramiz va har javobga `Access-Control-Allow-*` qo'shamiz. So'rovning
-    // Origin header'i (headers'da '-' -> '_' qilingan) ruxsat tekshiruvi uchun.
+    // CORS config (issue #135) — when enabled we answer preflight based on Origin
+    // and add `Access-Control-Allow-*` to every response. The request's Origin
+    // header (with '-' -> '_' in headers) is used for the allow check.
     let cors = interp.cors.lock().unwrap().clone();
     let req_origin = match headers.get("origin") {
         Some(Value::Str(o)) => Some(o.clone()),
         _ => None,
     };
 
-    // CORS preflight — CORS yoqilgan bo'lsa route izlamasdan to'g'ridan-to'g'ri
-    // javob beramiz (brauzer haqiqiy so'rovdan oldin OPTIONS yuboradi). Bu route
-    // topilmasligi (404) muammosini ham hal qiladi: preflight uchun handler shart
-    // emas.
+    // CORS preflight — if CORS is enabled we answer directly without looking up a
+    // route (the browser sends OPTIONS before the real request). This also solves
+    // the route-not-found (404) problem: no handler is needed for preflight.
     //
-    // HAR OPTIONS emas — faqat HAQIQIY preflight'ni ushlaymiz: Fetch standartiga
-    // ko'ra brauzer preflight'i HAR DOIM Access-Control-Request-Method header
-    // yuboradi. Bu shart bo'lmasa (oddiy OPTIONS — resurs imkoniyatini so'rash
-    // yoki foydalanuvchining `http.on :options "/..."` handler'i), so'rov
-    // odatdagidek marshrutga tushadi (codex P2). CORS o'chiq bo'lsa ham OPTIONS
-    // oddiy marshrutga tushadi.
+    // Not EVERY OPTIONS — we catch only a REAL preflight: per the Fetch standard a
+    // browser preflight ALWAYS sends the Access-Control-Request-Method header. If
+    // it is absent (a plain OPTIONS — querying resource capabilities, or the
+    // user's own `http.on :options "/..."` handler), the request falls through to
+    // routing as usual (codex P2). When CORS is off, OPTIONS also goes to plain
+    // routing.
     let is_preflight = method == "options" && headers.contains_key("access_control_request_method");
     if is_preflight && let Some(cfg) = &cors {
         return Ok(cors_preflight_response(cfg, req_origin.as_deref()));
@@ -1732,14 +1734,14 @@ async fn handle_request(
         headers.get("content_type"),
         Some(Value::Str(ct)) if ct.contains("application/json")
     );
-    // multipart/form-data boundary (issue #133) — bo'lsa tana qismlarga
-    // ajratiladi (req.body maydonlar, req.files fayllar).
+    // multipart/form-data boundary (issue #133) — if present, the body is split
+    // into parts (req.body fields, req.files files).
     let multipart = match headers.get("content_type") {
         Some(Value::Str(ct)) => multipart_boundary(ct),
         _ => None,
     };
 
-    // Marshrutni topamiz (handler'ni baytlardan oldin, 404 ni tez qaytarish uchun).
+    // Find the route (the handler before the bytes, to return 404 quickly).
     let matched = {
         let routes = interp.routes.lock().unwrap();
         match_route(&routes, &method, &path)
@@ -1748,8 +1750,8 @@ async fn handle_request(
     let (route, params) = match matched {
         Some(x) => x,
         None => {
-            // Aniq route topilmadi — static mount'lardan urinamiz (issue #134).
-            // Route prioriteti: aniq route > static (static faqat shu yerda).
+            // No exact route found — try the static mounts (issue #134).
+            // Route priority: exact route > static (static only here).
             if let Some(resp) = try_serve_static(
                 &interp,
                 &method,
@@ -1765,37 +1767,37 @@ async fn handle_request(
             let mut m = BTreeMap::new();
             m.insert(
                 "error".to_string(),
-                Value::Str(format!("topilmadi: {} {}", method, path)),
+                Value::Str(format!("not found: {} {}", method, path)),
             );
-            // 404 ham CORS header oladi — aks holda brauzer xato javob tanasini
-            // CORS to'sig'i sabab o'qiy olmaydi (debugni qiyinlashtiradi).
+            // 404 also gets CORS headers — otherwise the browser cannot read the
+            // error response body because of the CORS barrier (makes debugging hard).
             let resp = json_response(404, json_encode(&Value::Map(m)));
             return Ok(cors_finalize(resp, &cors, req_origin.as_deref()));
         }
     };
 
-    // Tanani yig'amiz — o'lcham chegarasi bilan (issue #91). Chegarasiz collect()
-    // butun tanani xotiraga yig'adi: mijoz ulkan body yuborib server xotirasini
-    // to'ldira oladi (DoS).
+    // Gather the body — with a size limit (issue #91). Without a limit, collect()
+    // gathers the whole body into memory: a client can fill server memory by
+    // sending a huge body (DoS).
     let body_bytes = if max_body == 0 {
-        // Chegara o'chirilgan (http.serve PORT {max_body: 0}) — cheklovsiz o'qish.
+        // Limit disabled (http.serve PORT {max_body: 0}) — unbounded read.
         match req.into_body().collect().await {
             Ok(c) => c.to_bytes(),
-            // Oldin bu jim Bytes::new() ga tushardi (uzilgan POST handler'ga
-            // body:nil bilan yetardi); endi 400 qaytaramiz (issue #91). CORS
-            // header bilan yakunlanadi (codex P2: har javob CORS oladi).
+            // This used to silently fall to Bytes::new() (a dropped POST reached
+            // the handler with body:nil); now we return 400 (issue #91). Finalized
+            // with CORS headers (codex P2: every response gets CORS).
             Err(_) => {
                 return Ok(cors_finalize(
-                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    bad_request("could not read request body"),
                     &cors,
                     req_origin.as_deref(),
                 ));
             }
         }
     } else {
-        // Tez yo'l: Content-Length e'lon qilingan o'lcham chegaradan oshsa, tanani
-        // umuman o'qimasdan 413 qaytaramiz (mijoz GB'lab yuklab tugatishini
-        // kutmaymiz). Yolg'on/yo'q Content-Length'ni quyidagi Limited ushlaydi.
+        // Fast path: if the declared Content-Length exceeds the limit, return 413
+        // without reading the body at all (we do not wait for the client to finish
+        // uploading GBs). A false/missing Content-Length is caught by Limited below.
         let declared = req
             .headers()
             .get(hyper::header::CONTENT_LENGTH)
@@ -1808,13 +1810,13 @@ async fn handle_request(
                 req_origin.as_deref(),
             ));
         }
-        // Limited oqim davomida ham haqiqiy chegarani majburlaydi — chegara oshsa
-        // o'qishni to'xtatadi (Content-Length yolg'on bo'lsa ham himoyalaydi).
+        // Limited enforces the real limit during streaming too — if the limit is
+        // exceeded it stops reading (protects even when Content-Length is false).
         match Limited::new(req.into_body(), max_body).collect().await {
             Ok(c) => c.to_bytes(),
             Err(e) => {
-                // Chegara oshib ketdi -> 413; boshqa o'qish xatosi (masalan uzilgan
-                // ulanish) -> 400.
+                // Limit exceeded -> 413; another read error (e.g. a dropped
+                // connection) -> 400.
                 if e.downcast_ref::<http_body_util::LengthLimitError>()
                     .is_some()
                 {
@@ -1825,7 +1827,7 @@ async fn handle_request(
                     ));
                 }
                 return Ok(cors_finalize(
-                    bad_request("so'rov tanasini o'qib bo'lmadi"),
+                    bad_request("could not read request body"),
                     &cors,
                     req_origin.as_deref(),
                 ));
@@ -1833,10 +1835,9 @@ async fn handle_request(
         }
     };
 
-    // Bu so'rovga mos middleware zanjirini yig'amiz (issue #67): avval global
-    // (http.use), keyin yo'l prefiks bo'yicha (http.before). Ro'yxat tartibi
-    // saqlanadi. Lock'larni shu yerda erta olib qo'yamiz (handler'lar Value
-    // klonlari — Arc, arzon).
+    // Gather the middleware chain matching this request (issue #67): first global
+    // (http.use), then by path prefix (http.before). The list order is preserved.
+    // We take the lock early here (handlers are Value clones — Arc, cheap).
     let chain: Vec<Middleware> = {
         interp
             .middlewares
@@ -1844,15 +1845,15 @@ async fn handle_request(
             .unwrap()
             .iter()
             .filter(|mw| match &mw.scope {
-                None => true,                            // http.use/limit — barcha yo'lga
-                Some(pat) => prefix_matches(pat, &path), // http.before/limit — prefiks mos
+                None => true,                            // http.use/limit — all paths
+                Some(pat) => prefix_matches(pat, &path), // http.before/limit — prefix match
             })
-            .cloned() // Middleware klonida Limit holati Arc — bir xil pointer ulashiladi
+            .cloned() // in a Middleware clone the Limit state is an Arc — the same pointer is shared
             .collect()
     };
 
-    // Request-scoped ctx cell: har so'rovga yangi. req klonlari Arc'ni ulashadi,
-    // shuning uchun middleware yozgan ctx'ni handler bir xil cell'da ko'radi (#68).
+    // Request-scoped ctx cell: fresh per request. req clones share the Arc, so the
+    // handler sees the ctx middleware wrote in the same cell (#68).
     let ctx = Arc::new(Mutex::new(BTreeMap::new()));
     let request_value = with_ctx(
         build_req(
@@ -1862,11 +1863,11 @@ async fn handle_request(
     );
     let handler = route.handler;
 
-    // Sinxron interp ishini blocking thread'da bajaramiz — tokio worker'ini
-    // bloklamaydi, har request alohida thread'da -> haqiqiy parallel.
+    // Run the synchronous interp work on a blocking thread — it does not block a
+    // tokio worker, and each request runs on its own thread -> truly parallel.
     let result = tokio::task::spawn_blocking(move || {
         match run_middleware_chain(&interp, chain, &request_value) {
-            Ok(Some(v)) => Ok(v), // middleware javob qaytardi (rep/429) -> handler chaqirilmaydi
+            Ok(Some(v)) => Ok(v), // middleware returned a response (rep/429) -> handler not called
             Ok(None) => interp.apply(handler, vec![request_value]),
             Err(flow) => Err(flow),
         }
@@ -1878,24 +1879,25 @@ async fn handle_request(
         Ok(Err(flow)) => flow_to_response(flow),
         Err(join_err) => flow_to_response(Flow::Error(format!("handler panic: {}", join_err))),
     };
-    // CORS yoqilgan bo'lsa har javobga `Access-Control-Allow-*` qo'shamiz
-    // (issue #135). Handler `rep ... {access_control_allow_origin: ...}` bilan
-    // qo'lda yozgan bo'lsa ham insert ustidan yozadi — kanonik sozlama ustun.
+    // When CORS is enabled we add `Access-Control-Allow-*` to every response
+    // (issue #135). Even if the handler wrote it manually with
+    // `rep ... {access_control_allow_origin: ...}`, insert overrides it — the
+    // canonical config wins.
     Ok(cors_finalize(resp, &cors, req_origin.as_deref()))
 }
 
-// OPTIONS preflight javobi (issue #135). Brauzer haqiqiy so'rovdan oldin
-// OPTIONS yuboradi va `Access-Control-Allow-*` header'larni kutadi. Tana yo'q
-// (204 No Content). Origin ruxsat etilmagan bo'lsa CORS header'larsiz 204
-// qaytadi (brauzer so'rovni bloklaydi — to'g'ri xulq).
+// OPTIONS preflight response (issue #135). The browser sends OPTIONS before the
+// real request and expects `Access-Control-Allow-*` headers. No body
+// (204 No Content). If the origin is not allowed, 204 is returned without CORS
+// headers (the browser blocks the request — correct behavior).
 fn cors_preflight_response(cfg: &CorsConfig, req_origin: Option<&str>) -> Response<Full<Bytes>> {
     let mut b = Response::builder().status(StatusCode::NO_CONTENT);
     if let Some(hmap) = b.headers_mut() {
         cfg.apply_to(hmap, req_origin);
-        // Preflight'ga xos header'lar (oddiy javobda kerak emas): ruxsat etilgan
-        // metodlar, header'lar va kesh muddati. Faqat origin ruxsat etilganda
-        // qo'shamiz — apply_to Allow-Origin qo'ymagan bo'lsa preflight'ni ham
-        // bo'sh qoldiramiz (brauzer rad etadi).
+        // Preflight-specific headers (not needed in a plain response): allowed
+        // methods, headers, and cache duration. We add them only when the origin
+        // is allowed — if apply_to set no Allow-Origin, we leave the preflight
+        // empty too (the browser rejects it).
         if hmap.contains_key("access-control-allow-origin") {
             set_header(hmap, "access-control-allow-methods", &cfg.methods);
             set_header(hmap, "access-control-allow-headers", &cfg.headers);
@@ -1905,17 +1907,18 @@ fn cors_preflight_response(cfg: &CorsConfig, req_origin: Option<&str>) -> Respon
     b.body(Full::new(Bytes::new())).unwrap()
 }
 
-// --- HTTP klient: http.get/post/put/del ---
+// --- HTTP client: http.get/post/put/del ---
 
-// Request body hozir sodda bytes buffer: alias client tipini o'qilishi oson qiladi.
+// The request body is now a plain bytes buffer: the alias makes the client type
+// easier to read.
 type ClientBody = Full<Bytes>;
-// HttpsConnector<HttpConnector> ham http:// ham https:// ni boshqaradi — TLS
-// faqat https sxemada faollashadi, plaintext so'rovlar avvalgidek ishlaydi.
+// HttpsConnector<HttpConnector> handles both http:// and https:// — TLS
+// activates only on the https scheme, plaintext requests work as before.
 type PooledHttpClient = Client<HttpsConnector<HttpConnector>, ClientBody>;
 
-// Klient so'rovlari uchun bir martalik global runtime (Fluxon skripti sinxron).
-// pub(crate): `ai` battery ham shu runtime/poolni qayta ishlatadi (LLM API ham
-// oddiy https POST), takror tokio runtime/pool qurmaslik uchun.
+// A one-time global runtime for client requests (the Fluxon script is sync).
+// pub(crate): the `ai` battery reuses this runtime/pool too (the LLM API is also
+// a plain https POST), to avoid building a duplicate tokio runtime/pool.
 pub(crate) fn client_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
@@ -1926,16 +1929,16 @@ pub(crate) fn client_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-// Hyper client ichida connection pool bor; global saqlab, clone() orqali
-// requestlar orasida bitta poolni qayta ishlatamiz.
-// pub(crate): `ai` battery ham shu poolni qayta ishlatadi.
+// The hyper client has a connection pool inside; we keep it global and reuse one
+// pool across requests via clone().
+// pub(crate): the `ai` battery reuses this pool too.
 pub(crate) fn pooled_http_client() -> PooledHttpClient {
     static CLIENT: OnceLock<PooledHttpClient> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            // webpki-roots ildizlari bilan https connector quramiz. enable_http1
-            // hyper 1.x http1 klientiga mos. enable_http() http URL'larni ham
-            // o'tkazadi (https-only emas) — shu sabab plaintext so'rovlar saqlanadi.
+            // Build an https connector with webpki-roots roots. enable_http1 fits
+            // the hyper 1.x http1 client. https_or_http() lets http URLs through too
+            // (not https-only) — which is why plaintext requests are preserved.
             let https = hyper_rustls::HttpsConnectorBuilder::new()
                 .with_webpki_roots()
                 .https_or_http()
@@ -1946,17 +1949,17 @@ pub(crate) fn pooled_http_client() -> PooledHttpClient {
         .clone()
 }
 
-// Klient so'rovi opsiyalari (oxirgi map argumentdan o'qiladi).
-// follow=true → 3xx redirectni Location bo'yicha avtomat kuzatadi (default off).
-// max → redirect hop limiti (default 10), undan oshsa xato.
-// headers → so'rovga qo'shiladigan custom request header'lar (x-api-key,
-// Authorization, anthropic-version...). req.headers/res.headers bilan simmetrik.
+// Client request options (read from the last map argument).
+// follow=true -> automatically follows a 3xx redirect by Location (default off).
+// max -> redirect hop limit (default 10); exceeding it is an error.
+// headers -> custom request headers to add (x-api-key, Authorization,
+// anthropic-version...). Symmetric with req.headers/res.headers.
 struct ClientOpts {
     follow: bool,
     max: i64,
     headers: BTreeMap<String, String>,
-    // So'rov timeout'i: Some(dur) — shu muddatda tugamasa xato; None — timeout'siz
-    // (`timeout: 0`). Default Some(30s) (issue #92).
+    // Request timeout: Some(dur) — error if not finished within it; None — no
+    // timeout (`timeout: 0`). Default Some(30s) (issue #92).
     timeout: Option<Duration>,
 }
 
@@ -1971,7 +1974,7 @@ impl Default for ClientOpts {
     }
 }
 
-// Opsiya map'ini o'qiydi. follow truthy bo'lsa kuzatish yoqiladi.
+// Reads the options map. If follow is truthy, following is enabled.
 fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
     let mut o = ClientOpts::default();
     if let Some(Value::Map(m)) = opts {
@@ -1981,8 +1984,9 @@ fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
         if let Some(Value::Int(n)) = m.get("max") {
             o.max = *n;
         }
-        // timeout: N (soniya) — so'rov shu muddatda tugamasa xato. 0 yoki manfiy —
-        // timeout'siz (None). Boshqa qiymat turlari e'tiborsiz qoladi (default 30s).
+        // timeout: N (seconds) — error if the request does not finish within it.
+        // 0 or negative — no timeout (None). Other value types are ignored
+        // (default 30s).
         if let Some(Value::Int(n)) = m.get("timeout") {
             o.timeout = if *n > 0 {
                 Some(Duration::from_secs(*n as u64))
@@ -1990,15 +1994,15 @@ fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
                 None
             };
         }
-        // headers: {kalit: qiymat} — har bir juftlikni str'ga aylantirib olamiz.
-        // Kalit asl holida saqlanadi (HTTP header nomi katta-kichik harfga
-        // sezgir emas, lekin foydalanuvchi yozganini buzmaymiz). Qiymat str
-        // bo'lmasa ham (masalan int) matn ko'rinishiga aylantiriladi.
+        // headers: {key: value} — convert each pair to a str. The key is kept as
+        // given (an HTTP header name is case-insensitive, but we do not mangle
+        // what the user wrote). A non-str value (e.g. int) is converted to its
+        // text form.
         if let Some(Value::Map(hm)) = m.get("headers") {
             for (k, v) in hm {
                 let val = match v {
                     Value::Str(s) => s.clone(),
-                    Value::Nil => continue, // nil header — tashlab ketamiz
+                    Value::Nil => continue, // nil header — skip it
                     other => format!("{}", other),
                 };
                 o.headers.insert(k.clone(), val);
@@ -2009,13 +2013,13 @@ fn parse_client_opts(opts: Option<&Value>) -> ClientOpts {
 }
 
 // http.get url [opts]  /  http.post url body [opts]
-// has_body=true bo'lsa args[1]=body, opts=args[2]; aks holda opts=args[1].
+// If has_body=true then args[1]=body, opts=args[2]; otherwise opts=args[1].
 fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, Flow> {
     let url = match args.first() {
         Some(Value::Str(s)) => s.clone(),
         _ => {
             return Err(Flow::err(format!(
-                "http.{}: url (str) kerak",
+                "http.{}: url (str) is required",
                 method.to_lowercase()
             )));
         }
@@ -2027,8 +2031,8 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
     };
     let opts = parse_client_opts(opts_arg);
 
-    // So'rov tanasini bir marta tayyorlaymiz (redirect'larda ham qayta ishlatamiz).
-    // bytes body xom holida ketadi (issue #132) — shuning uchun String emas, Bytes.
+    // Prepare the request body once (reused across redirects too). A bytes body
+    // goes raw (issue #132) — so Bytes, not String.
     let (body_payload, is_json) = match &body {
         Some(Value::Map(_)) | Some(Value::List(_)) => {
             (Bytes::from(json_encode(body.as_ref().unwrap())), true)
@@ -2039,26 +2043,27 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
         None => (Bytes::new(), false),
     };
 
-    // Timeout opts'dan alohida olamiz (opts quyida async blokka ko'chiriladi).
+    // Take the timeout out of opts separately (opts is moved into the async block below).
     let timeout = opts.timeout;
     client_runtime().block_on(async move {
-        // Butun so'rov mantig'i (redirect'lar bilan birga) — timeout uni qamraydi.
+        // The whole request logic (including redirects) — the timeout wraps it.
         let work = async move {
             let mut current = url;
-            // method redirect'da o'zgarishi mumkin (303 va GET-aylantiruvchi 301/302).
+            // The method can change on a redirect (303 and GET-converting 301/302).
             let mut cur_method = method.to_string();
             let mut hops: i64 = 0;
-            // Asl so'rov origin'i (sxema, host, port). Redirect begona origin'ga
-            // olib chiqsa credential header'lar yuborilmaydi (issue #96).
+            // The original request origin (scheme, host, port). If a redirect
+            // leads to a foreign origin, credential headers are not sent (issue #96).
             let mut first_origin: Option<(String, String, u16)> = None;
-            // Belgi yopishqoq: begona origin orqali asl host'ga qaytsa ham
-            // credential tiklanmaydi (reqwest/curl bilan bir xil ehtiyotkorlik).
+            // The flag is sticky: even if a foreign origin redirects back to the
+            // original host, credentials are not restored (same caution as
+            // reqwest/curl).
             let mut cross_origin = false;
 
             loop {
                 let uri: hyper::Uri = current
                     .parse()
-                    .map_err(|e| Flow::err(format!("noto'g'ri url: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("invalid url: {}", e)))?;
 
                 let this_origin = uri_origin(&uri);
                 match &first_origin {
@@ -2067,15 +2072,15 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     _ => {}
                 }
 
-                // GET'ga aylangach tana yuborilmaydi.
+                // Once turned into GET, no body is sent.
                 let send_body = cur_method != "GET" && cur_method != "DELETE";
                 let mut builder = Request::builder().method(cur_method.as_str()).uri(uri);
-                // Foydalanuvchi custom header'larini avval qo'shamiz. content-type'ni
-                // foydalanuvchi o'zi bergan bo'lsa, avtomatik qiymat ustiga yozmaymiz.
+                // Add the user's custom headers first. If the user supplied
+                // content-type themselves, do not overwrite it with the auto value.
                 let mut has_user_ct = false;
                 for (k, v) in &opts.headers {
-                    // Cross-origin redirect: Authorization/x-api-key/Cookie begona
-                    // host'ga sizib chiqmasin (issue #96).
+                    // Cross-origin redirect: do not leak Authorization/x-api-key/
+                    // Cookie to a foreign host (issue #96).
                     if cross_origin && is_sensitive_header(k) {
                         continue;
                     }
@@ -2094,16 +2099,16 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                 };
                 let req = builder
                     .body(Full::new(payload))
-                    .map_err(|e| Flow::err(format!("so'rov qurish: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("building request: {}", e)))?;
 
                 let resp = pooled_http_client()
                     .request(req)
                     .await
-                    .map_err(|e| Flow::err(format!("http so'rov: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("http request: {}", e)))?;
 
                 let status = resp.status().as_u16();
 
-                // Redirect kuzatuvi (opt-in). 3xx + Location bo'lsa keyingi hop'ga o'tamiz.
+                // Redirect following (opt-in). On 3xx + Location, move to the next hop.
                 if opts.follow
                     && (300..400).contains(&status)
                     && let Some(loc) = resp
@@ -2115,23 +2120,24 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     hops += 1;
                     if hops > opts.max {
                         return Err(Flow::err(format!(
-                            "redirect limiti oshib ketdi ({} hop)",
+                            "redirect limit exceeded ({} hops)",
                             opts.max
                         )));
                     }
-                    // Nisbiy Location'ni joriy URL asosida to'liq URL'ga aylantiramiz.
+                    // Turn a relative Location into a full URL based on the current URL.
                     current = resolve_location(&current, &loc);
-                    // 303 har doim GET; 301/302 amaliyotda GET'ga aylanadi (POST→GET).
-                    // 307/308 metod va tanani saqlaydi.
+                    // 303 is always GET; 301/302 in practice become GET (POST->GET).
+                    // 307/308 preserve the method and body.
                     if status == 303 || ((status == 301 || status == 302) && cur_method == "POST") {
                         cur_method = "GET".to_string();
                     }
-                    // 3xx tanasi drain qilinsa hyper pool ulanishni qayta ishlata
-                    // oladi (issue #96). Lekin drain redirect'ni qotirmasin (PR
-                    // #144 revyu): faqat hajmi ma'lum va kichik bo'lsa, qisqa
-                    // timeout ichida frame-ma-frame (bufersiz) o'qiymiz. Hajmi
-                    // noma'lum (chunked/stream) yoki katta bo'lsa darhol drop —
-                    // ulanish yopiladi, keyingi hop yangisini ochadi.
+                    // If the 3xx body is drained, the hyper pool can reuse the
+                    // connection (issue #96). But draining must not stall the
+                    // redirect (PR #144 review): only if the size is known and
+                    // small do we read frame-by-frame (unbuffered) within a short
+                    // timeout. If the size is unknown (chunked/stream) or large,
+                    // drop immediately — the connection closes and the next hop
+                    // opens a new one.
                     const REDIRECT_DRAIN_MAX: u64 = 64 * 1024;
                     let known_len = resp
                         .headers()
@@ -2149,14 +2155,14 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                                 }
                             }
                         };
-                        // Sekin upstream e'lon qilingan kichik hajmni ham asta
-                        // oqizishi mumkin — tugamasa ulanishni tashlab ketamiz.
+                        // A slow upstream may trickle even a small declared size —
+                        // if it does not finish, we abandon the connection.
                         let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
                     }
                     continue;
                 }
 
-                // Yakuniy javob — header, status, body'ni yig'amiz.
+                // Final response — gather headers, status, body.
                 let resp_is_json = resp
                     .headers()
                     .get("content-type")
@@ -2164,21 +2170,21 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                     .map(|s| s.contains("application/json"))
                     .unwrap_or(false);
 
-                // Header'lar: kalit kichik harf (defis saqlanadi — m[k] bilan
-                // o'qiladi), takror nomlar birlashtiriladi (issue #101).
+                // Headers: lowercase keys (hyphen preserved — read with m[k]),
+                // repeated names are merged (issue #101).
                 let headers = headers_to_map(resp.headers());
 
                 let bytes = resp
                     .into_body()
                     .collect()
                     .await
-                    .map_err(|e| Flow::err(format!("javob o'qish: {}", e)))?
+                    .map_err(|e| Flow::err(format!("reading response: {}", e)))?
                     .to_bytes();
                 let resp_body = match String::from_utf8(bytes.to_vec()) {
                     Ok(text) if resp_is_json => json_decode(&text).unwrap_or(Value::Str(text)),
                     Ok(text) => Value::Str(text),
-                    // UTF-8 bo'lmagan javob (rasm, arxiv) — bytes (issue #132).
-                    // Avval lossy o'qish ikkilik ma'lumotni jim buzardi.
+                    // A non-UTF-8 response (image, archive) — bytes (issue #132).
+                    // Lossy reading used to silently corrupt binary data.
                     Err(e) => Value::Bytes(Arc::new(e.into_bytes())),
                 };
 
@@ -2186,7 +2192,7 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
                 m.insert("status".to_string(), Value::Int(status as i64));
                 m.insert("body".to_string(), resp_body);
                 m.insert("headers".to_string(), Value::Map(headers));
-                // follow yoqilgan bo'lsa nechta redirect bo'lganini ham qaytaramiz.
+                // If follow is enabled, also return how many redirects happened.
                 if opts.follow {
                     m.insert("hops".to_string(), Value::Int(hops));
                 }
@@ -2194,13 +2200,13 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
             }
         };
 
-        // Timeout o'rnatilgan bo'lsa so'rovni unga o'raymiz; tugamasa aniq xato
-        // (qotgan upstream butun thread'ni abadiy bloklamasin — issue #92).
+        // If a timeout is set, wrap the request in it; on expiry a clear error
+        // (a stuck upstream must not block the whole thread forever — issue #92).
         match timeout {
             Some(dur) => match tokio::time::timeout(dur, work).await {
                 Ok(r) => r,
                 Err(_) => Err(Flow::err(format!(
-                    "http so'rov timeout ({} sek ichida javob yo'q)",
+                    "http request timeout (no response within {} sec)",
                     dur.as_secs()
                 ))),
             },
@@ -2209,22 +2215,22 @@ fn http_client(method: &str, args: Vec<Value>, has_body: bool) -> Result<Value, 
     })
 }
 
-// Redirect Location'ini joriy URL asosida hal qiladi. Location to'liq URL bo'lsa
-// (`http://...`) o'sha qaytadi; aks holda joriy URL'ning sxema+host'iga ulanadi
-// (mutlaq yo'l `/x` yoki nisbiy yo'l).
+// Resolves a redirect Location based on the current URL. If Location is a full
+// URL (`http://...`) that is returned; otherwise it attaches to the current
+// URL's scheme+host (an absolute path `/x` or a relative path).
 fn resolve_location(base: &str, loc: &str) -> String {
     if loc.starts_with("http://") || loc.starts_with("https://") {
         return loc.to_string();
     }
-    // base'dan sxema://host qismini ajratamiz. Query/fragment'ni avval kesamiz —
-    // ulardagi `/` yo'l segmenti hisoblanmasin (masalan `?q=/z`, issue #96).
+    // Extract the scheme://host part from base. Cut the query/fragment first —
+    // a `/` in them is not a path segment (e.g. `?q=/z`, issue #96).
     let scheme_end = base.find("://").map(|i| i + 3).unwrap_or(0);
     let base_end = base[scheme_end..]
         .find(['?', '#'])
         .map(|i| scheme_end + i)
         .unwrap_or(base.len());
     let base = &base[..base_end];
-    // Sxema-nisbiy `//host/yo'l` — base sxemasi saqlanadi, qolgani Location'dan.
+    // Scheme-relative `//host/path` — the base scheme is kept, the rest from Location.
     if let Some(rest) = loc.strip_prefix("//") {
         let scheme = if scheme_end >= 3 {
             &base[..scheme_end - 2]
@@ -2241,9 +2247,9 @@ fn resolve_location(base: &str, loc: &str) -> String {
     if loc.starts_with('/') {
         format!("{}{}", origin, loc)
     } else {
-        // nisbiy yo'l: joriy yo'lning oxirgi segmentini almashtiramiz. Yo'l
-        // umuman bo'lmasa root deb qaraladi — `/` qo'shiladi (issue #96:
-        // ilgari "http://a.com" + "page" → "http://a.compage" chiqardi).
+        // Relative path: replace the last segment of the current path. If there
+        // is no path at all it is treated as root — `/` is added (issue #96:
+        // it used to produce "http://a.com" + "page" -> "http://a.compage").
         let path_part = &base[host_end..];
         match path_part.rfind('/') {
             Some(i) => format!("{}{}", &base[..host_end + i + 1], loc),
@@ -2252,9 +2258,9 @@ fn resolve_location(base: &str, loc: &str) -> String {
     }
 }
 
-// Origin (sxema, host, port) uchligi — redirect host/port/sxemani o'zgartirganini
-// aniqlash uchun. Port berilmagan bo'lsa sxema standarti olinadi (http=80,
-// https=443): `http://a.com` va `http://a.com:80` bir origin.
+// The origin (scheme, host, port) triple — used to detect whether a redirect
+// changed host/port/scheme. If no port is given, the scheme default is used
+// (http=80, https=443): `http://a.com` and `http://a.com:80` are one origin.
 fn uri_origin(uri: &hyper::Uri) -> (String, String, u16) {
     let scheme = uri.scheme_str().unwrap_or("http").to_ascii_lowercase();
     let host = uri.host().unwrap_or("").to_ascii_lowercase();
@@ -2264,8 +2270,8 @@ fn uri_origin(uri: &hyper::Uri) -> (String, String, u16) {
     (scheme, host, port)
 }
 
-// Cross-origin redirect'da tushirib yuboriladigan credential header'lar —
-// curl/reqwest xulqi bilan bir xil: begona host API kalit/sessiyani ko'rmasin.
+// Credential headers dropped on a cross-origin redirect — same behavior as
+// curl/reqwest: a foreign host must not see the API key/session.
 fn is_sensitive_header(name: &str) -> bool {
     name.eq_ignore_ascii_case("authorization")
         || name.eq_ignore_ascii_case("proxy-authorization")
@@ -2277,20 +2283,20 @@ fn is_sensitive_header(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    // --- headers_to_map: o'qish tomonida takror header'lar (issue #101) ---
+    // --- headers_to_map: repeated headers on the read side (issue #101) ---
 
-    // Map'dan str qiymatni oladi (Value Debug/PartialEq emas — pattern bilan).
+    // Gets a str value from a map (Value is not Debug/PartialEq — match by pattern).
     fn hstr(m: &BTreeMap<String, Value>, k: &str) -> String {
         match m.get(k) {
             Some(Value::Str(s)) => s.clone(),
-            _ => panic!("{k}: Str qiymat kutilgan edi"),
+            _ => panic!("{k}: Str value expected"),
         }
     }
 
     #[test]
     fn headers_takror_nom_vergul_bilan_birlashadi() {
-        // Bir nomli ikki header (masalan X-Forwarded-For zanjiri) yo'qolmasin —
-        // RFC 9110 §5.3 bo'yicha ", " bilan bitta qiymatga birlashadi.
+        // Two headers with the same name (e.g. an X-Forwarded-For chain) must not
+        // be lost — per RFC 9110 §5.3 they merge into one value with ", ".
         let mut h = hyper::HeaderMap::new();
         h.append("x-forwarded-for", "1.1.1.1".parse().unwrap());
         h.append("x-forwarded-for", "2.2.2.2".parse().unwrap());
@@ -2298,9 +2304,9 @@ mod tests {
         assert_eq!(hstr(&m, "x-forwarded-for"), "1.1.1.1, 2.2.2.2");
     }
 
-    // --- bytes (issue #132): ikkilik tana so'rov/javob yo'llarida ---
+    // --- bytes (issue #132): binary body on the request/response paths ---
 
-    // UTF-8 bo'lmagan so'rov tanasi bytes bo'lib keladi (avval lossy buzilardi).
+    // A non-UTF-8 request body comes as bytes (it used to be corrupted by lossy).
     #[test]
     fn build_req_ikkilik_tana_bytes() {
         let req = build_req(
@@ -2315,15 +2321,15 @@ mod tests {
             None,
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         match m.get("body") {
             Some(Value::Bytes(b)) => assert_eq!(**b, vec![0xff, 0xfe, 0x00]),
-            _ => panic!("ikkilik tana bytes bo'lishi kerak"),
+            _ => panic!("binary body must be bytes"),
         }
     }
 
-    // Matnli tana avvalgidek str (regressiya himoyasi).
+    // A text body stays str as before (regression guard).
     #[test]
     fn build_req_matn_tana_str_qoladi() {
         let req = build_req(
@@ -2333,22 +2339,22 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             "1.1.1.1".into(),
-            Bytes::from("salom"),
+            Bytes::from("hello"),
             false,
             None,
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         match m.get("body") {
-            Some(Value::Str(s)) => assert_eq!(s, "salom"),
-            _ => panic!("matn tana str bo'lishi kerak"),
+            Some(Value::Str(s)) => assert_eq!(s, "hello"),
+            _ => panic!("text body must be str"),
         }
     }
 
     // --- multipart/form-data (issue #133) ---
 
-    // Brauzer/curl yuboradigan tipik multipart tana yasaydi.
+    // Builds a typical multipart body like a browser/curl sends.
     fn multipart_body(boundary: &str, parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         for (name, filename, content) in parts {
@@ -2375,8 +2381,8 @@ mod tests {
 
     #[test]
     fn multipart_boundary_oddiy_va_qoshtirnoqli() {
-        // Oddiy va qo'shtirnoqli boundary'lar ham parse bo'ladi; boshqa
-        // content-type (JSON) None qaytaradi.
+        // Both plain and quoted boundaries parse; another content-type (JSON)
+        // returns None.
         assert_eq!(
             multipart_boundary("multipart/form-data; boundary=----WebKit123"),
             Some("----WebKit123".to_string())
@@ -2391,11 +2397,11 @@ mod tests {
 
     #[test]
     fn cd_param_filename_ichidagi_name_adashtirmaydi() {
-        // "filename=" qidiruvda "name=" ga mos kelmasin — ajratuvchi tekshiriladi.
+        // A "filename=" search must not match "name=" — the separator is checked.
         let line = "Content-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"";
         assert_eq!(cd_param(line, "name").as_deref(), Some("avatar"));
         assert_eq!(cd_param(line, "filename").as_deref(), Some("a.png"));
-        // filename yo'q qism — oddiy maydon.
+        // A part without filename — a plain field.
         let field = "Content-Disposition: form-data; name=\"title\"";
         assert_eq!(cd_param(field, "name").as_deref(), Some("title"));
         assert_eq!(cd_param(field, "filename"), None);
@@ -2403,50 +2409,50 @@ mod tests {
 
     #[test]
     fn parse_multipart_maydon_va_fayl() {
-        // Oddiy maydon req.body'ga, fayl (filename bor) files ro'yxatiga tushadi.
+        // A plain field goes to req.body, a file (with filename) to the files list.
         let body = multipart_body(
             "BB",
             &[
-                ("title", None, b"salom dunyo"),
-                ("doc", Some("a.txt"), b"matn fayl"),
+                ("title", None, b"hello world"),
+                ("doc", Some("a.txt"), b"text file"),
             ],
         );
-        let (fields, files) = parse_multipart(&body, "BB").expect("parse bo'lishi kerak");
+        let (fields, files) = parse_multipart(&body, "BB").expect("parse must succeed");
         match fields.get("title") {
-            Some(Value::Str(s)) => assert_eq!(s, "salom dunyo"),
-            _ => panic!("title str bo'lishi kerak"),
+            Some(Value::Str(s)) => assert_eq!(s, "hello world"),
+            _ => panic!("title must be str"),
         }
         assert_eq!(files.len(), 1);
         let Value::Map(f) = &files[0] else {
-            panic!("fayl map bo'lishi kerak");
+            panic!("file map expected");
         };
         assert!(matches!(f.get("name"), Some(Value::Str(s)) if s == "doc"));
         assert!(matches!(f.get("filename"), Some(Value::Str(s)) if s == "a.txt"));
-        assert!(matches!(f.get("content"), Some(Value::Str(s)) if s == "matn fayl"));
+        assert!(matches!(f.get("content"), Some(Value::Str(s)) if s == "text file"));
         assert!(matches!(f.get("size"), Some(Value::Int(9))));
     }
 
     #[test]
     fn parse_multipart_ikkilik_fayl_bytes() {
-        // Ikkilik mazmun (UTF-8 emas, ichida CRLF ham bor) bytes bo'lib keladi
-        // va baytlar aynan saqlanadi; size — bayt soni.
+        // Binary content (not UTF-8, with CRLF inside) comes as bytes and the
+        // bytes are preserved exactly; size is the byte count.
         let data: &[u8] = &[0xff, 0xd8, b'\r', b'\n', 0x00, 0xfe];
         let body = multipart_body("XX", &[("img", Some("a.jpg"), data)]);
-        let (_, files) = parse_multipart(&body, "XX").expect("parse bo'lishi kerak");
+        let (_, files) = parse_multipart(&body, "XX").expect("parse must succeed");
         let Value::Map(f) = &files[0] else {
-            panic!("fayl map bo'lishi kerak");
+            panic!("file map expected");
         };
         match f.get("content") {
             Some(Value::Bytes(b)) => assert_eq!(**b, data.to_vec()),
-            _ => panic!("ikkilik mazmun bytes bo'lishi kerak"),
+            _ => panic!("binary content must be bytes"),
         }
         assert!(matches!(f.get("size"), Some(Value::Int(6))));
     }
 
     #[test]
     fn parse_multipart_bir_nom_bir_nechta_fayl() {
-        // Bir xil name bilan bir nechta fayl (`<input multiple>`) — hammasi
-        // ro'yxatda qoladi (map emas, list bo'lgani uchun yo'qolmaydi).
+        // Multiple files with the same name (`<input multiple>`) — all stay in
+        // the list (not a map, so none is lost).
         let body = multipart_body(
             "MM",
             &[
@@ -2454,55 +2460,55 @@ mod tests {
                 ("docs", Some("2.txt"), b"ikki"),
             ],
         );
-        let (_, files) = parse_multipart(&body, "MM").expect("parse bo'lishi kerak");
+        let (_, files) = parse_multipart(&body, "MM").expect("parse must succeed");
         assert_eq!(files.len(), 2);
     }
 
     #[test]
     fn parse_multipart_mazmundagi_boundary_prefiksi_kesmaydi() {
-        // Fayl mazmunida `\r\n--abcXYZ` bor (boundary `abc` ning prefiksi, lekin
-        // to'liq chegara qatori emas) — qism KESILMAY butun saqlanishi kerak
-        // (codex P2 revyu: faqat `\r\n--boundary` qidirish mazmunni buzardi).
-        let data: &[u8] = b"birinchi\r\n--abcXYZ\r\nqolgan qism";
+        // The file content has `\r\n--abcXYZ` (a prefix of boundary `abc`, but
+        // not a full boundary line) — the part must be kept WHOLE, not cut
+        // (codex P2 review: searching only for `\r\n--boundary` corrupted content).
+        let data: &[u8] = b"first\r\n--abcXYZ\r\nremaining part";
         let body = multipart_body("abc", &[("doc", Some("a.txt"), data)]);
-        let (_, files) = parse_multipart(&body, "abc").expect("parse bo'lishi kerak");
+        let (_, files) = parse_multipart(&body, "abc").expect("parse must succeed");
         assert_eq!(files.len(), 1);
         let Value::Map(f) = &files[0] else {
-            panic!("fayl map bo'lishi kerak");
+            panic!("file map expected");
         };
         match f.get("content") {
             Some(Value::Str(s)) => assert_eq!(s.as_bytes(), data),
-            _ => panic!("mazmun butun str bo'lishi kerak"),
+            _ => panic!("content must be a whole str"),
         }
         assert!(matches!(f.get("size"), Some(Value::Int(n)) if *n == data.len() as i64));
     }
 
     #[test]
     fn parse_multipart_padding_bilan_boundary_qabul() {
-        // RFC 2046: boundary qatoridan keyin transport padding (bo'shliq/tab)
-        // bo'lishi mumkin — bunday chegara haqiqiy deb olinadi.
+        // RFC 2046: a boundary line may be followed by transport padding
+        // (space/tab) — such a boundary is taken as valid.
         let mut body = Vec::new();
         body.extend_from_slice(b"--PP  \r\n");
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"\r\n\r\n");
-        body.extend_from_slice(b"qiymat");
+        body.extend_from_slice(b"value");
         body.extend_from_slice(b"\r\n--PP--\r\n");
-        let (fields, _) = parse_multipart(&body, "PP").expect("parse bo'lishi kerak");
-        assert!(matches!(fields.get("a"), Some(Value::Str(s)) if s == "qiymat"));
+        let (fields, _) = parse_multipart(&body, "PP").expect("parse must succeed");
+        assert!(matches!(fields.get("a"), Some(Value::Str(s)) if s == "value"));
     }
 
     #[test]
     fn parse_multipart_buzuq_tana_none() {
-        // Boundary tanada umuman yo'q — None, chaqiruvchi xom body'ga qaytadi.
-        assert!(parse_multipart(b"shunchaki matn", "YOQ").is_none());
+        // The boundary is not in the body at all — None, the caller falls back to the raw body.
+        assert!(parse_multipart(b"just text", "NONE").is_none());
     }
 
     #[test]
     fn build_req_multipart_body_va_files() {
-        // To'liq yo'l: boundary berilganda req.body maydonlar map'i, req.files
-        // fayllar ro'yxati bo'ladi.
+        // Full path: when a boundary is given, req.body is a fields map and
+        // req.files is the files list.
         let body = multipart_body(
             "ZZ",
-            &[("title", None, b"rasmim"), ("pic", Some("p.png"), b"PNG")],
+            &[("title", None, b"my image"), ("pic", Some("p.png"), b"PNG")],
         );
         let req = build_req(
             "POST".into(),
@@ -2516,22 +2522,22 @@ mod tests {
             Some("ZZ".to_string()),
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         let Some(Value::Map(b)) = m.get("body") else {
-            panic!("body map bo'lishi kerak");
+            panic!("body map expected");
         };
-        assert!(matches!(b.get("title"), Some(Value::Str(s)) if s == "rasmim"));
+        assert!(matches!(b.get("title"), Some(Value::Str(s)) if s == "my image"));
         match m.get("files") {
             Some(Value::List(fs)) => assert_eq!(fs.len(), 1),
-            _ => panic!("files list bo'lishi kerak"),
+            _ => panic!("files must be a list"),
         }
     }
 
     #[test]
     fn build_req_multipart_emas_files_bosh_list() {
-        // Oddiy so'rovda ham req.files mavjud (bo'sh list) — `each` nil
-        // tekshiruvisiz ishlaydi.
+        // req.files exists on a plain request too (empty list) — `each` works
+        // without a nil check.
         let req = build_req(
             "POST".into(),
             "/t".into(),
@@ -2544,18 +2550,18 @@ mod tests {
             None,
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
         match m.get("files") {
             Some(Value::List(fs)) => assert!(fs.is_empty()),
-            _ => panic!("files bo'sh list bo'lishi kerak"),
+            _ => panic!("files must be an empty list"),
         }
     }
 
     #[test]
     fn build_req_multipart_buzuq_xom_qoladi() {
-        // Boundary bor lekin tana mos emas — parse None, body xom str qoladi
-        // (ma'lumot jim yo'qolmaydi), files bo'sh.
+        // A boundary is present but the body does not match — parse None, the
+        // body stays a raw str (data is not silently lost), files empty.
         let req = build_req(
             "POST".into(),
             "/u".into(),
@@ -2563,21 +2569,21 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             "1.1.1.1".into(),
-            Bytes::from("oddiy matn"),
+            Bytes::from("plain text"),
             false,
             Some("QQ".to_string()),
         );
         let Value::Map(m) = req else {
-            panic!("req map bo'lishi kerak");
+            panic!("req map expected");
         };
-        assert!(matches!(m.get("body"), Some(Value::Str(s)) if s == "oddiy matn"));
+        assert!(matches!(m.get("body"), Some(Value::Str(s)) if s == "plain text"));
         match m.get("files") {
             Some(Value::List(fs)) => assert!(fs.is_empty()),
-            _ => panic!("files bo'sh list bo'lishi kerak"),
+            _ => panic!("files must be an empty list"),
         }
     }
 
-    // bytes javob — xom baytlar + application/octet-stream standart turi.
+    // bytes response — raw bytes + the application/octet-stream default type.
     #[test]
     fn bytes_javob_octet_stream() {
         let resp = body_value_to_response(200, Value::Bytes(Arc::new(vec![1, 2, 3])));
@@ -2598,8 +2604,8 @@ mod tests {
 
     #[test]
     fn headers_cookie_nuqta_vergul_bilan_birlashadi() {
-        // Cookie-pair ajratkichi "; " (RFC 6265) — vergul bilan birlashtirsak
-        // cookie qiymati buziladi.
+        // The cookie-pair separator is "; " (RFC 6265) — merging with a comma
+        // would corrupt the cookie value.
         let mut h = hyper::HeaderMap::new();
         h.append("cookie", "a=1".parse().unwrap());
         h.append("cookie", "b=2".parse().unwrap());
@@ -2609,8 +2615,8 @@ mod tests {
 
     #[test]
     fn headers_takror_set_cookie_list_qaytadi() {
-        // Set-Cookie birlashtirib bo'lmaydi (Expires sanasida vergul bor) —
-        // takror bo'lsa List, yozish tomonidagi List bilan simmetrik.
+        // Set-Cookie cannot be merged (the Expires date has a comma) — if
+        // repeated it is a List, symmetric with the write-side List.
         let mut h = hyper::HeaderMap::new();
         h.append("set-cookie", "a=1".parse().unwrap());
         h.append("set-cookie", "b=2".parse().unwrap());
@@ -2620,13 +2626,13 @@ mod tests {
                 let got: Vec<String> = items.iter().map(|v| v.to_text()).collect();
                 assert_eq!(got, vec!["a=1", "b=2"]);
             }
-            _ => panic!("set-cookie: List kutilgan edi"),
+            _ => panic!("set-cookie: List expected"),
         }
     }
 
     #[test]
     fn headers_bitta_set_cookie_str_qoladi() {
-        // Oddiy holat (bitta cookie) o'zgarmasin — eski kod str kutadi.
+        // The simple case (a single cookie) must not change — old code expects str.
         let mut h = hyper::HeaderMap::new();
         h.insert("set-cookie", "s=xyz".parse().unwrap());
         let m = headers_to_map(&h);
@@ -2635,8 +2641,8 @@ mod tests {
 
     #[test]
     fn headers_utf8_bolmagan_qiymat_lossy_oqiladi() {
-        // Oldin unwrap_or("") jim bo'sh string qaytarardi — endi lossy: buzuq
-        // bayt U+FFFD bo'ladi, qolgan qism saqlanadi.
+        // unwrap_or("") used to silently return an empty string — now lossy: a
+        // broken byte becomes U+FFFD, the rest is preserved.
         let mut h = hyper::HeaderMap::new();
         h.insert(
             "x-raw",
@@ -2648,58 +2654,58 @@ mod tests {
 
     #[test]
     fn location_absolute_url() {
-        // To'liq URL bo'lsa o'zi qaytadi (base e'tiborga olinmaydi).
+        // If it is a full URL it is returned as-is (base is ignored).
         let got = resolve_location("http://a.com/x", "http://b.com/y");
         assert_eq!(got, "http://b.com/y");
     }
 
     #[test]
     fn location_root_relative() {
-        // `/...` mutlaq yo'l — base'ning origin'iga ulanadi, yo'l almashtiriladi.
+        // A `/...` absolute path — attaches to base's origin, the path is replaced.
         let got = resolve_location("http://a.com/old/path", "/new");
         assert_eq!(got, "http://a.com/new");
     }
 
     #[test]
     fn location_relative_path() {
-        // nisbiy yo'l — joriy yo'lning oxirgi segmenti o'rniga qo'yiladi.
+        // A relative path — placed in place of the current path's last segment.
         let got = resolve_location("http://a.com/dir/file", "other");
         assert_eq!(got, "http://a.com/dir/other");
     }
 
     #[test]
     fn location_relative_at_root() {
-        // host'dan keyin yo'l yo'q bo'lsa root deb qaraladi — `/` qo'shiladi
-        // (issue #96: ilgari "http://a.compage" degan buzuq URL chiqardi).
+        // If there is no path after the host it is treated as root — `/` is added
+        // (issue #96: it used to produce the broken URL "http://a.compage").
         let got = resolve_location("http://a.com", "page");
         assert_eq!(got, "http://a.com/page");
     }
 
     #[test]
     fn location_base_query_kesiladi() {
-        // Base query'sidagi `/` yo'l segmenti emas (issue #96) — nisbiy yo'l
-        // query'dan oldingi haqiqiy yo'lga nisbatan hal qilinadi.
+        // A `/` in the base query is not a path segment (issue #96) — a relative
+        // path is resolved against the real path before the query.
         let got = resolve_location("http://a.com/search?q=/z", "next");
         assert_eq!(got, "http://a.com/next");
-        // Mutlaq yo'lda ham query origin'ni buzmaydi.
+        // For an absolute path too, the query does not corrupt the origin.
         let got2 = resolve_location("http://a.com/a/b?x=1", "/new");
         assert_eq!(got2, "http://a.com/new");
     }
 
     #[test]
     fn location_scheme_relative() {
-        // `//host/yo'l` — sxema base'dan olinadi (https saqlanadi).
+        // `//host/path` — the scheme is taken from base (https is preserved).
         let got = resolve_location("https://a.com/x", "//b.com/y");
         assert_eq!(got, "https://b.com/y");
     }
 
     #[test]
     fn origin_default_port_va_case() {
-        // Standart port yozilgan-yozilmagani va harf katta-kichikligi farq qilmaydi.
+        // Whether the default port is written and letter case do not matter.
         let a: hyper::Uri = "http://A.com/x".parse().unwrap();
         let b: hyper::Uri = "http://a.com:80/y".parse().unwrap();
         assert_eq!(uri_origin(&a), uri_origin(&b));
-        // Sxema yoki port farqi — boshqa origin (credential ketmasligi kerak).
+        // A scheme or port difference — a different origin (credentials must not go).
         let c: hyper::Uri = "https://a.com/x".parse().unwrap();
         let d: hyper::Uri = "http://a.com:8080/x".parse().unwrap();
         assert_ne!(uri_origin(&a), uri_origin(&c));
@@ -2708,7 +2714,7 @@ mod tests {
 
     #[test]
     fn sensitive_header_royxati() {
-        // Credential header'lar case-insensitive taniladi; oddiy header emas.
+        // Credential headers are recognized case-insensitively; a plain header is not.
         assert!(is_sensitive_header("Authorization"));
         assert!(is_sensitive_header("X-API-Key"));
         assert!(is_sensitive_header("cookie"));
@@ -2717,9 +2723,10 @@ mod tests {
         assert!(!is_sensitive_header("x-request-id"));
     }
 
-    // Mini HTTP server: `responses` dagi har bir javob uchun bitta ulanish qabul
-    // qiladi va kelgan so'rov matnini qayd etadi. `Connection: close` bilan javob
-    // berilishi shart — har hop yangi ulanishda kelib, qaydlar deterministik bo'ladi.
+    // Mini HTTP server: accepts one connection for each response in `responses`
+    // and records the incoming request text. Responses must use `Connection:
+    // close` — so each hop arrives on a new connection and the records are
+    // deterministic.
     fn spawn_test_server(responses: Vec<String>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2748,15 +2755,15 @@ mod tests {
         (port, handle)
     }
 
-    // follow:true + credential header'lar bilan GET so'rovini quradi.
+    // Builds a GET request with follow:true + credential headers.
     fn follow_get_with_credentials(url: String) -> Result<Value, Flow> {
         let mut headers = BTreeMap::new();
         headers.insert(
             "authorization".to_string(),
-            Value::Str("Bearer sekret".into()),
+            Value::Str("Bearer secret".into()),
         );
-        headers.insert("x-api-key".to_string(), Value::Str("kalit".into()));
-        headers.insert("x-custom".to_string(), Value::Str("qoladi".into()));
+        headers.insert("x-api-key".to_string(), Value::Str("key".into()));
+        headers.insert("x-custom".to_string(), Value::Str("stays".into()));
         let mut opts = BTreeMap::new();
         opts.insert("follow".to_string(), Value::Bool(true));
         opts.insert("headers".to_string(), Value::Map(headers));
@@ -2765,8 +2772,8 @@ mod tests {
 
     #[test]
     fn cross_origin_redirect_credential_tushiriladi() {
-        // issue #96: begona origin'ga (boshqa port) redirect — Authorization va
-        // x-api-key u yerga yetib bormasligi kerak, oddiy header esa qoladi.
+        // issue #96: a redirect to a foreign origin (different port) — Authorization
+        // and x-api-key must not reach it, while a plain header stays.
         let (port_b, hb) = spawn_test_server(vec![
             "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok".to_string(),
         ]);
@@ -2778,28 +2785,25 @@ mod tests {
         let Ok(Value::Map(res)) =
             follow_get_with_credentials(format!("http://127.0.0.1:{}/start", port_a))
         else {
-            panic!("so'rov muvaffaqiyatli bo'lishi kerak edi");
+            panic!("request must have succeeded");
         };
         assert!(matches!(res.get("status"), Some(Value::Int(200))));
 
-        // Birinchi host (asl origin) credential'larni to'liq oladi.
+        // The first host (the original origin) gets the credentials in full.
         let req_a = ha.join().unwrap().remove(0).to_lowercase();
-        assert!(req_a.contains("authorization: bearer sekret"));
-        assert!(req_a.contains("x-api-key: kalit"));
-        // Begona host'ga credential'lar ketmaydi, oddiy header esa boradi.
+        assert!(req_a.contains("authorization: bearer secret"));
+        assert!(req_a.contains("x-api-key: key"));
+        // Credentials do not go to the foreign host, but a plain header does.
         let req_b = hb.join().unwrap().remove(0).to_lowercase();
-        assert!(
-            !req_b.contains("authorization"),
-            "Authorization sizib chiqdi"
-        );
-        assert!(!req_b.contains("x-api-key"), "x-api-key sizib chiqdi");
-        assert!(req_b.contains("x-custom: qoladi"));
+        assert!(!req_b.contains("authorization"), "Authorization leaked");
+        assert!(!req_b.contains("x-api-key"), "x-api-key leaked");
+        assert!(req_b.contains("x-custom: stays"));
     }
 
     #[test]
     fn same_origin_redirect_credential_saqlanadi() {
-        // Bir xil origin ichidagi redirect'da credential'lar tushirilmaydi —
-        // fix faqat begona host'ga ta'sir qiladi.
+        // On a same-origin redirect, credentials are not dropped — the fix only
+        // affects a foreign host.
         let (port, h) = spawn_test_server(vec![
             "HTTP/1.1 302 Found\r\nLocation: /dest\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
                 .to_string(),
@@ -2809,30 +2813,30 @@ mod tests {
         let Ok(Value::Map(res)) =
             follow_get_with_credentials(format!("http://127.0.0.1:{}/start", port))
         else {
-            panic!("so'rov muvaffaqiyatli bo'lishi kerak edi");
+            panic!("request must have succeeded");
         };
         assert!(matches!(res.get("status"), Some(Value::Int(200))));
 
         let captured = h.join().unwrap();
         let req2 = captured[1].to_lowercase();
-        assert!(req2.contains("authorization: bearer sekret"));
-        assert!(req2.contains("x-api-key: kalit"));
+        assert!(req2.contains("authorization: bearer secret"));
+        assert!(req2.contains("x-api-key: key"));
     }
 
     #[test]
     fn https_connector_quriladi() {
-        // pooled_http_client https connectorni panic'siz quradi (rustls ring
-        // crypto provayder mavjud, webpki-roots yuklanadi). Bu tarmoqsiz ham
-        // ishlaydigan deterministik tekshiruv — HTTPS yo'lining qurilishini
-        // himoyalaydi (issue #14: faqat http:// emas, https:// ham).
+        // pooled_http_client builds the https connector without panicking (the
+        // rustls ring crypto provider is present, webpki-roots loads). A
+        // deterministic check that works without a network — guards that the
+        // HTTPS path builds (issue #14: not just http://, https:// too).
         let _client = pooled_http_client();
-        // clone() bir poolni qayta ishlatadi — yana panic bo'lmasin.
+        // clone() reuses one pool — there must be no panic again.
         let _client2 = pooled_http_client();
     }
 
     #[test]
     fn opts_default_no_follow() {
-        // Opsiya berilmasa redirect kuzatilmaydi, limit 10.
+        // If no options are given, redirects are not followed, limit 10.
         let o = parse_client_opts(None);
         assert!(!o.follow);
         assert_eq!(o.max, 10);
@@ -2850,7 +2854,7 @@ mod tests {
 
     #[test]
     fn opts_follow_falsey() {
-        // follow:false va follow:nil — ikkalasi ham kuzatishni yoqmaydi.
+        // follow:false and follow:nil — neither enables following.
         let mut m = BTreeMap::new();
         m.insert("follow".to_string(), Value::Bool(false));
         assert!(!parse_client_opts(Some(&Value::Map(m))).follow);
@@ -2858,9 +2862,12 @@ mod tests {
 
     #[test]
     fn opts_headers_parse_qiladi() {
-        // headers map'i str qiymatlar bilan o'qiladi (issue #34).
+        // The headers map is read with str values (issue #34).
         let mut hm = BTreeMap::new();
-        hm.insert("x-api-key".to_string(), Value::Str("sirli".to_string()));
+        hm.insert(
+            "x-api-key".to_string(),
+            Value::Str("secret-val".to_string()),
+        );
         hm.insert(
             "anthropic-version".to_string(),
             Value::Str("2023-06-01".to_string()),
@@ -2870,7 +2877,7 @@ mod tests {
         let o = parse_client_opts(Some(&Value::Map(m)));
         assert_eq!(
             o.headers.get("x-api-key").map(|s| s.as_str()),
-            Some("sirli")
+            Some("secret-val")
         );
         assert_eq!(
             o.headers.get("anthropic-version").map(|s| s.as_str()),
@@ -2880,7 +2887,7 @@ mod tests {
 
     #[test]
     fn opts_headers_str_bolmagan_qiymat_matnga_aylanadi() {
-        // str bo'lmagan qiymat (int) matn ko'rinishiga aylantiriladi; nil tashlanadi.
+        // A non-str value (int) is converted to its text form; nil is dropped.
         let mut hm = BTreeMap::new();
         hm.insert("x-count".to_string(), Value::Int(42));
         hm.insert("x-skip".to_string(), Value::Nil);
@@ -2893,15 +2900,15 @@ mod tests {
 
     #[test]
     fn opts_default_headers_bosh() {
-        // Opsiya berilmasa header'lar bo'sh.
+        // If no options are given, headers are empty.
         assert!(parse_client_opts(None).headers.is_empty());
     }
 
-    // --- klient timeout (issue #92) ---
+    // --- client timeout (issue #92) ---
 
     #[test]
     fn opts_default_timeout_30s() {
-        // Opsiya berilmasa default 30s timeout (qotgan upstream'ga qarshi himoya).
+        // If no options are given, a default 30s timeout (protection against a stuck upstream).
         let o = parse_client_opts(None);
         assert_eq!(
             o.timeout,
@@ -2911,7 +2918,7 @@ mod tests {
 
     #[test]
     fn opts_timeout_sozlanadi() {
-        // `{timeout: N}` — N soniya.
+        // `{timeout: N}` — N seconds.
         let mut m = BTreeMap::new();
         m.insert("timeout".to_string(), Value::Int(5));
         let o = parse_client_opts(Some(&Value::Map(m)));
@@ -2920,7 +2927,7 @@ mod tests {
 
     #[test]
     fn opts_timeout_nol_ochiradi() {
-        // `timeout: 0` (va manfiy) — timeout'siz (None). Faqat ishonchli upstream uchun.
+        // `timeout: 0` (and negative) — no timeout (None). Only for a trusted upstream.
         let mut m = BTreeMap::new();
         m.insert("timeout".to_string(), Value::Int(0));
         assert_eq!(parse_client_opts(Some(&Value::Map(m))).timeout, None);
@@ -2931,15 +2938,15 @@ mod tests {
 
     #[test]
     fn http_get_qotgan_upstream_timeout_qaytaradi() {
-        // Acceptance (issue #92): ulanishni qabul qilib JAVOB BERMAYDIGAN upstream
-        // butun thread'ni abadiy bloklamasligi kerak — qisqa timeout bilan xato
-        // qaytishi shart. Listener'ni ochamiz, ulanishni qabul qilamiz, lekin hech
-        // narsa yozmaymiz (slow/qotgan server taqlidi).
+        // Acceptance (issue #92): an upstream that accepts the connection but
+        // DOES NOT RESPOND must not block the whole thread forever — with a short
+        // timeout it must return an error. We open a listener, accept the
+        // connection, but write nothing (simulating a slow/stuck server).
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            // Ulanishni ushlab turamiz, javob yubormaymiz.
+            // Hold the connection, send no response.
             for stream in listener.incoming() {
                 let _held = stream;
                 std::thread::sleep(Duration::from_secs(10));
@@ -2953,16 +2960,16 @@ mod tests {
             Err(Flow::Error(msg)) => {
                 assert!(
                     msg.contains("timeout"),
-                    "timeout xatosi kutilgan, keldi: {}",
+                    "timeout error expected, got: {}",
                     msg
                 )
             }
-            Ok(_) => panic!("qotgan upstream'dan Ok kutilmagan — timeout bo'lishi kerak"),
-            Err(_) => panic!("Flow::Error(timeout) kutilgan"),
+            Ok(_) => panic!("Ok not expected from a stuck upstream — must be a timeout"),
+            Err(_) => panic!("Flow::Error(timeout) expected"),
         }
     }
 
-    // build_req'dan body Value'ni ajratib oluvchi yordamchi.
+    // Helper that extracts the body Value from build_req.
     fn body_of(bytes: &str, is_json: bool) -> Value {
         let v = build_req(
             "POST".into(),
@@ -2977,7 +2984,7 @@ mod tests {
         );
         match v {
             Value::Map(m) => m.get("body").cloned().unwrap(),
-            _ => panic!("build_req Map qaytarishi kerak"),
+            _ => panic!("build_req must return a Map"),
         }
     }
 
@@ -2988,45 +2995,45 @@ mod tests {
 
     #[test]
     fn content_type_json_parse_qiladi() {
-        // Content-Type JSON bo'lsa (eski xulq saqlangan).
+        // When Content-Type is JSON (old behavior preserved).
         assert!(matches!(body_of(r#"{"a":1}"#, true), Value::Map(_)));
     }
 
     #[test]
     fn content_type_yoq_lekin_obyekt_korinishida_parse_qiladi() {
-        // Asosiy tuzatish: Content-Type JSON bo'lmasa ham `{` bilan boshlansa parse.
+        // The main fix: even when Content-Type is not JSON, parse if it starts with `{`.
         assert!(matches!(body_of(r#"{"a":1}"#, false), Value::Map(_)));
     }
 
     #[test]
     fn content_type_yoq_lekin_royxat_korinishida_parse_qiladi() {
-        // `[` bilan boshlangan tana ham JSON deb urinish.
+        // A body starting with `[` is also tried as JSON.
         assert!(matches!(body_of("[1,2,3]", false), Value::List(_)));
     }
 
     #[test]
     fn boshidagi_boshliq_belgi_eotiborga_olinadi() {
-        // Old whitespace bo'lsa ham `{` aniqlanadi.
+        // `{` is detected even with leading whitespace.
         assert!(matches!(body_of("  \n {\"a\":1}", false), Value::Map(_)));
     }
 
     #[test]
     fn oddiy_matn_string_boladi() {
-        // JSON ko'rinishida bo'lmagan tana string bo'lib qoladi.
-        assert!(matches!(body_of("salom=dunyo", false), Value::Str(_)));
+        // A body that does not look like JSON stays a string.
+        assert!(matches!(body_of("hello=world", false), Value::Str(_)));
     }
 
     #[test]
     fn buzilgan_json_xom_matn_qoladi() {
-        // `{` bilan boshlanadi, lekin yaroqsiz JSON — string sifatida qoladi.
+        // Starts with `{` but invalid JSON — stays as a string.
         assert!(matches!(body_of("{buzuq", false), Value::Str(_)));
     }
 
-    // --- middleware prefiks mosligi (issue #67) ---
+    // --- middleware prefix matching (issue #67) ---
 
     #[test]
     fn prefix_yulduz_aniq_prefiks_mos() {
-        // "/api/*" → "/api" ning o'zi ham, ostidagilar ham mos.
+        // "/api/*" → both "/api" itself and anything under it match.
         assert!(prefix_matches("/api/*", "/api"));
         assert!(prefix_matches("/api/*", "/api/users"));
         assert!(prefix_matches("/api/*", "/api/v1/bookings"));
@@ -3034,8 +3041,8 @@ mod tests {
 
     #[test]
     fn prefix_yulduz_segment_chegarasi() {
-        // "/apix" "/api/*" ga MOS EMAS — prefiks segment chegarasida ajraladi
-        // (aks holda "/api" boshqa resurslarga sizib ketardi).
+        // "/apix" does NOT match "/api/*" — the prefix splits on a segment
+        // boundary (otherwise "/api" would leak to other resources).
         assert!(!prefix_matches("/api/*", "/apix"));
         assert!(!prefix_matches("/api/*", "/ap"));
         assert!(!prefix_matches("/api/*", "/"));
@@ -3043,7 +3050,7 @@ mod tests {
 
     #[test]
     fn prefix_yulduzsiz_aniq_mos() {
-        // "*"siz shablon — faqat aniq yo'l mosligi.
+        // A pattern without "*" — only exact path matching.
         assert!(prefix_matches("/api/v1/users", "/api/v1/users"));
         assert!(!prefix_matches("/api/v1/users", "/api/v1"));
         assert!(!prefix_matches("/api/v1/users", "/api/v1/users/5"));
@@ -3053,7 +3060,7 @@ mod tests {
 
     #[test]
     fn with_ctx_shared_cell_qoshadi() {
-        // with_ctx req map'iga "ctx" kalitini Value::Ctx sifatida qo'yadi.
+        // with_ctx puts the "ctx" key into the req map as a Value::Ctx.
         let cell = Arc::new(Mutex::new(BTreeMap::new()));
         let req = build_req(
             "GET".into(),
@@ -3068,16 +3075,16 @@ mod tests {
         );
         let req = with_ctx(req, cell.clone());
         let Value::Map(m) = &req else {
-            panic!("req Map bo'lishi kerak");
+            panic!("req must be a Map");
         };
         assert!(matches!(m.get("ctx"), Some(Value::Ctx(_))));
     }
 
     #[test]
     fn ctx_cell_klon_orqali_ulashiladi() {
-        // req klonlanganda ctx Arc ulashiladi — tashqaridan cell'ga yozsak,
-        // klon orqali ham ko'rinadi (middleware->handler oqimi shu mexanizmga
-        // tayanadi).
+        // When req is cloned the ctx Arc is shared — if we write to the cell from
+        // outside, it is visible through the clone too (the middleware->handler
+        // flow relies on this mechanism).
         let cell = Arc::new(Mutex::new(BTreeMap::new()));
         let req = with_ctx(
             build_req(
@@ -3094,28 +3101,28 @@ mod tests {
             cell.clone(),
         );
         let req_clone = req.clone();
-        // Tashqaridan cell'ga yozamiz (middleware `req.ctx <-` shuni qiladi).
+        // Write to the cell from outside (middleware `req.ctx <-` does this).
         cell.lock()
             .unwrap()
             .insert("tenant_id".to_string(), Value::Int(7));
-        // Klon orqali o'qiganda yangi qiymat ko'rinadi (Arc ulashilgani isboti).
+        // Reading through the clone shows the new value (proof the Arc is shared).
         let Value::Map(m) = &req_clone else {
             panic!("Map");
         };
         let Some(Value::Ctx(c)) = m.get("ctx") else {
             panic!("ctx cell");
         };
-        // Value Debug derive qilmaydi — equals bilan tekshiramiz (assert_eq emas).
+        // Value does not derive Debug — check with equals (not assert_eq).
         let got = c.lock().unwrap().get("tenant_id").cloned().unwrap();
-        assert!(got.equals(&Value::Int(7)), "ctx klon orqali yangilandi");
+        assert!(got.equals(&Value::Int(7)), "ctx updated through the clone");
     }
 
     #[test]
     fn ctx_self_equals_deadlock_qilmaydi() {
-        // `req == req` (yoki req klonini taqqoslash) — bir xil ctx Arc<Mutex>'ni
-        // ikki tomondan ko'radi. equals ikki lock'ni birga ushlamasligi kerak,
-        // aks holda non-reentrant mutex deadlock qiladi (Codex P2). Bu test
-        // o'sha yo'lni kechiradi: bloklanса hang qiladi, aks holda darrov o'tadi.
+        // `req == req` (or comparing a req clone) — sees the same ctx Arc<Mutex>
+        // from two sides. equals must not hold both locks at once, otherwise a
+        // non-reentrant mutex deadlocks (Codex P2). This test exercises that
+        // path: if it blocks it hangs, otherwise it passes immediately.
         let cell = Arc::new(Mutex::new(BTreeMap::new()));
         let req = with_ctx(
             build_req(
@@ -3132,29 +3139,26 @@ mod tests {
             cell,
         );
         let req_clone = req.clone();
-        // Map equality ctx kalitiga yetadi -> (Ctx,Ctx) bir xil Arc -> ptr_eq.
-        assert!(
-            req.equals(&req_clone),
-            "req o'z kloniga teng, deadlock yo'q"
-        );
-        assert!(req.equals(&req), "req o'ziga teng, deadlock yo'q");
+        // Map equality reaches the ctx key -> (Ctx,Ctx) same Arc -> ptr_eq.
+        assert!(req.equals(&req_clone), "req equals its clone, no deadlock");
+        assert!(req.equals(&req), "req equals itself, no deadlock");
     }
 
     #[test]
     fn is_resp_rep_javobni_taniydi() {
-        // rep -> {__resp:true ...}. Middleware shu javobni qaytarsa zanjir to'xtaydi.
+        // rep -> {__resp:true ...}. If middleware returns this response, the chain stops.
         let mut m = BTreeMap::new();
         m.insert("__resp".to_string(), Value::Bool(true));
         m.insert("status".to_string(), Value::Int(401));
         assert!(is_resp(&Value::Map(m)));
-        // Oddiy map yoki nil — javob emas (middleware davom etadi).
+        // A plain map or nil — not a response (middleware continues).
         assert!(!is_resp(&Value::Map(BTreeMap::new())));
         assert!(!is_resp(&Value::Nil));
     }
 
-    // --- custom header'lar (issue #16) ---
+    // --- custom headers (issue #16) ---
 
-    // `rep status body {headers}` natijasini taqlid qiluvchi __resp map.
+    // A __resp map mimicking the result of `rep status body {headers}`.
     fn resp_map(status: i64, body: Value, headers: Option<Value>) -> Value {
         let mut m = BTreeMap::new();
         m.insert("__resp".to_string(), Value::Bool(true));
@@ -3176,10 +3180,10 @@ mod tests {
 
     #[test]
     fn custom_content_type_body_standartini_bosadi() {
-        // str body standart "text/plain" beradi; custom content-type uni bosadi.
+        // A str body gives the default "text/plain"; a custom content-type overrides it.
         let r = value_to_response(resp_map(
             200,
-            Value::Str("<h1>Salom</h1>".into()),
+            Value::Str("<h1>Hello</h1>".into()),
             Some(hmap(&[("content-type", Value::Str("text/html".into()))])),
         ));
         assert_eq!(r.headers().get("content-type").unwrap(), "text/html");
@@ -3187,8 +3191,8 @@ mod tests {
 
     #[test]
     fn custom_header_nomi_lowercase_kanonik() {
-        // Content-Type (katta harf) berilsa ham kichik harfda saqlanadi
-        // (RFC 7230 — header nomi case-insensitive).
+        // Even if Content-Type (uppercase) is given, it is stored lowercase
+        // (RFC 7230 — header name is case-insensitive).
         let r = value_to_response(resp_map(
             200,
             Value::Nil,
@@ -3199,8 +3203,8 @@ mod tests {
 
     #[test]
     fn set_cookie_list_takror_sarlavha() {
-        // List qiymat → har element alohida Set-Cookie qatori (RFC 7230:
-        // Set-Cookie vergulli ro'yxat bilan birlashmaydi).
+        // A List value -> each element is a separate Set-Cookie line (RFC 7230:
+        // Set-Cookie does not merge into a comma list).
         let cookies = Value::List(vec![Value::Str("a=1".into()), Value::Str("b=2".into())]);
         let r = value_to_response(resp_map(
             200,
@@ -3215,8 +3219,8 @@ mod tests {
 
     #[test]
     fn redirect_location_plus_custom_header() {
-        // Eski `rep 302 {location:url}` xulqi + custom header birga ishlaydi
-        // (masalan redirect bilan birga Set-Cookie o'rnatish).
+        // The legacy `rep 302 {location:url}` behavior + a custom header work
+        // together (e.g. setting Set-Cookie alongside a redirect).
         let r = value_to_response(resp_map(
             302,
             hmap(&[("location", Value::Str("/dest".into()))]),
@@ -3229,68 +3233,68 @@ mod tests {
 
     #[test]
     fn notogri_status_500_ga_tushadi() {
-        // `rep 1000 ...` — yaroqsiz HTTP status. Jim 200 ga tushmasligi kerak
-        // (issue #108): handler xato status qaytarganda mijoz muvaffaqiyat
-        // ko'rmasin. 1000 HTTP diapazonidan tashqarida → 500.
-        let r = value_to_response(resp_map(1000, Value::Str("xato".into()), None));
+        // `rep 1000 ...` — an invalid HTTP status. Must not silently fall to 200
+        // (issue #108): when the handler returns a bad status the client must not
+        // see success. 1000 is out of the HTTP range -> 500.
+        let r = value_to_response(resp_map(1000, Value::Str("error".into()), None));
         assert_eq!(r.status().as_u16(), 500);
     }
 
     #[test]
     fn manfiy_status_500_ga_tushadi() {
-        // Manfiy status — yaroqsiz, 500 ga tushadi (issue #108), 200 ga emas.
+        // A negative status — invalid, falls to 500 (issue #108), not 200.
         let r = value_to_response(resp_map(-1, Value::Nil, None));
         assert_eq!(r.status().as_u16(), 500);
     }
 
     #[test]
     fn u16_wrap_status_500_ga_tushadi() {
-        // Code-review (PR #110): tekshiruv ASL i64 ustida bo'lmasa, `65736 as u16`
-        // 200 ga wrap bo'lib jim muvaffaqiyatga aldardi. Endi `checked_status`
-        // u16 cast'idan oldin diapazonni tekshiradi → 500.
+        // Code-review (PR #110): if the check is not on the ORIGINAL i64,
+        // `65736 as u16` wraps to 200 and fakes success silently. Now
+        // `checked_status` checks the range before the u16 cast -> 500.
         let r = value_to_response(resp_map(65736, Value::Str("ok".into()), None));
         assert_eq!(r.status().as_u16(), 500);
-        // 3xx diapazoniga wrap bo'ladigan manfiy qiymat ham (-65234 → 302) 500 ga.
+        // A negative value that wraps into the 3xx range too (-65234 -> 302) -> 500.
         let r2 = value_to_response(resp_map(-65234, Value::Nil, None));
         assert_eq!(r2.status().as_u16(), 500);
     }
 
     #[test]
     fn yaroqli_status_saqlanadi() {
-        // Yaroqli status (404) o'zgartirilmaydi — fix faqat buzuq statusга tegadi.
-        let r = value_to_response(resp_map(404, Value::Str("topilmadi".into()), None));
+        // A valid status (404) is not changed — the fix only touches a broken status.
+        let r = value_to_response(resp_map(404, Value::Str("not found".into()), None));
         assert_eq!(r.status().as_u16(), 404);
     }
 
     #[test]
     fn buzuq_header_jim_otkaziladi() {
-        // Yaroqsiz header qiymati (yangi qator) butun javobni buzmaydi —
-        // jim o'tkazib yuboriladi, qolgan header'lar o'rnatiladi.
+        // An invalid header value (a newline) does not break the whole response —
+        // it is silently skipped, the rest of the headers are set.
         let r = value_to_response(resp_map(
             200,
             Value::Nil,
             Some(hmap(&[
-                ("x-bad", Value::Str("yomon\nqiymat".into())),
-                ("x-good", Value::Str("yaxshi".into())),
+                ("x-bad", Value::Str("bad\nvalue".into())),
+                ("x-good", Value::Str("good".into())),
             ])),
         ));
         assert!(r.headers().get("x-bad").is_none());
-        assert_eq!(r.headers().get("x-good").unwrap(), "yaxshi");
+        assert_eq!(r.headers().get("x-good").unwrap(), "good");
     }
 
     #[tokio::test]
     async fn band_port_bind_xato_qaytaradi() {
-        // Port band bo'lsa bind `Err` qaytaradi (issue #108) — jim `return` emas.
-        // Avval portni egallaymiz (0 → OS bo'sh port tanlaydi), so'ng o'sha
-        // portga qayta bind urinamiz: aynan bir xil addr → EADDRINUSE.
+        // If the port is busy, bind returns `Err` (issue #108) — not a silent
+        // `return`. First we occupy a port (0 -> the OS picks a free one), then
+        // try to bind the same port again: the exact same addr -> EADDRINUSE.
         let Ok(occupied) = bind(0).await else {
-            panic!("bo'sh portga bind bo'lishi kerak");
+            panic!("bind to a free port must succeed");
         };
         let port = occupied.local_addr().unwrap().port();
         let res = bind(port).await;
         assert!(
             matches!(res, Err(Flow::Error(_))),
-            "band port → Err kutilgan"
+            "Err expected for a busy port"
         );
     }
 
@@ -3298,7 +3302,7 @@ mod tests {
 
     #[test]
     fn window_birligi_soniyaga_aylanadi() {
-        // Canonical to'plam: :sec/:min/:hr. Noma'lum birlik None.
+        // Canonical set: :sec/:min/:hr. An unknown unit is None.
         assert_eq!(window_to_secs("sec"), Some(1));
         assert_eq!(window_to_secs("min"), Some(60));
         assert_eq!(window_to_secs("hr"), Some(3600));
@@ -3307,67 +3311,67 @@ mod tests {
 
     #[test]
     fn limit_oyna_ichida_sanaydi_va_429_beradi() {
-        // limit=3 — dastlabki 3 so'rov o'tadi (None), 4-si bloklanadi (Some).
+        // limit=3 — the first 3 requests pass (None), the 4th is blocked (Some).
         let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         assert!(check_and_count(&state, "t1", 3, 3600).is_none());
         let retry = check_and_count(&state, "t1", 3, 3600);
-        assert!(retry.is_some(), "4-so'rov bloklanishi kerak");
-        // Retry-After oyna tugashigacha — [1, window_secs] oralig'ida.
+        assert!(retry.is_some(), "the 4th request must be blocked");
+        // Retry-After is until the window ends — in the range [1, window_secs].
         let r = retry.unwrap();
-        assert!((1..=3600).contains(&r), "Retry-After mantiqiy: {}", r);
+        assert!((1..=3600).contains(&r), "Retry-After is sensible: {}", r);
     }
 
     #[test]
     fn limit_kalitlar_alohida_sanaladi() {
-        // Har kalit (tenant/key) o'z hisobgichiga ega — biri tugasa boshqasiga ta'sir yo'q.
+        // Each key (tenant/key) has its own counter — exhausting one does not affect another.
         let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
-        assert!(check_and_count(&state, "a", 1, 3600).is_none()); // a: 1-chi o'tadi
-        assert!(check_and_count(&state, "a", 1, 3600).is_some()); // a: 2-chi bloklanadi
-        assert!(check_and_count(&state, "b", 1, 3600).is_none()); // b: alohida bucket, o'tadi
+        assert!(check_and_count(&state, "a", 1, 3600).is_none()); // a: 1st passes
+        assert!(check_and_count(&state, "a", 1, 3600).is_some()); // a: 2nd blocked
+        assert!(check_and_count(&state, "b", 1, 3600).is_none()); // b: separate bucket, passes
     }
 
     #[test]
     fn limit_yangi_oynada_tiklanadi() {
-        // window_secs=1 — bir soniya o'tgach yangi oyna, hisob nolga tushadi.
+        // window_secs=1 — after one second a new window, the count resets to zero.
         let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         assert!(check_and_count(&state, "k", 1, 1).is_none());
-        assert!(check_and_count(&state, "k", 1, 1).is_some()); // shu oynada tugadi
+        assert!(check_and_count(&state, "k", 1, 1).is_some()); // exhausted in this window
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(
             check_and_count(&state, "k", 1, 1).is_none(),
-            "yangi oynada hisob tiklanishi kerak"
+            "count must reset in a new window"
         );
     }
 
     #[test]
     fn limit_eski_oyna_kalitlari_tozalanadi() {
-        // Xotira cheksiz o'smasligi uchun (Codex review P2): foydalanuvchi
-        // nazoratidagi kalitlar yig'ilib qolmasin — eski oyna kalitlari sweep'da
-        // o'chadi. window_secs=1: "old"ni yozamiz, oyna o'tkazamiz, keyin
-        // SWEEP_EVERY operatsiya bilan sweep'ni ishga tushiramiz.
+        // So that memory does not grow without bound (Codex review P2):
+        // user-controlled keys must not pile up — old-window keys are removed in
+        // the sweep. window_secs=1: write "old", let the window pass, then trigger
+        // the sweep with SWEEP_EVERY operations.
         let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         check_and_count(&state, "old", 1000, 1);
-        std::thread::sleep(std::time::Duration::from_millis(1100)); // keyingi oyna
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // next window
         for _ in 0..SWEEP_EVERY {
             check_and_count(&state, "new", 1_000_000, 1);
         }
         let bucket = state.lock().unwrap();
         assert!(
             !bucket.counts.contains_key("old"),
-            "eski oyna kaliti tozalanishi kerak"
+            "old window key must be swept"
         );
         assert!(
             bucket.counts.contains_key("new"),
-            "joriy oyna kaliti qolishi kerak"
+            "current window key must remain"
         );
     }
 
     #[test]
     fn limit_parallel_atomik_sanaydi() {
-        // Acceptance: parallel request'lar ostida to'g'ri sanaydi (race yo'q).
-        // 16 thread x 50 urinish = 800; faqat limit=100 tasi o'tishi SHART.
+        // Acceptance: counts correctly under parallel requests (no race).
+        // 16 threads x 50 attempts = 800; exactly limit=100 of them MUST pass.
         use std::sync::atomic::{AtomicU32, Ordering};
         let state: LimitState = Arc::new(Mutex::new(LimitBucket::new()));
         let allowed = Arc::new(AtomicU32::new(0));
@@ -3389,13 +3393,13 @@ mod tests {
         assert_eq!(
             allowed.load(Ordering::SeqCst),
             100,
-            "aniq limit=100 so'rov o'tishi kerak (atomik sanash)"
+            "exactly limit=100 requests must pass (atomic counting)"
         );
     }
 
     #[test]
     fn fallback_kalit_ip_prefiksli() {
-        // Kalit nil bo'lganda req.ip ishlatiladi, "ip:" prefiksi bilan.
+        // When the key is nil, req.ip is used, with the "ip:" prefix.
         let req = with_ctx(
             build_req(
                 "GET".into(),
@@ -3415,7 +3419,7 @@ mod tests {
 
     #[test]
     fn req_ip_maydoni_mavjud() {
-        // build_req req.ip ni qo'yadi — foydalanuvchi `req.ip` o'qiy oladi.
+        // build_req sets req.ip — the user can read `req.ip`.
         let req = build_req(
             "GET".into(),
             "/".into(),
@@ -3432,11 +3436,11 @@ mod tests {
         };
         assert!(
             matches!(m.get("ip"), Some(Value::Str(s)) if s == "10.0.0.1"),
-            "req.ip o'rnatilishi kerak"
+            "req.ip must be set"
         );
     }
 
-    // --- query/path percent-dekod (issue #100) ---
+    // --- query/path percent-decode (issue #100) ---
 
     fn query_get(q: &str, key: &str) -> Option<String> {
         match parse_query(q) {
@@ -3450,7 +3454,7 @@ mod tests {
 
     #[test]
     fn percent_dekod_utf8_kirill() {
-        // `%D1%81...` -> "салом" (kirill UTF-8 baytlar to'g'ri yig'iladi).
+        // `%D1%81...` -> "салом" (Cyrillic UTF-8 bytes are assembled correctly).
         assert_eq!(
             percent_decode("%D1%81%D0%B0%D0%BB%D0%BE%D0%BC", false),
             "салом"
@@ -3459,15 +3463,15 @@ mod tests {
 
     #[test]
     fn percent_dekod_oddiy_belgi() {
-        // `%20` -> bo'shliq, `%2B` -> literal `+` (bo'shliqqa aylanmaydi).
+        // `%20` -> space, `%2B` -> literal `+` (does not become a space).
         assert_eq!(percent_decode("a%20b", false), "a b");
         assert_eq!(percent_decode("a%2Bb", false), "a+b");
     }
 
     #[test]
     fn percent_dekod_yaroqsiz_qoldiradi() {
-        // Yaroqsiz `%` ketma-ketligi (`%zz`) va satr oxiridagi `%` literal qoladi
-        // (panic yo'q).
+        // An invalid `%` sequence (`%zz`) and a `%` at the end of the string stay
+        // literal (no panic).
         assert_eq!(percent_decode("%zz", false), "%zz");
         assert_eq!(percent_decode("100%", false), "100%");
         assert_eq!(percent_decode("a%2", false), "a%2");
@@ -3475,9 +3479,8 @@ mod tests {
 
     #[test]
     fn percent_dekod_slash_keep_path_seps() {
-        // keep_path_seps=true: `%2F`/`%5C` (har ikki registr) xom qoladi, lekin
-        // boshqa baytlar (`%61` -> 'a') odatdagidek dekodlanadi. false bo'lsa
-        // (query) ular `/`/`\` ga aylanadi.
+        // keep_path_seps=true: `%2F`/`%5C` (both cases) stay raw, but other bytes
+        // (`%61` -> 'a') are decoded as usual. When false (query) they become `/`/`\`.
         assert_eq!(percent_decode("a%2Fb", true), "a%2Fb");
         assert_eq!(percent_decode("a%2fb", true), "a%2fb");
         assert_eq!(percent_decode("a%5Cb", true), "a%5Cb");
@@ -3496,7 +3499,7 @@ mod tests {
 
     #[test]
     fn query_plus_boshliq_va_percent() {
-        // `+` -> bo'shliq (form-encoding), `%20` ham bo'shliq.
+        // `+` -> space (form-encoding), `%20` is also a space.
         assert_eq!(
             query_get("name=John+Doe", "name").as_deref(),
             Some("John Doe")
@@ -3509,41 +3512,42 @@ mod tests {
 
     #[test]
     fn query_kalit_ham_dekod() {
-        // Kalitda ham non-ASCII bo'lishi mumkin — u ham dekod qilinadi.
+        // A key can contain non-ASCII too — it is decoded as well.
         assert_eq!(query_get("%D0%B0=1", "а").as_deref(), Some("1"));
     }
 
     #[test]
     fn path_param_percent_dekod() {
-        // `/users/:name` -> "/users/%D0%90%D0%BB%D0%B8" param "name" = "Али".
+        // `/users/:name` -> "/users/%D0%90%D0%BB%D0%B8" gives param "name" = "Али".
         let routes = vec![Route {
             method: "get".into(),
             pattern: parse_pattern("/users/:name"),
             handler: Value::Nil,
         }];
-        let (_r, params) = match_route(&routes, "get", "/users/%D0%90%D0%BB%D0%B8")
-            .expect("marshrut mos kelishi kerak");
+        let (_r, params) =
+            match_route(&routes, "get", "/users/%D0%90%D0%BB%D0%B8").expect("route must match");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "Али"));
     }
 
     #[test]
     fn path_param_encoded_slash_xom_qoladi() {
-        // "/users/a%2Fb" bitta segment sifatida ":name"ga mos keladi, lekin
-        // `%2F` dekod QILINMAYDI — param qiymatiga `/` kirmasin (segment
-        // invarianti; ID/yo'l komponenti deb ishlatuvchi handler ichki slash
-        // olmasin, codex revyu). Boshqa segmentdagi non-ASCII baribir dekodlanadi.
+        // "/users/a%2Fb" matches ":name" as a single segment, but `%2F` is NOT
+        // decoded — no `/` enters the param value (segment invariant; a handler
+        // using it as an ID/path component must not get an inner slash, codex
+        // review). Non-ASCII in another segment is still decoded.
         let routes = vec![Route {
             method: "get".into(),
             pattern: parse_pattern("/users/:name"),
             handler: Value::Nil,
         }];
-        let (_r, params) = match_route(&routes, "get", "/users/a%2Fb").expect("bir segment — mos");
+        let (_r, params) =
+            match_route(&routes, "get", "/users/a%2Fb").expect("one segment — match");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "a%2Fb"));
     }
 
     // --- CORS (issue #135) ---
 
-    // Standart sozlamalar bilan config — testlar faqat kerakli maydonni o'zgartiradi.
+    // A config with default settings — tests change only the field they need.
     fn cors_cfg(origins: Option<Vec<String>>, creds: bool) -> CorsConfig {
         CorsConfig {
             origins,
@@ -3554,26 +3558,26 @@ mod tests {
         }
     }
 
-    // HeaderMap'dan str qiymat oladi (yo'q bo'lsa None).
+    // Gets a str value from a HeaderMap (None if absent).
     fn hv(h: &hyper::HeaderMap, name: &str) -> Option<String> {
         h.get(name).map(|v| v.to_str().unwrap().to_string())
     }
 
     #[test]
     fn cors_wildcard_har_origin_uchun_star() {
-        // `http.cors "*"` — har qanday origin "*" oladi (creds yo'q).
+        // `http.cors "*"` — any origin gets "*" (no creds).
         let cfg = cors_cfg(None, false);
         let mut h = hyper::HeaderMap::new();
         cfg.apply_to(&mut h, Some("https://a.example.com"));
         assert_eq!(hv(&h, "access-control-allow-origin").as_deref(), Some("*"));
-        // "*" bilan Vary: Origin qo'shilmaydi (javob origin'ga bog'liq emas).
+        // With "*" no Vary: Origin is added (the response does not depend on origin).
         assert_eq!(hv(&h, "vary"), None);
     }
 
     #[test]
     fn cors_wildcard_creds_origin_aks_ettiradi() {
-        // `http.cors "*" {creds: true}` — brauzer "*" + credentials'ni rad etadi,
-        // shuning uchun so'rov origin'ini aks ettiramiz + Allow-Credentials.
+        // `http.cors "*" {creds: true}` — the browser rejects "*" + credentials,
+        // so we reflect the request origin + Allow-Credentials.
         let cfg = cors_cfg(None, true);
         let mut h = hyper::HeaderMap::new();
         cfg.apply_to(&mut h, Some("https://a.example.com"));
@@ -3585,13 +3589,13 @@ mod tests {
             hv(&h, "access-control-allow-credentials").as_deref(),
             Some("true")
         );
-        // Aniq origin aks ettirilganda Vary: Origin shart (kesh to'g'riligi).
+        // When a specific origin is reflected, Vary: Origin is required (cache correctness).
         assert_eq!(hv(&h, "vary").as_deref(), Some("Origin"));
     }
 
     #[test]
     fn cors_royxat_faqat_ruxsat_etilgan_origin() {
-        // Aniq ro'yxat — ruxsat etilgan origin aks ettiriladi.
+        // An explicit list — an allowed origin is reflected.
         let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
         let mut h = hyper::HeaderMap::new();
         cfg.apply_to(&mut h, Some("https://app.example.com"));
@@ -3604,8 +3608,8 @@ mod tests {
 
     #[test]
     fn cors_vary_mavjud_qiymatni_saqlaydi() {
-        // Handler `rep ... {vary:"Accept-Encoding"}` qo'ygan Vary'ni o'chirmasdan
-        // Origin'ni birlashtiramiz (codex P2: insert kesh kalitini buzardi).
+        // Without erasing a Vary the handler set with `rep ... {vary:"Accept-Encoding"}`,
+        // we merge in Origin (codex P2: insert clobbered the cache key).
         let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
         let mut h = hyper::HeaderMap::new();
         h.insert(hyper::header::VARY, "Accept-Encoding".parse().unwrap());
@@ -3615,19 +3619,19 @@ mod tests {
 
     #[test]
     fn cors_vary_takror_origin_qoshmaydi() {
-        // Vary allaqachon Origin bo'lsa — takror qo'shilmaydi (case-insensitive).
+        // If Vary already has Origin — it is not added again (case-insensitive).
         let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
         let mut h = hyper::HeaderMap::new();
         h.insert(hyper::header::VARY, "origin".parse().unwrap());
         cfg.apply_to(&mut h, Some("https://app.example.com"));
-        // Mavjud "origin" saqlanadi, ikkinchi marta qo'shilmaydi.
+        // The existing "origin" is preserved, not added a second time.
         assert_eq!(hv(&h, "vary").as_deref(), Some("origin"));
     }
 
     #[test]
     fn cors_royxat_tashqi_origin_rad() {
-        // Ro'yxatda yo'q origin — hech qanday CORS header qo'shilmaydi
-        // (brauzer so'rovni bloklaydi).
+        // An origin not in the list — no CORS header is added
+        // (the browser blocks the request).
         let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
         let mut h = hyper::HeaderMap::new();
         cfg.apply_to(&mut h, Some("https://evil.example.com"));
@@ -3636,8 +3640,8 @@ mod tests {
 
     #[test]
     fn cors_origin_yoq_royxat_bilan_header_qoshilmaydi() {
-        // Origin header'siz so'rov (masalan curl) — aniq ro'yxatda mos yo'q,
-        // CORS header qo'shilmaydi.
+        // A request without an Origin header (e.g. curl) — no match in the
+        // explicit list, no CORS header is added.
         let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
         let mut h = hyper::HeaderMap::new();
         cfg.apply_to(&mut h, None);
@@ -3646,7 +3650,7 @@ mod tests {
 
     #[test]
     fn cors_preflight_metod_va_header_qaytaradi() {
-        // OPTIONS preflight 204 + Allow-Methods/Headers/Max-Age qaytaradi.
+        // OPTIONS preflight returns 204 + Allow-Methods/Headers/Max-Age.
         let cfg = cors_cfg(None, false);
         let resp = cors_preflight_response(&cfg, Some("https://a.example.com"));
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -3665,8 +3669,8 @@ mod tests {
 
     #[test]
     fn cors_preflight_rad_etilgan_origin_header_qoshmaydi() {
-        // Ruxsat etilmagan origin'ga preflight 204 qaytaradi, lekin CORS
-        // header'larsiz — brauzer so'rovni bloklaydi (to'g'ri xulq).
+        // For a disallowed origin, preflight returns 204 but without CORS
+        // headers — the browser blocks the request (correct behavior).
         let cfg = cors_cfg(Some(vec!["https://app.example.com".into()]), false);
         let resp = cors_preflight_response(&cfg, Some("https://evil.example.com"));
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -3683,8 +3687,8 @@ mod tests {
 
     #[test]
     fn static_prefix_parse_va_moslik() {
-        // "/" -> bo'sh prefiks (hamma yo'lga mos); "/assets" segment chegarasida
-        // tekshiriladi — "/assetsx" mos EMAS.
+        // "/" -> empty prefix (matches all paths); "/assets" is checked on a
+        // segment boundary — "/assetsx" does NOT match.
         assert!(parse_static_prefix("/").is_empty());
         assert_eq!(parse_static_prefix("/assets"), segv(&["assets"]));
         assert_eq!(parse_static_prefix("/a/b/"), segv(&["a", "b"]));
@@ -3693,8 +3697,8 @@ mod tests {
         assert!(strip_mount_prefix(&pref, &segv(&["assets", "app.css"])).is_some());
         assert!(strip_mount_prefix(&pref, &segv(&["assets"])).is_some());
         assert!(strip_mount_prefix(&pref, &segv(&["assetsx", "a.css"])).is_none());
-        assert!(strip_mount_prefix(&pref, &segv(&["boshqa"])).is_none());
-        // Qolgan qism — prefiksdan keyingi fayl yo'li.
+        assert!(strip_mount_prefix(&pref, &segv(&["other"])).is_none());
+        // The remainder — the file path after the prefix.
         assert_eq!(
             strip_mount_prefix(&pref, &segv(&["assets", "img", "a.png"])).unwrap(),
             segv(&["img", "a.png"])
@@ -3703,10 +3707,10 @@ mod tests {
 
     #[test]
     fn static_safe_join_traversalni_bloklaydi() {
-        // Traversal himoyasi MAJBURIY (issue #134): "..", ".", bo'sh, mutlaq va
-        // backslash/NUL segmentlari rad etiladi — katalogdan tashqariga chiqib
-        // bo'lmaydi. Percent-dekod chaqiruvchida bo'ladi, shuning uchun bu yerga
-        // `%2e%2e` allaqachon ".." bo'lib keladi va shu tekshiruvga ilinadi.
+        // Traversal protection is MANDATORY (issue #134): "..", ".", empty,
+        // absolute, and backslash/NUL segments are rejected — you cannot escape
+        // the directory. Percent-decode happens in the caller, so `%2e%2e` already
+        // arrives here as ".." and is caught by this check.
         let dir = Path::new("/srv/public");
         assert!(safe_join(dir, &segv(&["..", "secret"])).is_none());
         assert!(safe_join(dir, &segv(&["a", "..", "b"])).is_none());
@@ -3715,16 +3719,16 @@ mod tests {
         assert!(safe_join(dir, &segv(&["a\\b"])).is_none());
         assert!(safe_join(dir, &segv(&["a\0b"])).is_none());
         assert!(safe_join(dir, &segv(&["/etc", "passwd"])).is_none());
-        // Oddiy nomlar — ulanadi.
+        // Plain names — joined.
         let p = safe_join(dir, &segv(&["img", "a.png"])).unwrap();
         assert_eq!(p, PathBuf::from("/srv/public/img/a.png"));
-        // Bo'sh rest (prefiksning o'zi so'ralgan) — katalogning o'zi.
+        // Empty rest (the prefix itself was requested) — the directory itself.
         assert_eq!(safe_join(dir, &[]).unwrap(), PathBuf::from("/srv/public"));
     }
 
     #[test]
     fn static_mime_kengaytmadan() {
-        // Content-Type kengaytmadan avtomatik; noma'lum -> octet-stream.
+        // Content-Type is automatic from the extension; unknown -> octet-stream.
         assert_eq!(
             mime_for(Path::new("a/index.html")),
             "text/html; charset=utf-8"
@@ -3739,14 +3743,14 @@ mod tests {
         assert_eq!(mime_for(Path::new("font.woff2")), "font/woff2");
         assert_eq!(mime_for(Path::new("data.bin")), "application/octet-stream");
         assert_eq!(
-            mime_for(Path::new("kengaytmasiz")),
+            mime_for(Path::new("noextension")),
             "application/octet-stream"
         );
     }
 
-    // So'rov yo'lini try_serve_static bilan bir xil qoidada segmentlarga
-    // ajratadi (percent-dekod, %2F xom qoladi) — resolve_static endi tayyor
-    // segmentlarni oladi (dekod chaqiruvchida, prefiks tekshiruvi bilan bitta).
+    // Splits the request path into segments by the same rule as try_serve_static
+    // (percent-decode, %2F stays raw) — resolve_static now takes ready segments
+    // (decoding in the caller, in one place with the prefix check).
     fn decode_segs(path: &str) -> Vec<String> {
         path_segments(path)
             .iter()
@@ -3756,13 +3760,13 @@ mod tests {
 
     #[tokio::test]
     async fn static_resolve_uzun_prefiks_yutadi() {
-        // "/" va "/assets" mount'lari birga: /assets/a.css uzunroq prefiksdagi
-        // papkadan olinadi (eng aniq mount ustun).
+        // "/" and "/assets" mounts together: /assets/a.css is served from the
+        // folder of the longer prefix (the most specific mount wins).
         let root = std::env::temp_dir().join("fluxon_static_unit_1");
         std::fs::create_dir_all(root.join("dist")).unwrap();
         std::fs::create_dir_all(root.join("public")).unwrap();
-        // Mount katalogi registratsiyada canonicalize qilinadi (http_static) —
-        // testda ham shunday, aks holda macOS'da /tmp symlink'i taqqoslashni buzadi.
+        // The mount directory is canonicalized at registration (http_static) —
+        // same in the test, otherwise the /tmp symlink on macOS breaks the comparison.
         let dist = std::fs::canonicalize(root.join("dist")).unwrap();
         let public = std::fs::canonicalize(root.join("public")).unwrap();
         std::fs::write(dist.join("a.css"), "dist css").unwrap();
@@ -3781,8 +3785,8 @@ mod tests {
                 spa: false,
             },
         ];
-        // /assets/a.css -> public (uzun prefiks), /a.css -> dist (root mount).
-        // len — metadata'dagi bayt soni (HEAD Content-Length shu bilan beriladi).
+        // /assets/a.css -> public (long prefix), /a.css -> dist (root mount).
+        // len — the byte count from metadata (HEAD Content-Length is given with it).
         let (p, mime, len) = resolve_static(&mounts, &decode_segs("/assets/a.css"))
             .await
             .unwrap();
@@ -3794,18 +3798,18 @@ mod tests {
             .unwrap();
         assert_eq!(p, dist.join("a.css"));
         assert_eq!(len, "dist css".len() as u64);
-        // Katalog so'ralganda index.html.
+        // When a directory is requested, index.html.
         let (p, mime, _) = resolve_static(&mounts, &decode_segs("/")).await.unwrap();
         assert_eq!(p, dist.join("index.html"));
         assert_eq!(mime, "text/html; charset=utf-8");
-        // Topilmagan yo'l — SPA fallback (root mount spa:true).
-        let (p, _, _) = resolve_static(&mounts, &decode_segs("/yo/q/sahifa"))
+        // A path not found — SPA fallback (root mount spa:true).
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/no/such/page"))
             .await
             .unwrap();
         assert_eq!(p, dist.join("index.html"));
-        // /assets ostida topilmagan fayl: assets mount spa emas, lekin root SPA
-        // mount prefiksi baribir mos — fallback unga tushadi.
-        let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/yoq.css"))
+        // A file not found under /assets: the assets mount is not spa, but the
+        // root SPA mount's prefix still matches — the fallback goes to it.
+        let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/none.css"))
             .await
             .unwrap();
         assert_eq!(p, dist.join("index.html"));
@@ -3821,7 +3825,7 @@ mod tests {
         std::fs::create_dir_all(root.join("public")).unwrap();
         let public = std::fs::canonicalize(root.join("public")).unwrap();
         std::fs::write(public.join("ok.txt"), "ok").unwrap();
-        std::fs::write(root.join("secret.txt"), "sir").unwrap();
+        std::fs::write(root.join("secret.txt"), "secret").unwrap();
 
         let mounts = vec![StaticMount {
             prefix: vec!["assets".to_string()],
@@ -3855,20 +3859,20 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn static_symlink_ildizdan_chiqsa_404() {
-        // Leksik himoya (safe_join) symlink'ni ko'rmaydi: papka ichidagi
-        // symlink ildizdan TASHQARI faylga ishora qilsa xizmat qilinmasligi
-        // kerak (codex P2 — canonicalize + ildiz tekshiruvi). Ildiz ICHIDAGI
-        // nishonga ishora qiluvchi symlink esa avvalgidek beriladi.
+        // The lexical guard (safe_join) does not see through symlinks: a
+        // symlink inside the dir pointing OUTSIDE the root must not be served
+        // (codex P2 — canonicalize + root check). A symlink pointing to a
+        // target INSIDE the root is still served as before.
         let root = std::env::temp_dir().join("fluxon_static_unit_3");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("public")).unwrap();
         let public = std::fs::canonicalize(root.join("public")).unwrap();
-        std::fs::write(root.join("secret.txt"), "MAXFIY").unwrap();
-        std::fs::write(public.join("ichki.txt"), "ichki").unwrap();
-        // Tashqariga ishora: public/evil.txt -> ../secret.txt
+        std::fs::write(root.join("secret.txt"), "SECRET").unwrap();
+        std::fs::write(public.join("inner.txt"), "inner").unwrap();
+        // Points outside: public/evil.txt -> ../secret.txt
         std::os::unix::fs::symlink(root.join("secret.txt"), public.join("evil.txt")).unwrap();
-        // Ichkariga ishora: public/alias.txt -> public/ichki.txt
-        std::os::unix::fs::symlink(public.join("ichki.txt"), public.join("alias.txt")).unwrap();
+        // Points inside: public/alias.txt -> public/inner.txt
+        std::os::unix::fs::symlink(public.join("inner.txt"), public.join("alias.txt")).unwrap();
 
         let mounts = vec![StaticMount {
             prefix: vec!["assets".to_string()],
@@ -3879,13 +3883,13 @@ mod tests {
             resolve_static(&mounts, &decode_segs("/assets/evil.txt"))
                 .await
                 .is_none(),
-            "ildizdan tashqariga symlink xizmat qilinmasligi kerak"
+            "a symlink pointing outside the root must not be served"
         );
         let (p, _, _) = resolve_static(&mounts, &decode_segs("/assets/alias.txt"))
             .await
-            .expect("ildiz ichidagi symlink ishlashi kerak");
-        // Canonical yo'l — symlink nishoni (haqiqiy fayl).
-        assert_eq!(p, public.join("ichki.txt"));
+            .expect("a symlink inside the root must work");
+        // Canonical path — the symlink target (the real file).
+        assert_eq!(p, public.join("inner.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

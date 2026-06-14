@@ -1,32 +1,34 @@
-// Fluxon ai battery — LLM birlamchi primitiv (Anthropic Claude + OpenAI GPT).
+// Fluxon ai battery — the LLM primitive (Anthropic Claude + OpenAI GPT).
 //
-// Til API (docs/fluxon-agent.md):
-//   txt = ai.ask "savol ${x}"                         # -> matn (str)
+// Language API (docs/fluxon-agent.md):
+//   txt = ai.ask "savol ${x}"                         # -> text (str)
 //   r   = ai.json "extract: ${t}" {intent::a items:[...]}   # -> map + r._ metadata
-//   r   = ai.run msgs tools                           # tool-loop'ning BIR qadami
+//   r   = ai.run msgs tools                           # ONE step of the tool-loop
 //
-// Metadata (`ai.json` natijasidagi `_` maydoni):
-//   r._.conf   (0..1)   — modelning ishonchi (stop/finish_reason'dan baholangan)
-//   r._.tokens (int)    — input+output token yig'indisi
-//   r._.cost   (flt)    — taxminiy narx (USD), modelning narx jadvalidan
-//   r._.ms     (int)    — so'rov davomiyligi millisekundda
+// Metadata (the `_` field in the `ai.json` result):
+//   r._.conf   (0..1)   — the model's confidence (estimated from stop/finish_reason)
+//   r._.tokens (int)    — sum of input+output tokens
+//   r._.cost   (flt)    — estimated cost (USD), from the model's price table
+//   r._.ms     (int)    — request duration in milliseconds
 //
-// Falsafa: "til AI'ga moslashadi". `ai.run` AYNAN bitta qadam qaytaradi (tool'ni
-// O'ZI bajarmaydi) — loop foydalanuvchi qo'lida bo'lsin (log/narx/tasdiq nazorati).
-// Tool'ni `reg.call` orqali Fluxon tomonda chaqirasiz, natijani msgs'ga qo'shasiz.
+// Philosophy: "the language adapts to AI". `ai.run` returns EXACTLY one step
+// (it does NOT run the tool itself) — the loop stays in the user's hands
+// (log/cost/approval control). You call the tool on the Fluxon side via
+// `reg.call` and append the result to msgs.
 //
-// PROVAYDER AUTO-DETECT (Fluxon foydalanuvchisi hech narsa sozlamaydi):
-//   - `.env`/muhitda ANTHROPIC_API_KEY bo'lsa -> Claude (default claude-opus-4-8)
-//   - OPENAI_API_KEY bo'lsa -> GPT (default gpt-4o)
-//   - Ikkalasi bo'lsa Anthropic ustun. Override: $AI_PROVIDER (anthropic|openai).
-//   - $AI_KEY — provayderdan qat'i nazar umumiy override kalit.
-//   - Model: $AI_MODEL ?? provayder default.
-// Ichki shakl Anthropic Messages shaklida quriladi; OpenAI uchun chaqiruvdan
-// oldin Chat Completions shakliga avtomatik aylantiriladi (msgs/tools/javob).
+// PROVIDER AUTO-DETECT (the Fluxon user configures nothing):
+//   - if ANTHROPIC_API_KEY is in `.env`/the environment -> Claude (default claude-opus-4-8)
+//   - if OPENAI_API_KEY -> GPT (default gpt-4o)
+//   - if both, Anthropic wins. Override: $AI_PROVIDER (anthropic|openai).
+//   - $AI_KEY — a generic override key regardless of provider.
+//   - Model: $AI_MODEL ?? provider default.
+// The internal shape is built in the Anthropic Messages form; for OpenAI it is
+// automatically converted to the Chat Completions form before the call
+// (msgs/tools/response).
 //
-// Rasmiy Rust SDK yo'q -> raw https POST (`http` battery klient/pool'ini qayta
-// ishlatadi). Holatsiz battery: env o'qiydi + POST yuboradi. Lekin kalitni
-// `env_lookup` orqali olish uchun Interp'ga muhtoj -> `ai_dispatch` `&self` metodi.
+// There is no official Rust SDK -> raw https POST (reuses the `http` battery's
+// client/pool). Stateless battery: reads env + sends a POST. But it needs
+// Interp to fetch the key via `env_lookup` -> the `ai_dispatch` `&self` method.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -47,21 +49,21 @@ const ANTHROPIC_DEFAULT_MODEL: &str = "claude-opus-4-8";
 const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o";
 
-// Javob uzunligi cheki. Token-hisoblash xavfsizligi uchun yetarli, lekin
-// cheksiz emas. Foydalanuvchi `ai.ask`/`ai.json` semantikasini sodda saqlash
-// uchun hozircha sozlanmaydigan (kelajakda opts orqali ochilishi mumkin).
+// Response length limit. Enough for token-budget safety, but not unbounded.
+// To keep `ai.ask`/`ai.json` semantics simple it is not configurable for now
+// (may be exposed via opts in the future).
 const MAX_TOKENS: i64 = 4096;
 
-// LLM so'rovi standart timeout'i (issue #92). Timeout'siz qotgan LLM endpoint
-// butun skriptni (yoki HTTP handler ichida chaqirilsa, o'sha request thread'ini)
-// ABADIY bloklaydi. LLM javoblari sekin bo'lishi mumkin, shuning uchun klientdan
-// (30s) kattaroq: default 120s. `$AI_TIMEOUT` (soniya) bilan sozlanadi; 0 yoki
-// manfiy — timeout'siz.
+// Default timeout for an LLM request (issue #92). Without a timeout, a stuck
+// LLM endpoint would block the whole script FOREVER (or, when called inside an
+// HTTP handler, that request thread). LLM responses can be slow, so it is
+// larger than the client's (30s): default 120s. Configured with `$AI_TIMEOUT`
+// (seconds); 0 or negative — no timeout.
 const DEFAULT_AI_TIMEOUT_SECS: u64 = 120;
 
-// Qo'llab-quvvatlanadigan LLM provayderlari. Battery O'ZI aniqlaydi (auto) —
-// Fluxon foydalanuvchisi hech narsa sozlamaydi: `.env`da standart provayder kaliti
-// (ANTHROPIC_API_KEY / OPENAI_API_KEY) bo'lsa kifoya.
+// Supported LLM providers. The battery detects it ITSELF (auto) — the Fluxon
+// user configures nothing: a standard provider key in `.env`
+// (ANTHROPIC_API_KEY / OPENAI_API_KEY) is enough.
 #[derive(Clone, Copy, PartialEq)]
 enum Provider {
     Anthropic,
@@ -77,7 +79,7 @@ impl Provider {
     }
 }
 
-// Aniqlangan provayder + kalit + model (auto-detect natijasi).
+// Detected provider + key + model (the auto-detect result).
 struct AiConfig {
     provider: Provider,
     key: String,
@@ -91,11 +93,11 @@ impl Interp {
             "ask" => self.ai_ask(args),
             "json" => self.ai_json(args),
             "run" => self.ai_run(args),
-            _ => Err(Flow::err(format!("ai.{} yo'q (ask/json/run)", func))),
+            _ => Err(Flow::err(format!("ai.{} not found (ask/json/run)", func))),
         }
     }
 
-    // env'dan qiymat oladi (OS env > .env), bo'sh bo'lmasa Some.
+    // Fetches a value from env (OS env > .env), Some if non-empty.
     fn ai_env(&self, name: &str) -> Option<String> {
         match self.env_lookup(name) {
             Value::Str(s) if !s.is_empty() => Some(s),
@@ -103,64 +105,63 @@ impl Interp {
         }
     }
 
-    // LLM so'rovi timeout'i: $AI_TIMEOUT (soniya) ?? default 120s. Issue #92:
-    // qotgan endpoint thread'ni abadiy bloklamasin.
+    // LLM request timeout: $AI_TIMEOUT (seconds) ?? default 120s. Issue #92:
+    // a stuck endpoint must not block the thread forever.
     fn ai_timeout(&self) -> Option<Duration> {
         resolve_ai_timeout(self.ai_env("AI_TIMEOUT").as_deref())
     }
 
-    // Provayder + kalit + modelni AVTOMATIK aniqlaydi. Hech narsa majburiy emas —
-    // tartib:
-    //   1) $AI_PROVIDER (anthropic|openai) override bo'lsa, o'sha provayder kaliti.
-    //   2) Aks holda mavjud standart kalitdan provayder aniqlanadi:
+    // AUTO-detects provider + key + model. Nothing is mandatory — the order:
+    //   1) if $AI_PROVIDER (anthropic|openai) overrides, that provider's key.
+    //   2) otherwise the provider is detected from the available standard key:
     //        ANTHROPIC_API_KEY -> Anthropic,  OPENAI_API_KEY -> OpenAI.
-    //   3) $AI_KEY — provayderdan qat'i nazar umumiy override kalit.
-    // Model: $AI_MODEL ?? provayder default.
+    //   3) $AI_KEY — a generic override key regardless of provider.
+    // Model: $AI_MODEL ?? provider default.
     fn ai_config(&self) -> Result<AiConfig, Flow> {
         let anthropic = self.ai_env("ANTHROPIC_API_KEY");
         let openai = self.ai_env("OPENAI_API_KEY");
         let generic = self.ai_env("AI_KEY");
         let forced = self.ai_env("AI_PROVIDER").map(|p| p.to_lowercase());
 
-        // Provayderni aniqlaymiz.
+        // Determine the provider.
         let provider = match forced.as_deref() {
             Some("anthropic") | Some("claude") => Provider::Anthropic,
             Some("openai") | Some("gpt") => Provider::OpenAI,
             Some(other) => {
                 return Err(Flow::err(format!(
-                    "ai: noma'lum $AI_PROVIDER '{}' (anthropic|openai)",
+                    "ai: unknown $AI_PROVIDER '{}' (anthropic|openai)",
                     other
                 )));
             }
-            // Override yo'q -> mavjud standart kalitdan aniqlaymiz. Anthropic ustun
-            // (loyiha Claude'ga yo'naltirilgan), keyin OpenAI.
+            // No override -> detect from the available standard key. Anthropic
+            // wins (the project is oriented toward Claude), then OpenAI.
             None => {
                 if anthropic.is_some() {
                     Provider::Anthropic
                 } else if openai.is_some() {
                     Provider::OpenAI
                 } else if generic.is_some() {
-                    // Faqat $AI_KEY bo'lsa va provayder ko'rsatilmagan bo'lsa,
-                    // Anthropic deb faraz qilamiz (loyiha default'i).
+                    // If only $AI_KEY is set and no provider is given, we assume
+                    // Anthropic (the project default).
                     Provider::Anthropic
                 } else {
                     return Err(Flow::err(
-                        "ai: API kaliti topilmadi — .env yoki muhitda \
-                         ANTHROPIC_API_KEY yoki OPENAI_API_KEY belgilang"
+                        "ai: API key not found — set ANTHROPIC_API_KEY or \
+                         OPENAI_API_KEY in .env or the environment"
                             .to_string(),
                     ));
                 }
             }
         };
 
-        // Kalitni provayderga mos tanlaymiz. $AI_KEY har doim eng ustun override.
+        // Pick the key matching the provider. $AI_KEY is always the top override.
         let provider_key = match provider {
             Provider::Anthropic => anthropic,
             Provider::OpenAI => openai,
         };
         let key = generic.or(provider_key).ok_or_else(|| {
             Flow::err(format!(
-                "ai: {} kaliti topilmadi (${} yoki $AI_KEY belgilang)",
+                "ai: {} key not found (set ${} or $AI_KEY)",
                 provider_name(provider),
                 provider_key_name(provider),
             ))
@@ -177,12 +178,12 @@ impl Interp {
         })
     }
 
-    // ai.ask "savol" -> javob matni (str).
-    // Bitta user xabar yuboradi, birinchi text blokini qaytaradi.
+    // ai.ask "savol" -> response text (str).
+    // Sends a single user message, returns the first text block.
     fn ai_ask(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let prompt = match args.first() {
             Some(Value::Str(s)) => s.clone(),
-            _ => return Err(Flow::err("ai.ask: savol (str) kerak".to_string())),
+            _ => return Err(Flow::err("ai.ask: question (str) required".to_string())),
         };
         let messages = vec![user_msg(&prompt)];
         let resp = self.call_api(&messages, None, None)?;
@@ -190,41 +191,41 @@ impl Interp {
     }
 
     // ai.json "prompt" {schema} -> map (+ `_` metadata).
-    // Schema map'ini prompt'ga qo'shib, modeldan FAQAT JSON so'raymiz; javobni
-    // map'ga parse qilamiz va `_` (metadata) maydonini qo'shamiz.
+    // We add the schema map to the prompt and ask the model for ONLY JSON; we
+    // parse the response into a map and add the `_` (metadata) field.
     fn ai_json(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let prompt = match args.first() {
             Some(Value::Str(s)) => s.clone(),
-            _ => return Err(Flow::err("ai.json: prompt (str) kerak".to_string())),
+            _ => return Err(Flow::err("ai.json: prompt (str) required".to_string())),
         };
         let schema = match args.get(1) {
             Some(v @ (Value::Map(_) | Value::List(_))) => v.clone(),
-            _ => return Err(Flow::err("ai.json: schema (map/list) kerak".to_string())),
+            _ => return Err(Flow::err("ai.json: schema (map/list) required".to_string())),
         };
 
-        // Modelga aniq ko'rsatma: berilgan shaklga MOS faqat JSON qaytar.
-        // System prompt sof JSON majburlaydi (prefill 4.6+ da 400 beradi).
+        // Explicit instruction to the model: return only JSON MATCHING the given
+        // shape. The system prompt forces pure JSON (prefill gives a 400 on 4.6+).
         let system = format!(
-            "Javobni QAT'IY shu JSON shakliga mos qaytar. Faqat JSON, izoh/matn YO'Q.\nShakl: {}",
+            "Return the response STRICTLY matching this JSON shape. JSON only, NO comments/text.\nShape: {}",
             json_encode(&schema)
         );
         let messages = vec![user_msg(&prompt)];
         let resp = self.call_api(&messages, Some(&system), None)?;
 
-        // Javob matnini map'ga parse qilamiz. Model ba'zan ```json ... ``` o'rab
-        // qaytaradi — kod blokini tozalaymiz.
+        // Parse the response text into a map. The model sometimes wraps it in
+        // ```json ... ``` — we strip the code fence.
         let cleaned = strip_code_fence(&resp.text);
         let mut parsed = match json_decode(&cleaned) {
             Ok(Value::Map(m)) => m,
             Ok(other) => {
-                // JSON bo'lsa-yu map bo'lmasa (masalan list) — `value` ostiga joylaymiz.
+                // If it is JSON but not a map (for example a list) — place it under `value`.
                 let mut m = BTreeMap::new();
                 m.insert("value".to_string(), other);
                 m
             }
             Err(_) => {
                 return Err(Flow::err(format!(
-                    "ai.json: model JSON qaytarmadi: {}",
+                    "ai.json: model did not return JSON: {}",
                     truncate(&resp.text, 200)
                 )));
             }
@@ -233,30 +234,30 @@ impl Interp {
         Ok(Value::Map(parsed))
     }
 
-    // ai.run msgs tools -> tool-loop'ning BIR qadami.
-    //   msgs:  [{role::user content:str} ...]  (role sym yoki str)
-    //   tools: [{name desc params} ...]        (params — JSON-schema map)
-    // Natija (kind nomi spec'dan — docs/fluxon-human.md):
+    // ai.run msgs tools -> ONE step of the tool-loop.
+    //   msgs:  [{role::user content:str} ...]  (role sym or str)
+    //   tools: [{name desc params} ...]        (params — a JSON-schema map)
+    // Result (the kind names are from the spec — docs/fluxon-human.md):
     //   :final -> {kind::final text:str}
     //   :call  -> {kind::call tool:str args:map id:str calls:[{tool args id} ...]}
-    // Model parallel bir nechta tool chaqirsa, hammasi `calls` ro'yxatida bo'ladi
-    // (har biriga tool_result qaytarish kerak). `tool`/`args`/`id` esa orqaga
-    // moslik uchun birinchi chaqiruv — `calls`'ning [0] elementi bilan bir xil.
-    // (tool'ni O'ZI bajarmaydi — loop foydalanuvchi qo'lida.)
+    // If the model calls several tools in parallel, all are in the `calls` list
+    // (each needs a tool_result returned). `tool`/`args`/`id` are the first call,
+    // for backward compatibility — identical to the [0] element of `calls`.
+    // (it does NOT run the tool itself — the loop is in the user's hands.)
     fn ai_run(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let msgs = match args.first() {
             Some(Value::List(l)) => l.clone(),
-            _ => return Err(Flow::err("ai.run: msgs (list) kerak".to_string())),
+            _ => return Err(Flow::err("ai.run: msgs (list) required".to_string())),
         };
         let tools = match args.get(1) {
             Some(Value::List(l)) => Some(l.clone()),
             None | Some(Value::Nil) => None,
-            _ => return Err(Flow::err("ai.run: tools (list) bo'lishi kerak".to_string())),
+            _ => return Err(Flow::err("ai.run: tools (list) must be a list".to_string())),
         };
 
-        // msgs Fluxon shaklidan Anthropic shakliga: {role content} -> {role, content}.
-        // role sym (:user) yoki str ("user") bo'lishi mumkin. tool natijasi
-        // xabari ({role::tool name content}) ham o'tkaziladi.
+        // msgs from the Fluxon shape to the Anthropic shape: {role content} -> {role, content}.
+        // role may be a sym (:user) or str ("user"). The tool-result message
+        // ({role::tool name content}) is also converted.
         let api_msgs: Vec<Value> = msgs.iter().map(normalize_msg).collect();
 
         let api_tools = tools
@@ -267,7 +268,7 @@ impl Interp {
         let mut out = BTreeMap::new();
         if !resp.tool_calls.is_empty() {
             out.insert("kind".to_string(), Value::Sym("call".to_string()));
-            // Har chaqiruvni {tool args id} map'ga aylantiramiz.
+            // Convert each call to a {tool args id} map.
             let calls: Vec<Value> = resp
                 .tool_calls
                 .iter()
@@ -279,7 +280,7 @@ impl Interp {
                     Value::Map(c)
                 })
                 .collect();
-            // Orqaga moslik: birinchi chaqiruv top-level `tool`/`args`/`id`.
+            // Backward compatibility: the first call as top-level `tool`/`args`/`id`.
             let (tool, input, id) = &resp.tool_calls[0];
             out.insert("tool".to_string(), Value::Str(tool.clone()));
             out.insert("args".to_string(), input.clone());
@@ -292,9 +293,9 @@ impl Interp {
         Ok(Value::Map(out))
     }
 
-    // Provayderga mos POST so'rov. messages — Fluxon normalize qilingan list;
-    // system/tools opsional. Provayder auto-detect qilinadi, request/response
-    // formati ham provayderga qarab tanlanadi.
+    // A POST request matching the provider. messages — a Fluxon-normalized
+    // list; system/tools optional. The provider is auto-detected, and the
+    // request/response format is chosen by provider too.
     fn call_api(
         &self,
         messages: &[Value],
@@ -308,8 +309,8 @@ impl Interp {
         }
     }
 
-    // Anthropic /v1/messages: system top-level, x-api-key header, tools shakli
-    // {name description input_schema}, content bloklar massivi.
+    // Anthropic /v1/messages: system at top-level, x-api-key header, tools in
+    // the {name description input_schema} shape, content an array of blocks.
     fn call_anthropic(
         &self,
         cfg: &AiConfig,
@@ -337,9 +338,9 @@ impl Interp {
         parse_anthropic(&text, &cfg.model, ms)
     }
 
-    // OpenAI /v1/chat/completions: system — messages ichida {role:system},
-    // Authorization: Bearer, tools shakli {type:function function:{...}},
-    // javob choices[0].message.{content|tool_calls}.
+    // OpenAI /v1/chat/completions: system as {role:system} within messages,
+    // Authorization: Bearer, tools in the {type:function function:{...}} shape,
+    // response choices[0].message.{content|tool_calls}.
     fn call_openai(
         &self,
         cfg: &AiConfig,
@@ -347,7 +348,7 @@ impl Interp {
         system: Option<&str>,
         tools: Option<&Vec<Value>>,
     ) -> Result<AiResp, Flow> {
-        // OpenAI'da system alohida emas — messages boshiga {role:system} qo'shamiz.
+        // In OpenAI system is not separate — we prepend {role:system} to messages.
         let mut oa_msgs: Vec<Value> = Vec::new();
         if let Some(sys) = system {
             let mut m = BTreeMap::new();
@@ -362,8 +363,8 @@ impl Interp {
         body.insert("max_tokens".to_string(), Value::Int(MAX_TOKENS));
         body.insert("messages".to_string(), Value::List(oa_msgs));
         if let Some(t) = tools {
-            // Anthropic tool shaklini ({name description input_schema}) OpenAI
-            // function shakliga aylantiramiz.
+            // Convert the Anthropic tool shape ({name description input_schema})
+            // to the OpenAI function shape.
             let oa_tools: Vec<Value> = t.iter().map(anthropic_tool_to_openai).collect();
             body.insert("tools".to_string(), Value::List(oa_tools));
         }
@@ -377,16 +378,16 @@ impl Interp {
     }
 }
 
-// Umumiy https POST (content-type: json). `add_headers` provayderga xos
-// autentifikatsiya/versiya header'larini qo'shadi. Javob matni + davomiyligini
-// (ms) qaytaradi; non-2xx -> aniq xato.
+// Generic https POST (content-type: json). `add_headers` adds the
+// provider-specific authentication/version headers. Returns the response text
+// + duration (ms); non-2xx -> explicit error.
 //
-// Vaqtinchalik xatolarda (429 rate-limit / 529 overloaded) BIR marta qayta
-// urinish (issue #92 bonus): LLM API'lari qisqa yuk cho'qqilarida shu
-// statuslarni qaytaradi — bitta backoff'li retry barqarorlikni sezilarli
-// oshiradi, cheksiz loop xavfisiz. Timeout har urinishga alohida qo'llanadi
-// (eng yomon holat: 2 urinish + backoff). Shu sababli `add_headers` Fn
-// (FnOnce emas) — retry'da so'rov qaytadan quriladi.
+// On transient errors (429 rate-limit / 529 overloaded) it retries ONCE (issue
+// #92 bonus): LLM APIs return these statuses during short load spikes — a
+// single retry with backoff improves stability noticeably, with no risk of an
+// infinite loop. The timeout is applied to each attempt separately (worst
+// case: 2 attempts + backoff). That is why `add_headers` is an Fn (not FnOnce)
+// — the request is rebuilt on retry.
 fn post_json<F>(
     url: &str,
     body: String,
@@ -401,7 +402,7 @@ where
     let text = client_runtime().block_on(async move {
         let mut retried = false;
         loop {
-            // Bitta urinish (yuborish + javob o'qish) — timeout shu blokni qamraydi.
+            // A single attempt (send + read response) — the timeout covers this block.
             let work = async {
                 let builder = Request::builder()
                     .method("POST")
@@ -410,15 +411,15 @@ where
                 let builder = add_headers(builder);
                 let req = builder
                     .body(Full::new(Bytes::from(body.clone())))
-                    .map_err(|e| Flow::err(format!("ai: so'rov qurish: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("ai: building request: {}", e)))?;
 
                 let resp = pooled_http_client()
                     .request(req)
                     .await
-                    .map_err(|e| Flow::err(format!("ai: tarmoq xatosi: {}", e)))?;
+                    .map_err(|e| Flow::err(format!("ai: network error: {}", e)))?;
                 let status = resp.status().as_u16();
-                // Retry-After'ni tana o'qilishidan OLDIN olamiz (into_body resp'ni
-                // yutadi) — server bergan kutish vaqti backoff'da ishlatiladi.
+                // Read Retry-After BEFORE consuming the body (into_body consumes
+                // resp) — the server's wait time is used in backoff.
                 let retry_after = resp
                     .headers()
                     .get("retry-after")
@@ -428,20 +429,21 @@ where
                     .into_body()
                     .collect()
                     .await
-                    .map_err(|e| Flow::err(format!("ai: javob o'qish: {}", e)))?
+                    .map_err(|e| Flow::err(format!("ai: reading response: {}", e)))?
                     .to_bytes();
                 let text = String::from_utf8_lossy(&bytes).to_string();
                 Ok::<_, Flow>((status, retry_after, text))
             };
 
-            // Timeout o'rnatilgan bo'lsa urinishni unga o'raymiz; tugamasa aniq
-            // xato (qotgan LLM endpoint thread'ni abadiy bloklamasin — issue #92).
+            // If a timeout is set, wrap the attempt in it; if it does not finish,
+            // an explicit error (a stuck LLM endpoint must not block the thread
+            // forever — issue #92).
             let (status, retry_after, text) = match timeout {
                 Some(dur) => match tokio::time::timeout(dur, work).await {
                     Ok(r) => r?,
                     Err(_) => {
                         return Err(Flow::err(format!(
-                            "ai: so'rov timeout ({} sek ichida javob yo'q)",
+                            "ai: request timeout (no response within {} sec)",
                             dur.as_secs()
                         )));
                     }
@@ -458,7 +460,7 @@ where
                 continue;
             }
             return Err(Flow::err(format!(
-                "ai: API xatosi (status {}): {}",
+                "ai: API error (status {}): {}",
                 status,
                 truncate(&text, 300)
             )));
@@ -468,39 +470,39 @@ where
     Ok((text, ms))
 }
 
-// 429 (rate limit) va 529 (Anthropic overloaded) — vaqtinchalik holatlar: bir
-// marta qayta urinish o'rinli (issue #92 bonus). Boshqa 4xx/5xx (401 noto'g'ri
-// kalit, 400 yaroqsiz so'rov...) qayta urinishdan tuzalmaydi — darhol xato.
+// 429 (rate limit) and 529 (Anthropic overloaded) — transient states: a single
+// retry is worthwhile (issue #92 bonus). Other 4xx/5xx (401 wrong key, 400
+// invalid request...) will not recover from a retry — error immediately.
 fn should_retry_status(status: u16) -> bool {
     matches!(status, 429 | 529)
 }
 
-// Retry oldidan kutish: server `Retry-After` (soniya) bergan bo'lsa unga amal
-// qilamiz — lekin 1..=30 ga qisqartirilgan (handler thread'ini juda uzoq
-// ushlamaslik uchun); header bo'lmasa default 2s.
+// Wait before retry: if the server gave `Retry-After` (seconds) we honor it —
+// but clamped to 1..=30 (so as not to hold the handler thread too long); if
+// there is no header, default 2s.
 fn retry_backoff(retry_after: Option<u64>) -> Duration {
     Duration::from_secs(retry_after.map(|s| s.clamp(1, 30)).unwrap_or(2))
 }
 
-// --- Javob parse ---
+// --- Response parsing ---
 
-// Anthropic javobidan kerakli qismlar.
+// The parts we need from the Anthropic response.
 struct AiResp {
     text: String,
-    // (tool_name, input_map, tool_use_id) — model tool chaqirmoqchi bo'lsa.
-    // Vec: model bitta javobda BIR NECHTA tool'ni parallel chaqirishi mumkin —
-    // hammasini yig'amiz, aks holda yo'qolgan tool_use_id keyingi so'rovda 400 beradi.
+    // (tool_name, input_map, tool_use_id) — when the model wants to call a tool.
+    // Vec: the model may call SEVERAL tools in parallel in one response — we
+    // collect all, otherwise a missing tool_use_id gives a 400 on the next request.
     tool_calls: Vec<(String, Value, String)>,
     in_tokens: i64,
     out_tokens: i64,
     model: String,
     ms: i64,
-    // stop_reason'dan baholangan ishonch (end_turn -> yuqori, max_tokens -> past).
+    // confidence estimated from stop_reason (end_turn -> high, max_tokens -> low).
     conf: f64,
 }
 
 impl AiResp {
-    // `r._` metadata map'i: conf/tokens/cost/ms.
+    // The `r._` metadata map: conf/tokens/cost/ms.
     fn meta(&self) -> BTreeMap<String, Value> {
         let mut m = BTreeMap::new();
         m.insert("conf".to_string(), Value::Flt(self.conf));
@@ -517,16 +519,16 @@ impl AiResp {
     }
 }
 
-// Anthropic javob matnini AiResp'ga parse qiladi. content massivdan text va
-// tool_use bloklarini ajratadi; usage'dan token'larni oladi.
+// Parses the Anthropic response text into an AiResp. Extracts text and
+// tool_use blocks from the content array; reads tokens from usage.
 fn parse_anthropic(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
     let map = decode_obj(text)?;
 
-    // stop_reason -> ishonch bahosi (heuristik).
+    // stop_reason -> confidence estimate (heuristic).
     let stop = map.get("stop_reason").and_then(as_str).unwrap_or_default();
     let conf = match stop.as_str() {
         "end_turn" | "tool_use" | "stop_sequence" => 0.9,
-        "max_tokens" => 0.5, // kesilgan -> ishonch past
+        "max_tokens" => 0.5, // truncated -> low confidence
         "refusal" => 0.0,
         _ => 0.7,
     };
@@ -541,9 +543,9 @@ fn parse_anthropic(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
     };
 
     // content: [{type:"text" text:...} | {type:"tool_use" name input id} ...]
-    // Model parallel ravishda bir nechta tool_use blok qaytarishi mumkin —
-    // hammasini yig'amiz (faqat oxirgisini saqlasak qolganlari uchun keyingi
-    // so'rovda tool_result bo'lmaydi va Anthropic API 400 qaytaradi).
+    // The model may return several tool_use blocks in parallel — we collect all
+    // of them (if we kept only the last, the rest would have no tool_result on
+    // the next request and the Anthropic API would return 400).
     let mut out_text = String::new();
     let mut tool_calls = Vec::new();
     if let Some(Value::List(blocks)) = map.get("content") {
@@ -581,10 +583,10 @@ fn parse_anthropic(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
     })
 }
 
-// OpenAI Chat Completions javobini AiResp'ga parse qiladi:
+// Parses the OpenAI Chat Completions response into an AiResp:
 //   choices[0].message.{content, tool_calls[0].function.{name, arguments}}
 //   choices[0].finish_reason, usage.{prompt_tokens, completion_tokens}
-// tool_calls[].function.arguments — JSON-kodlangan STRING (Anthropic'da map).
+// tool_calls[].function.arguments — a JSON-encoded STRING (a map in Anthropic).
 fn parse_openai(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
     let map = decode_obj(text)?;
 
@@ -593,13 +595,13 @@ fn parse_openai(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
             Value::Map(c) => c.clone(),
             _ => {
                 return Err(Flow::err(
-                    "ai: OpenAI choices[0] shakli noto'g'ri".to_string(),
+                    "ai: OpenAI choices[0] has wrong shape".to_string(),
                 ));
             }
         },
         _ => {
             return Err(Flow::err(format!(
-                "ai: OpenAI javobida choices yo'q: {}",
+                "ai: OpenAI response has no choices: {}",
                 truncate(text, 200)
             )));
         }
@@ -611,12 +613,12 @@ fn parse_openai(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
         .unwrap_or_default();
     let conf = match finish.as_str() {
         "stop" | "tool_calls" => 0.9,
-        "length" => 0.5, // token cheki -> kesilgan
+        "length" => 0.5, // token limit -> truncated
         "content_filter" => 0.0,
         _ => 0.7,
     };
 
-    // usage: OpenAI prompt_tokens/completion_tokens deydi.
+    // usage: OpenAI calls them prompt_tokens/completion_tokens.
     let (in_tokens, out_tokens) = match map.get("usage") {
         Some(Value::Map(u)) => (
             u.get("prompt_tokens").and_then(as_int).unwrap_or(0),
@@ -627,16 +629,16 @@ fn parse_openai(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
 
     let message = match choice.get("message") {
         Some(Value::Map(m)) => m.clone(),
-        _ => return Err(Flow::err("ai: OpenAI message yo'q".to_string())),
+        _ => return Err(Flow::err("ai: OpenAI message missing".to_string())),
     };
 
-    // content (null bo'lishi mumkin tool_calls bo'lganda).
+    // content (may be null when there are tool_calls).
     let out_text = message.get("content").and_then(as_str).unwrap_or_default();
 
     // tool_calls[] -> [(name, args_map, id)]. arguments JSON-string -> map.
-    // Model bir javobda bir nechta tool chaqirishi mumkin — hammasini yig'amiz
-    // (faqat tc[0] ni olsak qolganlari uchun tool natijasi qaytmaydi va keyingi
-    // so'rov 400 oladi).
+    // The model may call several tools in one response — we collect all of them
+    // (if we took only tc[0], the rest would get no tool result and the next
+    // request would get a 400).
     let mut tool_calls = Vec::new();
     if let Some(Value::List(tc)) = message.get("tool_calls") {
         for call in tc {
@@ -644,10 +646,14 @@ fn parse_openai(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
             let id = call.get("id").and_then(as_str).unwrap_or_default();
             let func = match call.get("function") {
                 Some(Value::Map(f)) => f,
-                _ => return Err(Flow::err("ai: OpenAI tool_call.function yo'q".to_string())),
+                _ => {
+                    return Err(Flow::err(
+                        "ai: OpenAI tool_call.function missing".to_string(),
+                    ));
+                }
             };
             let name = func.get("name").and_then(as_str).unwrap_or_default();
-            // arguments — JSON-kodlangan string; map'ga parse qilamiz.
+            // arguments — a JSON-encoded string; we parse it into a map.
             let args = match func.get("arguments").and_then(as_str) {
                 Some(s) => json_decode(&s).unwrap_or(Value::Map(BTreeMap::new())),
                 None => Value::Map(BTreeMap::new()),
@@ -667,23 +673,23 @@ fn parse_openai(text: &str, model: &str, ms: i64) -> Result<AiResp, Flow> {
     })
 }
 
-// JSON matnni map'ga dekod qiladi (ikki parser uchun umumiy).
+// Decodes JSON text into a map (shared by both parsers).
 fn decode_obj(text: &str) -> Result<BTreeMap<String, Value>, Flow> {
     let v = json_decode(text).map_err(|_| {
         Flow::err(format!(
-            "ai: javobni parse qilib bo'lmadi: {}",
+            "ai: could not parse response: {}",
             truncate(text, 200)
         ))
     })?;
     match v {
         Value::Map(m) => Ok(m),
-        _ => Err(Flow::err("ai: kutilmagan javob shakli".to_string())),
+        _ => Err(Flow::err("ai: unexpected response shape".to_string())),
     }
 }
 
-// --- Yordamchilar ---
+// --- Helpers ---
 
-// {role::user content:"..."} — bitta user xabar.
+// {role::user content:"..."} — a single user message.
 fn user_msg(content: &str) -> Value {
     let mut m = BTreeMap::new();
     m.insert("role".to_string(), Value::Str("user".to_string()));
@@ -691,21 +697,21 @@ fn user_msg(content: &str) -> Value {
     Value::Map(m)
 }
 
-// Fluxon xabarini Anthropic shakliga keltiradi. role sym (:user) yoki str bo'lishi
-// mumkin -> har doim str. tool natijasi xabari ({role::tool name content}) esa
-// Anthropic'da user roli + tool_result blok bo'lib ketadi.
+// Brings a Fluxon message into the Anthropic shape. role may be a sym (:user)
+// or str -> always str. The tool-result message ({role::tool name content})
+// becomes a user role + tool_result block in Anthropic.
 fn normalize_msg(msg: &Value) -> Value {
     let m = match msg {
         Value::Map(m) => m,
         other => return other.clone(),
     };
-    // role sym (:user) yoki str ("user") bo'lishi mumkin — ikkalasini ham oqaymiz.
+    // role may be a sym (:user) or str ("user") — we read both.
     let role = m
         .get("role")
         .and_then(sym_or_str)
         .unwrap_or_else(|| "user".to_string());
 
-    // tool natijasi: {role::tool name content} -> {role:"user" content:[{type:tool_result ...}]}
+    // tool result: {role::tool name content} -> {role:"user" content:[{type:tool_result ...}]}
     if role == "tool" {
         let tool_use_id = m
             .get("id")
@@ -723,7 +729,7 @@ fn normalize_msg(msg: &Value) -> Value {
         return Value::Map(out);
     }
 
-    // Oddiy xabar: role'ni str'ga, content'ni o'z holicha (str yoki blok list).
+    // Ordinary message: role to str, content as is (str or a block list).
     let mut out = BTreeMap::new();
     out.insert("role".to_string(), Value::Str(role));
     if let Some(c) = m.get("content") {
@@ -734,8 +740,8 @@ fn normalize_msg(msg: &Value) -> Value {
     Value::Map(out)
 }
 
-// Fluxon tool ta'rifini ({name desc params}) Anthropic shakliga
-// ({name description input_schema}) keltiradi.
+// Brings a Fluxon tool definition ({name desc params}) into the Anthropic
+// shape ({name description input_schema}).
 fn normalize_tool(tool: &Value) -> Value {
     let m = match tool {
         Value::Map(m) => m,
@@ -747,9 +753,9 @@ fn normalize_tool(tool: &Value) -> Value {
         .or_else(|| m.get("description"))
         .and_then(as_str)
         .unwrap_or_default();
-    // params — JSON-schema (object). Foydalanuvchi {a:str b:int} kabi sodda berishi
-    // mumkin; biz uni JSON-schema object'iga o'raymiz, agar allaqachon type:object
-    // bo'lmasa.
+    // params — a JSON-schema (object). The user may give something simple like
+    // {a:str b:int}; we wrap it into a JSON-schema object, unless it is already
+    // type:object.
     let schema = m
         .get("params")
         .or_else(|| m.get("input_schema"))
@@ -764,16 +770,16 @@ fn normalize_tool(tool: &Value) -> Value {
     Value::Map(out)
 }
 
-// params map'ini to'liq JSON-schema object'iga aylantiradi. Agar map allaqachon
-// {type:"object" ...} bo'lsa, o'z holicha qoldiramiz. Aks holda har maydonni
-// {type:"..."} ga aylantirib `properties` ostiga joylaymiz.
+// Converts the params map into a full JSON-schema object. If the map is already
+// {type:"object" ...}, we leave it as is. Otherwise we turn each field into
+// {type:"..."} and place it under `properties`.
 fn wrap_schema(schema: Value) -> Value {
     let fields = match schema {
         Value::Map(m) => m,
-        // map bo'lmasa — bo'sh object schema.
+        // not a map — an empty object schema.
         _ => return empty_object_schema(),
     };
-    // Allaqachon to'liq schema bo'lsa (type:object), tegmaymiz.
+    // If it is already a full schema (type:object), we do not touch it.
     if fields.get("type").and_then(as_str).as_deref() == Some("object") {
         return Value::Map(fields);
     }
@@ -790,18 +796,18 @@ fn wrap_schema(schema: Value) -> Value {
     Value::Map(obj)
 }
 
-// Bitta maydon qiymatini JSON-schema bo'lagiga aylantiradi. Tip nomi (sym/str)
-// -> {type:"..."}; ro'yxat (`[T]`) -> {type:"array", items:<T schema>}; map ->
-// rekursiv object schema (allaqachon to'liq schema bo'lsa o'z holicha).
+// Converts a single field value into a JSON-schema fragment. A type name
+// (sym/str) -> {type:"..."}; a list (`[T]`) -> {type:"array", items:<T schema>};
+// a map -> a recursive object schema (as is if already a full schema).
 fn field_schema(v: &Value) -> Value {
     match v {
-        // {a:str} — qiymat tip nomi (sym yoki str).
+        // {a:str} — the value is a type name (sym or str).
         Value::Sym(s) | Value::Str(s) => {
             let mut field = BTreeMap::new();
             field.insert("type".to_string(), Value::Str(json_type(s)));
             Value::Map(field)
         }
-        // [T] — array; element tipi rekursiv. `[]` (bo'sh) -> items'siz array.
+        // [T] — array; element type recursive. `[]` (empty) -> array without items.
         Value::List(items) => {
             let mut field = BTreeMap::new();
             field.insert("type".to_string(), Value::Str("array".to_string()));
@@ -810,17 +816,17 @@ fn field_schema(v: &Value) -> Value {
             }
             Value::Map(field)
         }
-        // {a:{...}} — ichki object; agar allaqachon to'liq schema bo'lmasa,
-        // rekursiv wrap_schema bilan object'ga aylantiramiz.
+        // {a:{...}} — a nested object; if it is not already a full schema, we
+        // turn it into an object with a recursive wrap_schema.
         Value::Map(m) => {
             if m.get("type").and_then(as_str).is_some() {
-                // foydalanuvchi allaqachon {type:"..."} bergan — tegmaymiz.
+                // the user already gave {type:"..."} — we do not touch it.
                 v.clone()
             } else {
                 wrap_schema(v.clone())
             }
         }
-        // boshqa qiymatlar uchun zaxira sifatida string.
+        // string as a fallback for other values.
         _ => {
             let mut field = BTreeMap::new();
             field.insert("type".to_string(), Value::Str("string".to_string()));
@@ -836,8 +842,8 @@ fn empty_object_schema() -> Value {
     Value::Map(obj)
 }
 
-// Fluxon tip nomini JSON-schema tipiga: str->string, int->integer, flt->number,
-// bool->boolean. Boshqasi o'z holicha (list/object foydalanuvchi bersa).
+// Fluxon type name to JSON-schema type: str->string, int->integer, flt->number,
+// bool->boolean. Anything else as is (if the user gives list/object).
 fn json_type(t: &str) -> String {
     match t {
         "str" => "string",
@@ -849,7 +855,7 @@ fn json_type(t: &str) -> String {
     .to_string()
 }
 
-// tool_result content'ini matnga keltiradi: map/list -> JSON, str -> o'zi.
+// Brings tool_result content to text: map/list -> JSON, str -> itself.
 fn content_to_str(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
@@ -858,11 +864,11 @@ fn content_to_str(v: &Value) -> String {
     }
 }
 
-// Model ```json ... ``` yoki ``` ... ``` bilan o'rab qaytarsa, blokni tozalaydi.
+// If the model wraps the result in ```json ... ``` or ``` ... ```, strips the block.
 fn strip_code_fence(s: &str) -> String {
     let t = s.trim();
     if let Some(rest) = t.strip_prefix("```") {
-        // birinchi qatorni (```json) tashlab, oxirgi ``` gacha olamiz.
+        // drop the first line (```json) and take up to the last ```.
         let rest = rest.strip_prefix("json").unwrap_or(rest);
         let rest = rest.trim_start_matches('\n');
         if let Some(end) = rest.rfind("```") {
@@ -881,9 +887,9 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-// Taxminiy narx (USD) modelning $/1M token jadvalidan. Noma'lum model -> 0.
+// Estimated cost (USD) from the model's $/1M token table. Unknown model -> 0.
 // Anthropic: Opus 4.x / Sonnet 4.6 / Haiku 4.5. OpenAI: gpt-4o / gpt-4o-mini.
-// ($input, $output per 1M token).
+// ($input, $output per 1M tokens).
 fn estimate_cost(model: &str, in_tokens: i64, out_tokens: i64) -> f64 {
     let (in_rate, out_rate) = if model.contains("opus") {
         (5.0, 25.0)
@@ -901,7 +907,7 @@ fn estimate_cost(model: &str, in_tokens: i64, out_tokens: i64) -> f64 {
     (in_tokens as f64 * in_rate + out_tokens as f64 * out_rate) / 1_000_000.0
 }
 
-// --- Provayder yordamchilari ---
+// --- Provider helpers ---
 
 fn provider_name(p: Provider) -> &'static str {
     match p {
@@ -917,8 +923,8 @@ fn provider_key_name(p: Provider) -> &'static str {
     }
 }
 
-// Anthropic shaklidagi xabarni OpenAI shakliga aylantiradi.
-//   {role:"user" content:"..."}                       -> o'zgarmaydi
+// Converts an Anthropic-shaped message into the OpenAI shape.
+//   {role:"user" content:"..."}                       -> unchanged
 //   {role:"user" content:[{type:tool_result tool_use_id content}]}
 //                                                      -> {role:"tool" tool_call_id content}
 //   {role:"assistant" content:[{type:tool_use id name input}]}
@@ -930,9 +936,9 @@ fn anthropic_msg_to_openai(msg: &Value) -> Value {
     };
     let role = m.get("role").and_then(as_str).unwrap_or_default();
 
-    // content blok list bo'lsa — tool_result yoki tool_use ni aylantiramiz.
+    // if content is a block list — convert tool_result or tool_use.
     if let Some(Value::List(blocks)) = m.get("content") {
-        // tool_result (Anthropic user roli) -> OpenAI {role:"tool" tool_call_id content}
+        // tool_result (Anthropic user role) -> OpenAI {role:"tool" tool_call_id content}
         if let Some(Value::Map(b)) = blocks.first()
             && b.get("type").and_then(as_str).as_deref() == Some("tool_result")
         {
@@ -952,7 +958,7 @@ fn anthropic_msg_to_openai(msg: &Value) -> Value {
             );
             return Value::Map(out);
         }
-        // tool_use (Anthropic assistant roli) -> OpenAI tool_calls.
+        // tool_use (Anthropic assistant role) -> OpenAI tool_calls.
         if let Some(Value::Map(b)) = blocks.first()
             && b.get("type").and_then(as_str).as_deref() == Some("tool_use")
         {
@@ -964,7 +970,7 @@ fn anthropic_msg_to_openai(msg: &Value) -> Value {
                 .unwrap_or(Value::Map(BTreeMap::new()));
             let mut func = BTreeMap::new();
             func.insert("name".to_string(), Value::Str(name));
-            // OpenAI arguments — JSON-kodlangan STRING.
+            // OpenAI arguments — a JSON-encoded STRING.
             func.insert("arguments".to_string(), Value::Str(json_encode(&args)));
             let mut call = BTreeMap::new();
             call.insert("id".to_string(), Value::Str(id));
@@ -981,7 +987,7 @@ fn anthropic_msg_to_openai(msg: &Value) -> Value {
         }
     }
 
-    // Oddiy xabar: role + content (str) o'z holicha.
+    // Ordinary message: role + content (str) as is.
     let mut out = BTreeMap::new();
     out.insert("role".to_string(), Value::Str(role));
     out.insert(
@@ -993,8 +999,8 @@ fn anthropic_msg_to_openai(msg: &Value) -> Value {
     Value::Map(out)
 }
 
-// Anthropic tool shaklini ({name description input_schema}) OpenAI function
-// shakliga ({type:function function:{name description parameters}}) aylantiradi.
+// Converts the Anthropic tool shape ({name description input_schema}) into the
+// OpenAI function shape ({type:function function:{name description parameters}}).
 fn anthropic_tool_to_openai(tool: &Value) -> Value {
     let t = match tool {
         Value::Map(m) => m,
@@ -1023,7 +1029,7 @@ fn anthropic_tool_to_openai(tool: &Value) -> Value {
     Value::Map(out)
 }
 
-// Value'dan str/int o'qish yordamchilari (json_decode natijasi uchun).
+// Helpers to read str/int from a Value (for the json_decode result).
 fn as_str(v: &Value) -> Option<String> {
     match v {
         Value::Str(s) => Some(s.clone()),
@@ -1031,7 +1037,7 @@ fn as_str(v: &Value) -> Option<String> {
     }
 }
 
-// Sym yoki Str — ikkalasidan ham matn (role :user va "user" bir xil ko'rinsin).
+// Sym or Str — text from either (so role :user and "user" look the same).
 fn sym_or_str(v: &Value) -> Option<String> {
     match v {
         Value::Str(s) | Value::Sym(s) => Some(s.clone()),
@@ -1047,12 +1053,12 @@ fn as_int(v: &Value) -> Option<i64> {
     }
 }
 
-// $AI_TIMEOUT (soniya str) -> Duration. Berilmagan/yaroqsiz -> default 120s; 0
-// yoki manfiy -> None (timeout'siz). Sof funksiya — env'siz test qilinadi (#92).
+// $AI_TIMEOUT (seconds str) -> Duration. Absent/invalid -> default 120s; 0 or
+// negative -> None (no timeout). A pure function — tested without env (#92).
 fn resolve_ai_timeout(env: Option<&str>) -> Option<Duration> {
     match env.and_then(|s| s.trim().parse::<i64>().ok()) {
         Some(n) if n > 0 => Some(Duration::from_secs(n as u64)),
-        Some(_) => None, // 0 yoki manfiy — timeout'siz
+        Some(_) => None, // 0 or negative — no timeout
         None => Some(Duration::from_secs(DEFAULT_AI_TIMEOUT_SECS)),
     }
 }
@@ -1063,7 +1069,7 @@ mod tests {
 
     #[test]
     fn ai_timeout_resolve() {
-        // issue #92: default 120s, $AI_TIMEOUT bilan sozlanadi, 0/manfiy — timeout'siz.
+        // issue #92: default 120s, configured with $AI_TIMEOUT, 0/negative — no timeout.
         assert_eq!(resolve_ai_timeout(None), Some(Duration::from_secs(120)));
         assert_eq!(
             resolve_ai_timeout(Some("30")),
@@ -1071,7 +1077,7 @@ mod tests {
         );
         assert_eq!(resolve_ai_timeout(Some("0")), None);
         assert_eq!(resolve_ai_timeout(Some("-5")), None);
-        // Yaroqsiz qiymat — default'ga qaytadi (parse muvaffaqiyatsiz).
+        // Invalid value — falls back to default (parse fails).
         assert_eq!(
             resolve_ai_timeout(Some("abc")),
             Some(Duration::from_secs(120))
@@ -1080,7 +1086,7 @@ mod tests {
 
     #[test]
     fn retry_status_faqat_vaqtinchalik() {
-        // 429/529 — retry; autentifikatsiya/validatsiya xatolari — yo'q.
+        // 429/529 — retry; authentication/validation errors — no.
         assert!(should_retry_status(429));
         assert!(should_retry_status(529));
         assert!(!should_retry_status(400));
@@ -1091,15 +1097,15 @@ mod tests {
 
     #[test]
     fn retry_backoff_retry_after_va_default() {
-        // Retry-After bo'lsa unga amal (1..=30 clamp), bo'lmasa default 2s.
+        // If Retry-After is present, honor it (clamp 1..=30), otherwise default 2s.
         assert_eq!(retry_backoff(Some(5)), Duration::from_secs(5));
         assert_eq!(retry_backoff(Some(0)), Duration::from_secs(1));
         assert_eq!(retry_backoff(Some(300)), Duration::from_secs(30));
         assert_eq!(retry_backoff(None), Duration::from_secs(2));
     }
 
-    // Lokal test serveri: berilgan javoblarni navbat bilan qaytaradi (har ulanish
-    // bitta javob, connection: close). Nechta so'rov kelganini qaytaradi.
+    // Local test server: returns the given responses in order (one response per
+    // connection, connection: close). Returns how many requests arrived.
     fn serve_responses(
         responses: Vec<String>,
     ) -> (std::net::SocketAddr, std::thread::JoinHandle<usize>) {
@@ -1111,8 +1117,8 @@ mod tests {
             let mut served = 0;
             for resp in responses {
                 let (mut stream, _) = listener.accept().unwrap();
-                // So'rovni to'liq o'qiymiz (header'lar + content-length tana) —
-                // aks holda javobdan keyin yopilgan socket RST berishi mumkin.
+                // Read the request fully (headers + content-length body) —
+                // otherwise a socket closed after the response may send RST.
                 let mut data = Vec::new();
                 let mut buf = [0u8; 4096];
                 let total = loop {
@@ -1150,8 +1156,8 @@ mod tests {
 
     #[test]
     fn post_json_429_dan_keyin_retry_qiladi() {
-        // issue #92 bonus: birinchi javob 429 bo'lsa BIR marta qayta uriniladi —
-        // ikkinchi urinish 200 qaytarsa natija muvaffaqiyatli.
+        // issue #92 bonus: if the first response is 429 it retries ONCE — if the
+        // second attempt returns 200 the result is successful.
         let r429 = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string();
         let r200 = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}".to_string();
         let (addr, handle) = serve_responses(vec![r429, r200]);
@@ -1159,54 +1165,46 @@ mod tests {
         let res = post_json(&url, "{}".to_string(), Some(Duration::from_secs(10)), |b| b);
         match res {
             Ok((text, _ms)) => assert_eq!(text, "{\"ok\":1}"),
-            Err(Flow::Error(e)) => panic!("retry'dan keyin Ok kutilgan: {}", e),
-            Err(_) => panic!("kutilmagan Flow"),
+            Err(Flow::Error(e)) => panic!("expected Ok after retry: {}", e),
+            Err(_) => panic!("unexpected Flow"),
         }
         assert_eq!(
             handle.join().unwrap(),
             2,
-            "ikki so'rov (asl + retry) kelishi kerak"
+            "two requests (original + retry) must arrive"
         );
     }
 
     #[test]
     fn post_json_ikkinchi_429_xato_qaytaradi() {
-        // Faqat BIR marta retry — ikkinchi urinish ham 429 bo'lsa aniq xato
-        // qaytadi (cheksiz retry loop yo'q).
+        // Only ONE retry — if the second attempt is also 429, an explicit error
+        // is returned (no infinite retry loop).
         let r429 = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string();
         let (addr, handle) = serve_responses(vec![r429.clone(), r429]);
         let url = format!("http://{}/v1/x", addr);
         let res = post_json(&url, "{}".to_string(), Some(Duration::from_secs(10)), |b| b);
         match res {
-            Err(Flow::Error(e)) => assert!(e.contains("429"), "429 xatosi kutilgan: {}", e),
-            Ok(_) => panic!("ikkinchi 429 dan keyin xato kutilgan"),
-            Err(_) => panic!("Flow::Error kutilgan"),
+            Err(Flow::Error(e)) => assert!(e.contains("429"), "expected 429 error: {}", e),
+            Ok(_) => panic!("expected error after second 429"),
+            Err(_) => panic!("expected Flow::Error"),
         }
-        assert_eq!(
-            handle.join().unwrap(),
-            2,
-            "aniq ikki urinish bo'lishi kerak"
-        );
+        assert_eq!(handle.join().unwrap(), 2, "exactly two attempts must occur");
     }
 
     #[test]
     fn post_json_401_retry_qilmaydi() {
-        // Doimiy xato (401 noto'g'ri kalit) — retry YO'Q, bitta so'rov bilan xato.
+        // A permanent error (401 wrong key) — NO retry, error with a single request.
         let r401 = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
             .to_string();
         let (addr, handle) = serve_responses(vec![r401]);
         let url = format!("http://{}/v1/x", addr);
         let res = post_json(&url, "{}".to_string(), Some(Duration::from_secs(10)), |b| b);
         match res {
-            Err(Flow::Error(e)) => assert!(e.contains("401"), "401 xatosi kutilgan: {}", e),
-            Ok(_) => panic!("401 dan keyin xato kutilgan"),
-            Err(_) => panic!("Flow::Error kutilgan"),
+            Err(Flow::Error(e)) => assert!(e.contains("401"), "expected 401 error: {}", e),
+            Ok(_) => panic!("expected error after 401"),
+            Err(_) => panic!("expected Flow::Error"),
         }
-        assert_eq!(
-            handle.join().unwrap(),
-            1,
-            "faqat bitta so'rov bo'lishi kerak"
-        );
+        assert_eq!(handle.join().unwrap(), 1, "only one request must occur");
     }
 
     #[test]
@@ -1228,14 +1226,14 @@ mod tests {
 
     #[test]
     fn wrap_simple_schema() {
-        // {name:str age:int} -> JSON-schema object.
+        // {name:str age:int} -> a JSON-schema object.
         let mut s = BTreeMap::new();
         s.insert("name".to_string(), Value::Sym("str".to_string()));
         s.insert("age".to_string(), Value::Sym("int".to_string()));
         let wrapped = wrap_schema(Value::Map(s));
         let m = match wrapped {
             Value::Map(m) => m,
-            _ => panic!("map kutilgan"),
+            _ => panic!("expected map"),
         };
         assert_eq!(as_str(m.get("type").unwrap()).as_deref(), Some("object"));
         let props = match m.get("properties").unwrap() {
@@ -1251,7 +1249,7 @@ mod tests {
 
     #[test]
     fn wrap_array_schema() {
-        // {tags:[str] items:[{name:str}]} -> array tiplari to'g'ri quriladi.
+        // {tags:[str] items:[{name:str}]} -> array types are built correctly.
         let mut s = BTreeMap::new();
         s.insert(
             "tags".to_string(),
@@ -1266,7 +1264,7 @@ mod tests {
                 Value::Map(p) => p.clone(),
                 _ => panic!(),
             },
-            _ => panic!("map kutilgan"),
+            _ => panic!("expected map"),
         };
         // tags -> {type:array, items:{type:string}}
         let tags = match props.get("tags").unwrap() {
@@ -1276,7 +1274,7 @@ mod tests {
         assert_eq!(as_str(tags.get("type").unwrap()).as_deref(), Some("array"));
         let tags_items = match tags.get("items").unwrap() {
             Value::Map(i) => i.clone(),
-            _ => panic!("tags items map bo'lishi kerak"),
+            _ => panic!("tags items must be a map"),
         };
         assert_eq!(
             as_str(tags_items.get("type").unwrap()).as_deref(),
@@ -1290,7 +1288,7 @@ mod tests {
         assert_eq!(as_str(items.get("type").unwrap()).as_deref(), Some("array"));
         let elem = match items.get("items").unwrap() {
             Value::Map(e) => e.clone(),
-            _ => panic!("items items map bo'lishi kerak"),
+            _ => panic!("items items must be a map"),
         };
         assert_eq!(as_str(elem.get("type").unwrap()).as_deref(), Some("object"));
         let elem_props = match elem.get("properties").unwrap() {
@@ -1302,8 +1300,8 @@ mod tests {
 
     #[test]
     fn wrap_passthrough_full_schema() {
-        // Allaqachon type:object bo'lsa, tegilmaydi.
-        // (Value Debug/PartialEq derive qilmaydi -> .equals bilan solishtiramiz.)
+        // Already a type:object schema -> left as-is.
+        // (Value does not derive Debug/PartialEq -> we compare with .equals.)
         let mut s = BTreeMap::new();
         s.insert("type".to_string(), Value::Str("object".to_string()));
         s.insert("properties".to_string(), Value::Map(BTreeMap::new()));
@@ -1318,7 +1316,7 @@ mod tests {
         params.insert("city".to_string(), Value::Sym("str".to_string()));
         let mut t = BTreeMap::new();
         t.insert("name".to_string(), Value::Str("weather".to_string()));
-        t.insert("desc".to_string(), Value::Str("ob-havo".to_string()));
+        t.insert("desc".to_string(), Value::Str("weather".to_string()));
         t.insert("params".to_string(), Value::Map(params));
         let out = match normalize_tool(&Value::Map(t)) {
             Value::Map(m) => m,
@@ -1331,11 +1329,11 @@ mod tests {
 
     #[test]
     fn normalize_tool_msg() {
-        // {role::tool id content} -> user + tool_result blok.
+        // {role::tool id content} -> user + tool_result block.
         let mut t = BTreeMap::new();
         t.insert("role".to_string(), Value::Sym("tool".to_string()));
         t.insert("id".to_string(), Value::Str("toolu_1".to_string()));
-        t.insert("content".to_string(), Value::Str("25 daraja".to_string()));
+        t.insert("content".to_string(), Value::Str("25 degrees".to_string()));
         let out = match normalize_msg(&Value::Map(t)) {
             Value::Map(m) => m,
             _ => panic!(),
@@ -1356,16 +1354,16 @@ mod tests {
                     Some("toolu_1")
                 );
             }
-            _ => panic!("tool_result list kutilgan"),
+            _ => panic!("expected tool_result list"),
         }
     }
 
     #[test]
     fn normalize_sym_role() {
-        // {role::user content} -> role str'ga aylanadi.
+        // {role::user content} -> role is turned into a str.
         let mut t = BTreeMap::new();
         t.insert("role".to_string(), Value::Sym("user".to_string()));
-        t.insert("content".to_string(), Value::Str("salom".to_string()));
+        t.insert("content".to_string(), Value::Str("hello".to_string()));
         let out = match normalize_msg(&Value::Map(t)) {
             Value::Map(m) => m,
             _ => panic!(),
@@ -1378,14 +1376,14 @@ mod tests {
         let json = r#"{
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 5},
-            "content": [{"type": "text", "text": "javob"}]
+            "content": [{"type": "text", "text": "answer"}]
         }"#;
-        // Flow Debug derive qilmaydi -> .unwrap() o'rniga match.
+        // Flow does not derive Debug -> match instead of .unwrap().
         let r = match parse_anthropic(json, "claude-opus-4-8", 100) {
             Ok(r) => r,
-            Err(_) => panic!("parse muvaffaqiyatsiz"),
+            Err(_) => panic!("parse failed"),
         };
-        assert_eq!(r.text, "javob");
+        assert_eq!(r.text, "answer");
         assert!(r.tool_calls.is_empty());
         assert_eq!(r.in_tokens, 10);
         assert_eq!(r.out_tokens, 5);
@@ -1398,13 +1396,13 @@ mod tests {
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 20, "output_tokens": 8},
             "content": [
-                {"type": "text", "text": "tekshiraman"},
+                {"type": "text", "text": "let me check"},
                 {"type": "tool_use", "id": "toolu_9", "name": "weather", "input": {"city": "Toshkent"}}
             ]
         }"#;
         let r = match parse_anthropic(json, "claude-opus-4-8", 50) {
             Ok(r) => r,
-            Err(_) => panic!("parse muvaffaqiyatsiz"),
+            Err(_) => panic!("parse failed"),
         };
         assert_eq!(r.tool_calls.len(), 1);
         let (name, input, id) = &r.tool_calls[0];
@@ -1420,8 +1418,8 @@ mod tests {
 
     #[test]
     fn parse_parallel_tool_use() {
-        // Model bir javobda IKKI tool chaqirsa, ikkalasi ham yig'iladi
-        // (issue #95 — ilgari faqat oxirgisi qolardi).
+        // If the model calls TWO tools in one response, both are collected
+        // (issue #95 — previously only the last one would remain).
         let json = r#"{
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 20, "output_tokens": 8},
@@ -1432,7 +1430,7 @@ mod tests {
         }"#;
         let r = match parse_anthropic(json, "claude-opus-4-8", 50) {
             Ok(r) => r,
-            Err(_) => panic!("parse muvaffaqiyatsiz"),
+            Err(_) => panic!("parse failed"),
         };
         assert_eq!(r.tool_calls.len(), 2);
         assert_eq!(r.tool_calls[0].0, "weather");
@@ -1455,7 +1453,7 @@ mod tests {
         let m = r.meta();
         assert!(as_int(m.get("tokens").unwrap()) == Some(1500));
         assert!(as_int(m.get("ms").unwrap()) == Some(1234));
-        // narx: (1000*5 + 500*25)/1e6 = (5000+12500)/1e6 = 0.0175
+        // cost: (1000*5 + 500*25)/1e6 = (5000+12500)/1e6 = 0.0175
         match m.get("cost").unwrap() {
             Value::Flt(c) => assert!((c - 0.0175).abs() < 1e-9),
             _ => panic!(),
@@ -1469,24 +1467,24 @@ mod tests {
         assert!((estimate_cost("claude-haiku-4-5", 1_000_000, 0) - 1.0).abs() < 1e-9);
         assert!((estimate_cost("gpt-4o", 1_000_000, 0) - 2.5).abs() < 1e-9);
         assert!((estimate_cost("gpt-4o-mini", 1_000_000, 0) - 0.15).abs() < 1e-9);
-        assert_eq!(estimate_cost("noma'lum", 1_000_000, 0), 0.0);
+        assert_eq!(estimate_cost("unknown", 1_000_000, 0), 0.0);
     }
 
     #[test]
     fn parse_openai_text() {
-        // OpenAI Chat Completions text javobi.
+        // OpenAI Chat Completions text response.
         let json = r#"{
             "choices": [{
                 "finish_reason": "stop",
-                "message": {"role": "assistant", "content": "salom"}
+                "message": {"role": "assistant", "content": "hello"}
             }],
             "usage": {"prompt_tokens": 12, "completion_tokens": 4}
         }"#;
         let r = match parse_openai(json, "gpt-4o", 80) {
             Ok(r) => r,
-            Err(_) => panic!("openai parse muvaffaqiyatsiz"),
+            Err(_) => panic!("openai parse failed"),
         };
-        assert_eq!(r.text, "salom");
+        assert_eq!(r.text, "hello");
         assert!(r.tool_calls.is_empty());
         assert_eq!(r.in_tokens, 12);
         assert_eq!(r.out_tokens, 4);
@@ -1494,7 +1492,7 @@ mod tests {
 
     #[test]
     fn parse_openai_tool_call() {
-        // OpenAI tool_calls: arguments JSON-STRING -> map'ga parse bo'ladi.
+        // OpenAI tool_calls: arguments JSON-STRING -> is parsed into a map.
         let json = r#"{
             "choices": [{
                 "finish_reason": "tool_calls",
@@ -1512,7 +1510,7 @@ mod tests {
         }"#;
         let r = match parse_openai(json, "gpt-4o", 60) {
             Ok(r) => r,
-            Err(_) => panic!("openai tool parse muvaffaqiyatsiz"),
+            Err(_) => panic!("openai tool parse failed"),
         };
         assert_eq!(r.tool_calls.len(), 1);
         let (name, input, id) = &r.tool_calls[0];
@@ -1525,14 +1523,14 @@ mod tests {
                     Some("Toshkent")
                 );
             }
-            _ => panic!("args map kutilgan"),
+            _ => panic!("expected args map"),
         }
     }
 
     #[test]
     fn parse_openai_parallel_tool_calls() {
-        // OpenAI ham bir javobda bir nechta tool_call qaytarishi mumkin —
-        // hammasi yig'iladi (issue #95).
+        // OpenAI may also return several tool_call entries in one response —
+        // all are collected (issue #95).
         let json = r#"{
             "choices": [{
                 "finish_reason": "tool_calls",
@@ -1551,7 +1549,7 @@ mod tests {
         }"#;
         let r = match parse_openai(json, "gpt-4o", 60) {
             Ok(r) => r,
-            Err(_) => panic!("openai parallel parse muvaffaqiyatsiz"),
+            Err(_) => panic!("openai parallel parse failed"),
         };
         assert_eq!(r.tool_calls.len(), 2);
         assert_eq!(r.tool_calls[0].0, "ob_havo");
@@ -1565,7 +1563,7 @@ mod tests {
         // {name description input_schema} -> {type:function function:{...}}.
         let mut t = BTreeMap::new();
         t.insert("name".to_string(), Value::Str("weather".to_string()));
-        t.insert("description".to_string(), Value::Str("ob-havo".to_string()));
+        t.insert("description".to_string(), Value::Str("weather".to_string()));
         t.insert("input_schema".to_string(), empty_object_schema());
         let out = match anthropic_tool_to_openai(&Value::Map(t)) {
             Value::Map(m) => m,
@@ -1580,7 +1578,7 @@ mod tests {
                 assert_eq!(as_str(f.get("name").unwrap()).as_deref(), Some("weather"));
                 assert!(f.contains_key("parameters"));
             }
-            _ => panic!("function map kutilgan"),
+            _ => panic!("expected function map"),
         }
     }
 
@@ -1590,7 +1588,7 @@ mod tests {
         let mut blk = BTreeMap::new();
         blk.insert("type".to_string(), Value::Str("tool_result".to_string()));
         blk.insert("tool_use_id".to_string(), Value::Str("toolu_3".to_string()));
-        blk.insert("content".to_string(), Value::Str("25 daraja".to_string()));
+        blk.insert("content".to_string(), Value::Str("25 degrees".to_string()));
         let mut msg = BTreeMap::new();
         msg.insert("role".to_string(), Value::Str("user".to_string()));
         msg.insert("content".to_string(), Value::List(vec![Value::Map(blk)]));

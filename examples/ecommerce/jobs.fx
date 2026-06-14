@@ -1,20 +1,20 @@
-# jobs.fluxon — fon vazifalar (cron)
-# Har kuni 02:00 da: kam zaxiradagi mahsulotlar va so'nggi 24 soat daromadi.
-# Fayl nomi "cron" emas (batareya bilan to'qnashmasin uchun) — jobs.
+# jobs.fluxon — background jobs (cron)
+# Every day at 02:00: low-stock products and the last 24 hours of revenue.
+# The file is named "jobs" (not "cron") to avoid clashing with the battery.
 use db cron
 
-# Kunlik hisobot vazifasi.
+# Daily report job.
 fn daily_report
-  # Kam zaxiradagi mahsulotlar (stock < 10).
+  # Low-stock products (stock < 10).
   low = db.q "select id, name, stock from products where stock < 10 order by stock asc"
-  log "[cron] Kam zaxiradagi mahsulotlar: ${low.len} ta"
+  log "[cron] Low-stock products: ${low.len}"
   each p in low
-    log "[cron]   - #${p.id} ${p.name}: zaxira ${p.stock}"
+    log "[cron]   - #${p.id} ${p.name}: stock ${p.stock}"
 
-  # So'nggi 24 soat daromadi (placed buyurtmalar).
+  # Last 24 hours of revenue (placed orders).
   r = db.one "select sum(total) s, count(*) c from orders where created > $1 and status=$2" [time.ago 24 :hr :placed]
-  log "[cron] So'nggi 24 soat: ${r.c ?? 0} buyurtma, daromad ${r.s ?? 0}"
+  log "[cron] Last 24 hours: ${r.c ?? 0} orders, revenue ${r.s ?? 0}"
 
-# Har kuni 02:00 da ishga tushir.
+# Run every day at 02:00.
 exp fn register_jobs
   cron.dy 2 0 daily_report
