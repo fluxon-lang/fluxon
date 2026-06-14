@@ -86,8 +86,11 @@ What separates a real language from a toy is a definite answer to any input:
   convention. Structured, leveled logging already landed (`log` with
   `debug`/`info`/`warn`/`err` + `$LOG_LEVEL`/`$LOG_FORMAT`, stdout vs stderr
   split) — #139.
-- **`fluxon check`** — parse + static check without running (fast feedback for
-  the AI agent loop). **Done** — `fluxon check <file.fx>` ships in the CLI.
+- **`fluxon check`** — fast feedback for the AI agent loop. The CLI ships
+  `fluxon check <file.fx>` today, but it is **lex + parse only**: it catches
+  syntax errors without running, yet syntactically valid code referencing an
+  unknown name still exits 0. A real **static/semantic check** (unbound names,
+  arity, type-shape) is still to do.
 - **`fluxon fmt`** — canonical form is the language's philosophy, so a formatter
   is mandatory. Still to do.
 - **Module ecosystem:** `use ./file` exists; instead of versioned packages, for

@@ -155,10 +155,10 @@ bazasi bilan ishlaydi va LLM agentlarni boshqaradi.
   parol hash), **`crypto`**, **`ws`** (websocket), **`cron`**, **`queue`**,
   **`reg`** (agentlar uchun tool registry).
 
-CLI'da `fluxon run`, `fluxon check` (parse + statik tekshiruv), `fluxon test` va
-interaktiv `fluxon repl` bor. Hali yo'l xaritasida turgani (Postgres/MySQL
-backendlari, `fluxon fmt`, paketlash, LSP) [`docs/ROADMAP.md`](docs/ROADMAP.md)
-da kuzatiladi.
+CLI'da `fluxon run`, `fluxon check` (lex + parse, hozircha semantik tekshiruvsiz),
+`fluxon test` va interaktiv `fluxon repl` bor. Hali yo'l xaritasida turgani
+(Postgres/MySQL backendlari, semantik/statik tekshiruv, `fluxon fmt`, paketlash,
+LSP) [`docs/ROADMAP.md`](docs/ROADMAP.md) da kuzatiladi.
 
 Ishga tushirish:
 

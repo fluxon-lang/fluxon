@@ -153,10 +153,10 @@ today.
   password hashing), **`crypto`**, **`ws`** (websocket), **`cron`**, **`queue`**,
   **`reg`** (tool registry for agents).
 
-The CLI ships `fluxon run`, `fluxon check` (parse + static check), `fluxon test`,
-and an interactive `fluxon repl`. What's still on the roadmap (Postgres/MySQL
-backends, `fluxon fmt`, packaging, an LSP) is tracked in
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+The CLI ships `fluxon run`, `fluxon check` (lex + parse, no semantic check yet),
+`fluxon test`, and an interactive `fluxon repl`. What's still on the roadmap
+(Postgres/MySQL backends, semantic/static checking, `fluxon fmt`, packaging, an
+LSP) is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 Run it:
 
