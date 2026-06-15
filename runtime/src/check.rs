@@ -191,8 +191,23 @@ impl Analyzer {
                 self.expr(message)?;
             }
             Stmt::Expr(e) => self.expr(e)?,
+            // A relative-path `use ./mod` defines its alias/basename in the
+            // current scope as an immutable binding (interp::exec_stmt), so
+            // reassigning it (`use ./mod`; `mod <- {}`) is an error. Batteries
+            // (`use http`) bind nothing, so they are left untracked.
+            Stmt::Use { items } => {
+                for it in items {
+                    if crate::interp::is_user_module_path(&it.path) {
+                        let name = it
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| crate::interp::module_basename(&it.path));
+                        self.declare(&name, Mutability::Imm);
+                    }
+                }
+            }
             // No bindings / nothing to walk into.
-            Stmt::Ret(None) | Stmt::Skip | Stmt::Stop | Stmt::Use { .. } | Stmt::Tbl { .. } => {}
+            Stmt::Ret(None) | Stmt::Skip | Stmt::Stop | Stmt::Tbl { .. } => {}
         }
         Ok(())
     }
@@ -456,6 +471,31 @@ if true
         )
         .expect_err("reassigning a module-local immutable inside a block should error");
         assert!(err.contains("is immutable"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn reassign_user_module_alias_errors() {
+        // `use ./mod` binds `mod` as immutable; reassigning it must be flagged.
+        let err = check("use ./mod\nmod <- {}\n")
+            .expect_err("reassigning an imported user-module name should error");
+        assert!(
+            err.contains("cannot be changed with '<-'"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn reassign_aliased_user_module_errors() {
+        let err = check("use ./tools as t\nt = 1\n")
+            .expect_err("reassigning an aliased import should error");
+        assert!(err.contains("is immutable"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn reassign_battery_name_is_ok() {
+        // Batteries bind nothing, so `http` is a free name — `<-` just makes a
+        // mutable local (matches the runtime), never an error.
+        check("use http\nhttp <- 1\n").expect("a battery name is not an immutable binding");
     }
 
     #[test]

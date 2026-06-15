@@ -844,7 +844,16 @@ impl Interp {
         // Seed it with the names visible at the `use` site: the module runs in a
         // transparent child of global (below), so a module-level `=`/`<-` resolves
         // outward and may legitimately update an existing mutable global.
-        let globals: Vec<(String, bool)> = {
+        //
+        // BUT only while globals are still mutable (the normal top-level `use`).
+        // Once frozen (a lazy `use` from a handler after `http.serve`), bind no
+        // longer reaches the global — `=` shadows into a module-local and `<-`
+        // hits the frozen-global error — so the raw mutable flags no longer model
+        // resolution. Seeding empty there is the conservative match: it never
+        // rejects a valid module (it can only miss the rarer frozen-`<-` error).
+        let globals: Vec<(String, bool)> = if self.globals_frozen.get().is_some() {
+            Vec::new()
+        } else {
             let g = self.global.read();
             g.vars.iter().map(|(n, _, m)| (n.to_string(), *m)).collect()
         };
@@ -2196,13 +2205,13 @@ fn swallow_benign(res: Result<usize, String>) -> Result<(), Flow> {
 // Is the `use` path a user file or a battery? User modules are given as a
 // relative path (`./tools`, `../lib/x`). Batteries are a plain name (`http`,
 // `db`) — they dispatch by name and no file is loaded.
-fn is_user_module_path(path: &str) -> bool {
+pub(crate) fn is_user_module_path(path: &str) -> bool {
     path.starts_with("./") || path.starts_with("../") || path == "." || path == ".."
 }
 
 // Derives the binding name from a module path: the last segment, without `.fx`.
 // `./lib/greet` -> `greet`, `./tools` -> `tools`.
-fn module_basename(path: &str) -> String {
+pub(crate) fn module_basename(path: &str) -> String {
     let last = path.rsplit('/').next().unwrap_or(path);
     last.strip_suffix(".fx").unwrap_or(last).to_string()
 }
