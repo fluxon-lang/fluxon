@@ -450,7 +450,9 @@ rand.int a b · rand.str n
 List length `l.len` (member), string length `str.len s` (module).
 
 ### time
-All times — UTC text `"YYYY-MM-DD HH:MM:SS"` (same as SQLite `CURRENT_TIMESTAMP`).
+All times — UTC text `"YYYY-MM-DD HH:MM:SS"` (same as SQLite `CURRENT_TIMESTAMP`). A
+bare date `"YYYY-MM-DD"` is accepted as midnight (`00:00:00`), so calendar dates
+flow through `time.add`/`sub`/`diff`/`fmt` with no manual `" 00:00:00"`.
 ```fluxon
 time.now · time.ago 24 :hr · time.in 60 :min (:sec :min :hr :day) · time.fmt t "..."
 time.sleep 1 · time.sleep 0.5   # waits secs (flt too) — polling/retry backoff

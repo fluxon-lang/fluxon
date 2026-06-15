@@ -935,16 +935,24 @@ fn fmt_unix(unix: i64) -> String {
 fn parse_ts(s: &str) -> Option<i64> {
     let s = s.trim();
     let b = s.as_bytes();
-    if b.len() < 19 {
+    // Accept either a full "YYYY-MM-DD HH:MM:SS" base (>= 19) or a date-only
+    // "YYYY-MM-DD" (exactly 10) — the latter is treated as midnight, so calendar
+    // dates flow through time arithmetic without a hand-appended " 00:00:00".
+    // A partial time (e.g. "...HH:MM", 11..18 chars) is rejected: silently
+    // dropping the minutes a caller wrote would be a surprising data loss.
+    let date_only = b.len() == 10;
+    if !date_only && b.len() < 19 {
         return None;
     }
     let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse::<i64>().ok() };
     let y = num(0, 4)?;
     let mo = num(5, 7)?;
     let d = num(8, 10)?;
-    let h = num(11, 13)?;
-    let mi = num(14, 16)?;
-    let se = num(17, 19)?;
+    let (h, mi, se) = if date_only {
+        (0, 0, 0)
+    } else {
+        (num(11, 13)?, num(14, 16)?, num(17, 19)?)
+    };
     // Validate the ranges — days_from_civil silently "fixes" an overflow (a
     // nonexistent 02-31 -> 03-03), so we reject it here: a wrong date must not be
     // accepted silently in a booking flow.
@@ -981,8 +989,11 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 // UTC = time - offset. Timestamps are ASCII, so byte index = char index (boundary safe).
 fn parse_iso(s: &str) -> Option<i64> {
     let s = s.trim();
-    let base = parse_ts(s)?; // first 19 chars (date + time); len >= 19 guaranteed
-    let mut rest = &s[19..];
+    let base = parse_ts(s)?; // date+time (>= 19 chars) or a date-only midnight (10 chars)
+    // The remainder (fractional second / zone) starts right after the base; a
+    // date-only string has nothing after it.
+    let base_len = if s.len() == 10 { 10 } else { 19 };
+    let mut rest = &s[base_len..];
     // skip the fractional second (".123") — we work at second precision.
     if let Some(after_dot) = rest.strip_prefix('.') {
         let digits = after_dot.bytes().take_while(|b| b.is_ascii_digit()).count();
@@ -2051,7 +2062,10 @@ mod time_tests {
     #[test]
     fn parse_rejects_garbage() {
         assert_eq!(parse_ts("hello"), None);
-        assert_eq!(parse_ts("2023-11-14"), None); // too short (no time)
+        // A bare date is now accepted as midnight (issue #175); a *partial* time
+        // (date + truncated clock) is still rejected.
+        assert_eq!(parse_ts("2023-11-14"), parse_ts("2023-11-14 00:00:00"));
+        assert_eq!(parse_ts("2023-11-14 09:3"), None);
     }
 
     #[test]
@@ -2157,6 +2171,36 @@ mod time_tests {
         // Real edge cases are ACCEPTED:
         assert!(parse_ts("2024-02-29 00:00:00").is_some()); // 2024 leap
         assert!(parse_ts("2026-12-31 23:59:60").is_some()); // leap second (60)
+    }
+
+    #[test]
+    fn parse_ts_accepts_date_only_as_midnight() {
+        // Issue #175: a date-only "YYYY-MM-DD" is treated as midnight, so calendar
+        // dates flow through time arithmetic without appending " 00:00:00".
+        assert_eq!(parse_ts("2026-06-25"), parse_ts("2026-06-25 00:00:00"));
+        assert_eq!(parse_iso("2026-06-25"), parse_iso("2026-06-25 00:00:00"));
+        // Date-only still validates the calendar (no silent overflow).
+        assert_eq!(parse_ts("2026-02-29"), None); // 2026 is not a leap year
+        assert_eq!(parse_ts("2026-13-01"), None); // no month 13
+        // A truncated time is rejected rather than silently dropped.
+        assert_eq!(parse_ts("2026-06-25 09:00"), None);
+        assert_eq!(parse_ts("2026-06-25 09"), None);
+    }
+
+    #[test]
+    fn time_add_accepts_date_only() {
+        // Issue #175: time.add on a bare date works (treated as midnight).
+        let Ok(Value::Str(end)) = time_module(
+            "add",
+            vec![
+                Value::Str("2026-06-25".into()),
+                Value::Int(30),
+                Value::Str("min".into()),
+            ],
+        ) else {
+            panic!("time.add must accept a date-only string");
+        };
+        assert_eq!(end, "2026-06-25 00:30:00");
     }
 
     #[test]
