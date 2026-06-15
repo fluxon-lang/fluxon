@@ -653,7 +653,9 @@ impl Interp {
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
-            match self.exec_stmt(stmt, &self.global.clone()) {
+            // Top level — no enclosing function to return from, so a bare `rep`
+            // is just a value (`tail_used = true`); a Return would be ignored anyway.
+            match self.exec_stmt(stmt, &self.global.clone(), true) {
                 Ok(_) => {}
                 Err(Flow::Error(e)) => return Err(e),
                 Err(Flow::Fail { status, message }) => {
@@ -716,7 +718,9 @@ impl Interp {
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
-            match self.exec_stmt(stmt, &self.global.clone()) {
+            // REPL top level — keep the last expression's value (a bare `rep`
+            // yields its response map for display); `tail_used = true`.
+            match self.exec_stmt(stmt, &self.global.clone(), true) {
                 Ok(v) => last = v,
                 Err(Flow::Error(e)) => return Err(e),
                 Err(Flow::Fail { status, message }) => {
@@ -903,7 +907,9 @@ impl Interp {
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
-            match self.exec_stmt(stmt, scope) {
+            // Module top level — like the script top level, no function to return
+            // from, so a bare `rep` stays a value (`tail_used = true`).
+            match self.exec_stmt(stmt, scope, true) {
                 Ok(_) => {}
                 Err(Flow::Error(e)) => return Err(Flow::Error(e)),
                 Err(Flow::Fail { status, message }) => {
@@ -920,16 +926,23 @@ impl Interp {
     }
 
     // Executes the block in sequence; its value is the last expression (in Fluxon
-    // a block is an expression).
-    fn exec_block(&self, stmts: &[Stmt], env: &Env) -> ExecResult {
+    // a block is an expression). `tail_used` — whether this block's VALUE is
+    // consumed by the caller (an `if` as an assignment RHS, a function body whose
+    // last expression is the return value, ...). It flows to the LAST statement
+    // only; the values of earlier statements are always discarded. It governs
+    // whether a bare `rep` short-circuits (issue #173): a `rep` whose value is
+    // discarded returns from the enclosing function like `ret`, but a `rep` in
+    // value position stays a value so responses can still be built and inspected.
+    fn exec_block(&self, stmts: &[Stmt], env: &Env, tail_used: bool) -> ExecResult {
         let mut last = Value::Nil;
-        for s in stmts {
-            last = self.exec_stmt(s, env)?;
+        let n = stmts.len();
+        for (i, s) in stmts.iter().enumerate() {
+            last = self.exec_stmt(s, env, tail_used && i + 1 == n)?;
         }
         Ok(last)
     }
 
-    fn exec_stmt(&self, stmt: &Stmt, env: &Env) -> ExecResult {
+    fn exec_stmt(&self, stmt: &Stmt, env: &Env, tail_used: bool) -> ExecResult {
         match stmt {
             Stmt::Bind { name, value } => {
                 let v = self.eval(value, env)?;
@@ -1000,17 +1013,39 @@ impl Interp {
             }
             Stmt::Each { vars, iter, body } => self.exec_each(vars, iter, body, env),
             Stmt::Expr(e) => {
+                // `if`/`match`/`try` in statement position propagate `tail_used`
+                // into their branch bodies, so a guard like `if cond \n rep ...`
+                // (the `if` is NOT the consumed tail) short-circuits inside the
+                // branch, while `r = if cond \n rep ...` (consumed) keeps `rep` as
+                // a value. (A normal `self.eval` would treat them as value position.)
+                match e {
+                    Expr::If(ifx) => return self.eval_if(ifx, env, tail_used),
+                    Expr::Match(mx) => return self.eval_match(mx, env, tail_used),
+                    Expr::TryCatch {
+                        body,
+                        catch_var,
+                        catch_body,
+                    } => {
+                        return self.eval_try(
+                            body,
+                            catch_var.as_deref(),
+                            catch_body,
+                            env,
+                            tail_used,
+                        );
+                    }
+                    _ => {}
+                }
                 let v = self.eval(e, env)?;
-                // A bare `rep ...` statement short-circuits the enclosing function
-                // like `ret` (issue #173): a guard clause `if cond \n rep ...` must
-                // stop the handler instead of falling through to a later `rep`
-                // (the last `rep` used to silently win). In expression position
-                // (`r = rep ...`, an argument) `rep` is just a value — only a
-                // standalone `rep ...` statement returns early. A user binding that
-                // shadows `rep` keeps normal call semantics (the shadowing
-                // invariant — see CLAUDE.md): we only return early when the callee
-                // resolves to the `rep` BUILTIN.
-                if self.is_builtin_rep_call(e, env) {
+                // A bare `rep ...` whose value is DISCARDED short-circuits the
+                // enclosing function like `ret` (issue #173): a guard clause
+                // `if cond \n rep ...` must stop the handler instead of falling
+                // through to a later `rep` (the last `rep` used to silently win).
+                // In value position (`r = rep ...`, an argument, a consumed block
+                // tail) `rep` stays a value. Only the BUILTIN `rep` triggers this —
+                // a user binding that shadows the name keeps normal call semantics
+                // (the shadowing invariant — see CLAUDE.md).
+                if !tail_used && self.is_builtin_rep_call(e, env) {
                     return Err(Flow::Return(v));
                 }
                 Ok(v)
@@ -1227,7 +1262,9 @@ impl Interp {
                     s.define(&vars[0], val, true);
                 }
             }
-            match self.exec_block(body, &loop_env) {
+            // The loop body's value is discarded (each returns nil), so
+            // `tail_used = false`: a `rep` inside the loop short-circuits.
+            match self.exec_block(body, &loop_env, false) {
                 Ok(_) => {}
                 Err(Flow::Skip) => continue,
                 Err(Flow::Stop) => break,
@@ -1254,7 +1291,7 @@ impl Interp {
                 // The loop variable is mutable (`<-` allowed in the body).
                 s.define(&vars[0], Value::Int(i), true);
             }
-            match self.exec_block(body, &loop_env) {
+            match self.exec_block(body, &loop_env, false) {
                 Ok(_) => {}
                 Err(Flow::Skip) => {}
                 Err(Flow::Stop) => break,
@@ -1467,13 +1504,15 @@ impl Interp {
                 // as Err anyway, so this is a pass-through.
                 self.eval(inner, env)
             }
+            // Reached via `eval` — an expression position (assignment RHS,
+            // operand, argument), so the value IS used: `tail_used = true`.
             Expr::TryCatch {
                 body,
                 catch_var,
                 catch_body,
-            } => self.eval_try(body, catch_var.as_deref(), catch_body, env),
-            Expr::If(ifx) => self.eval_if(ifx, env),
-            Expr::Match(mx) => self.eval_match(mx, env),
+            } => self.eval_try(body, catch_var.as_deref(), catch_body, env, true),
+            Expr::If(ifx) => self.eval_if(ifx, env, true),
+            Expr::Match(mx) => self.eval_match(mx, env, true),
             Expr::Fail { status, message } => {
                 let st = match status {
                     Some(e) => match self.eval(e, env)? {
@@ -1567,20 +1606,25 @@ impl Interp {
     // run the catch body. ret/skip/stop flow signals are not caught: they pass
     // through try to control the function/loop (flow, not an error). If there is a
     // catch variable, a {message, status} map is bound to it (status — int or nil).
+    // `tail_used` flows into the body/catch blocks so a `rep` in a try used as a
+    // value (`r = try ...`) stays a value, while a guard `rep` short-circuits.
     fn eval_try(
         &self,
         body: &[Stmt],
         catch_var: Option<&str>,
         catch_body: &[Stmt],
         env: &Env,
+        tail_used: bool,
     ) -> EvalResult {
         let inner = Scope::child_of(env);
-        match self.exec_block(body, &inner) {
+        match self.exec_block(body, &inner, tail_used) {
             Ok(v) => Ok(v),
             Err(Flow::Fail { status, message }) => {
-                self.run_catch(catch_var, status, message, catch_body, env)
+                self.run_catch(catch_var, status, message, catch_body, env, tail_used)
             }
-            Err(Flow::Error(message)) => self.run_catch(catch_var, None, message, catch_body, env),
+            Err(Flow::Error(message)) => {
+                self.run_catch(catch_var, None, message, catch_body, env, tail_used)
+            }
             // ret/skip/stop — flow signals, not caught.
             Err(other) => Err(other),
         }
@@ -1594,6 +1638,7 @@ impl Interp {
         message: String,
         catch_body: &[Stmt],
         env: &Env,
+        tail_used: bool,
     ) -> EvalResult {
         let inner = Scope::child_of(env);
         if let Some(name) = catch_var {
@@ -1605,24 +1650,27 @@ impl Interp {
             );
             inner.write().define(name, Value::Map(m), false);
         }
-        self.exec_block(catch_body, &inner)
+        self.exec_block(catch_body, &inner, tail_used)
     }
 
-    fn eval_if(&self, ifx: &IfExpr, env: &Env) -> EvalResult {
+    // `tail_used` flows into the selected branch: `r = if ... \n rep ...` keeps
+    // `rep` as a value, but a guard `if cond \n rep ...` (value discarded) lets
+    // the branch's `rep` short-circuit the enclosing function (issue #173).
+    fn eval_if(&self, ifx: &IfExpr, env: &Env, tail_used: bool) -> EvalResult {
         for (cond, block) in &ifx.arms {
             if self.eval(cond, env)?.truthy() {
                 let inner = Scope::child_of(env);
-                return self.exec_block(block, &inner);
+                return self.exec_block(block, &inner, tail_used);
             }
         }
         if let Some(eb) = &ifx.else_block {
             let inner = Scope::child_of(env);
-            return self.exec_block(eb, &inner);
+            return self.exec_block(eb, &inner, tail_used);
         }
         Ok(Value::Nil)
     }
 
-    fn eval_match(&self, mx: &MatchExpr, env: &Env) -> EvalResult {
+    fn eval_match(&self, mx: &MatchExpr, env: &Env, tail_used: bool) -> EvalResult {
         let subj = self.eval(&mx.subject, env)?;
         for arm in &mx.arms {
             let matched = match &arm.pattern {
@@ -1632,7 +1680,7 @@ impl Interp {
             };
             if matched {
                 let inner = Scope::child_of(env);
-                return self.exec_block(&arm.body, &inner);
+                return self.exec_block(&arm.body, &inner, tail_used);
             }
         }
         Ok(Value::Nil)
@@ -2032,7 +2080,11 @@ impl Interp {
                             s.define(p, a, true);
                         }
                     }
-                    match self.exec_block(&fv.body, &call_env) {
+                    // A function body's last expression IS the return value, so
+                    // `tail_used = true`: a trailing `rep` becomes the value (same
+                    // observable result as returning it), while a guard `rep`
+                    // earlier in the body short-circuits.
+                    match self.exec_block(&fv.body, &call_env, true) {
                         Ok(v) => Ok(v),                // last expression — returns
                         Err(Flow::Return(v)) => Ok(v), // early ret
                         Err(other) => Err(other),      // fail/err/skip/stop

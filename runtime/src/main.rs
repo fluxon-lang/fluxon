@@ -992,6 +992,42 @@ fn f ->
 "#);
     }
 
+    // Issue #173 (PR review): a `rep` that is the tail of an `if`/`match` branch
+    // used as a VALUE (assignment RHS) must NOT short-circuit — it stays a value
+    // so code after the assignment still runs. Only a value-DISCARDED `rep`
+    // (a guard) returns early.
+    #[test]
+    fn rep_if_branch_qiymat_pozitsiyada_short_circuit_qilmaydi() {
+        run(r#"
+fn handler ->
+  resp = if true
+    rep 200 {a:1}
+  else
+    rep 404 {a:2}
+  # This line must still run — the `rep` above is the value of `resp`, not a return.
+  marker = 1
+  resp.body.a + marker
+v = handler()
+(v == 2) | (fail "rep in value-position if-branch short-circuited, got ${v}")
+"#);
+    }
+
+    // Issue #173 (PR review): the guard case still short-circuits even when the
+    // `if` is in statement position — the value is discarded so the branch `rep`
+    // returns from the function (regression guard alongside the value-position test).
+    #[test]
+    fn rep_guard_if_statement_pozitsiya_short_circuit() {
+        run(r#"
+fn handler ->
+  if true
+    rep 200 {a:1}
+  log.info "should NOT run"
+  rep 200 {a:2}
+r = handler()
+(r.body.a == 1) | (fail "guard rep did not short-circuit, got ${r.body.a}")
+"#);
+    }
+
     // Even after the inline form was added, the block form (with a call condition)
     // must still work — regression check.
     #[test]
