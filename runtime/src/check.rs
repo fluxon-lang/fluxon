@@ -135,9 +135,18 @@ impl Analyzer {
         match s {
             // The value is evaluated before the name is bound (interp order), so
             // analyze it first.
-            Stmt::Bind { name, value } | Stmt::ExpBind { name, value } => {
+            Stmt::Bind { name, value } => {
                 self.expr(value)?;
                 self.bind(name)?;
+            }
+            // `exp NAME = expr` does NOT go through the bind/immutability check at
+            // runtime: interp defines it directly (overwriting), so exporting a
+            // value under a name already bound with `=` (`handler = ...` then
+            // `exp handler = handler`) is a valid module-export pattern. Treat it
+            // as a fresh (re)declaration, never a reassignment error.
+            Stmt::ExpBind { name, value } => {
+                self.expr(value)?;
+                self.declare(name, Mutability::Imm);
             }
             Stmt::Assign { target, value } => {
                 self.expr(value)?;
@@ -384,6 +393,14 @@ each k in [1, 2, 3]
 "#,
         )
         .expect("a `<-` accumulator across a block is valid");
+    }
+
+    #[test]
+    fn exp_export_of_existing_bind_is_ok() {
+        // `exp` defines directly at runtime (no immutability check), so exporting
+        // a value under a name already bound with `=` is a valid pattern.
+        check("handler = 1\nexp handler = handler\n")
+            .expect("exporting an existing `=` binding under the same name is valid");
     }
 
     #[test]

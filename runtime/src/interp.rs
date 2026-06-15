@@ -838,6 +838,10 @@ impl Interp {
         })?;
         let toks = crate::lexer::lex(&src).map_err(Flow::err)?;
         let prog = crate::parser::parse(toks).map_err(Flow::err)?;
+        // Static analysis on the module body too — an imported handler must not
+        // smuggle in a reassignment-of-immutable that would only 500 when hit
+        // (the entry file is analyzed up front; modules are loaded here) (#178).
+        crate::check::analyze(&prog).map_err(Flow::err)?;
 
         // Module scope — a child of global: builtins (`log`/`rep`) and top-level
         // fns are visible through the lookup chain, but the module's own
