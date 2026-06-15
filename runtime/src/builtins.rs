@@ -338,6 +338,18 @@ fn str_module(func: &str, args: Vec<Value>) -> R {
             }
         }
         "str" => Ok(Value::Str(arg(&args, 0, "str.str")?.to_text())),
+        // str.cmp a b -> -1 | 0 | 1, lexicographic by Unicode code point. The
+        // canonical three-way compare for sorting/pagination cursor keys; `<`/`>`
+        // on str work too, this gives a single ordering value. See issue #174.
+        "cmp" => {
+            let a = arg_str(&args, 0, "str.cmp")?;
+            let b = arg_str(&args, 1, "str.cmp")?;
+            Ok(Value::Int(match a.cmp(&b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }))
+        }
         // str.sym "pending" → :pending. For turning query-string statuses into sym
         // filters (db.eq {status:(str.split q "," |> ...).map str.sym}).
         // Previously a json.dec("\":"+s+"\"") hack was used for this (issue #78).

@@ -1769,6 +1769,15 @@ impl Interp {
             // mixed/float arithmetic
             (op, a, b) if is_num(&a) && is_num(&b) => flt_arith(op, to_f64(&a), to_f64(&b)),
 
+            // str ordering — lexicographic by Unicode scalar value (byte order
+            // for UTF-8 is the same as code point order). Gives `<`/`>`/`<=`/`>=`
+            // a canonical meaning for strings: sort names/ids/timestamps without
+            // falling back to time.diff. See issue #174.
+            (BinOp::Lt, Str(a), Str(b)) => Ok(Bool(a < b)),
+            (BinOp::Le, Str(a), Str(b)) => Ok(Bool(a <= b)),
+            (BinOp::Gt, Str(a), Str(b)) => Ok(Bool(a > b)),
+            (BinOp::Ge, Str(a), Str(b)) => Ok(Bool(a >= b)),
+
             (op, a, b) => Err(Flow::err(format!(
                 "{:?} operator cannot be applied to {} and {}",
                 op,
