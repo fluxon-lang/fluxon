@@ -179,10 +179,17 @@ still ~1070 lines; a later optional step can split builder stages from dispatch.
 
 ---
 
-## Step 5 — `interp.rs` → `interp/` submodules (optional / lower priority)
+## Step 5 — `interp.rs` → `interp/` submodules ✅ DONE (PR for #188)
 
-The 1829-line `impl Interp` can be split across files using Rust's "impl block per
-file" pattern (same struct, methods in different `impl Interp` blocks).
+The 1829-line `impl Interp` was split across files using Rust's "impl block per
+file" pattern (same struct, methods in different `impl Interp` blocks). Root
+`interp/mod.rs` keeps the `Interp` struct + lifecycle (`new`/`freeze_globals`/
+`db`/`migrate`); each cluster got its own file. Method visibility was widened from
+private to `pub(crate)` only where a method is now called across submodule
+boundaries — no behavior change, all 490 tests green, fmt/clippy clean. Public
+surface (`Env`/`Flow`/`Parent`/`Scope`/`EvalResult` + the public methods) is
+re-exported from `mod.rs`, so external call sites (`value`/`par_mod`/`builtins`)
+were untouched.
 
 | New file | ~Lines | Contents |
 |----------|-------:|----------|
