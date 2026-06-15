@@ -20,6 +20,7 @@ mod ai_mod;
 mod ast;
 mod auth_mod;
 mod builtins;
+mod check;
 mod cron_mod;
 mod crypto_mod;
 mod db_mod;
@@ -244,11 +245,15 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     (passed, failed)
 }
 
-// Checks the syntax: lex + parse, but skips interp — the code is NOT executed
-// (no side effects). On success Ok(()), otherwise the error text.
+// Checks the syntax: lex + parse + static analysis, but skips interp — the code
+// is NOT executed (no side effects). The static pass catches whole classes of
+// bug that the runtime would otherwise only surface on a specific request path
+// (e.g. reassigning a `=`-bound var inside a block — issue #178). On success
+// Ok(()), otherwise the error text.
 fn check_source(src: &str) -> Result<(), String> {
     let toks = lexer::lex(src)?;
-    parser::parse(toks)?;
+    let prog = parser::parse(toks)?;
+    check::analyze(&prog)?;
     Ok(())
 }
 
@@ -257,6 +262,9 @@ fn check_source(src: &str) -> Result<(), String> {
 fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
+    // Static analysis BEFORE interp: catch reassignment-of-immutable up front so
+    // a server never boots with a latent 500 hiding on a request path (#178).
+    check::analyze(&prog)?;
     // Arc<Interp>: http.serve applies handlers on server threads, so the interp
     // must be shareable across threads.
     let interp = interp::Interp::new_arc();
