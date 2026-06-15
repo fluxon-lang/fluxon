@@ -978,6 +978,20 @@ v = build()
 "#);
     }
 
+    // Issue #173 (PR review): the short-circuit must NOT fire when a user binding
+    // shadows the builtin `rep`. Only the BUILTIN `rep` returns early — a user fn
+    // named `rep` keeps normal call semantics so the body runs to completion.
+    #[test]
+    fn rep_shadow_qilingan_short_circuit_qilmaydi() {
+        run(r#"
+fn f ->
+  rep = \x -> x
+  rep 1
+  99
+(f() == 99) | (fail "shadowed rep short-circuited, got ${f()}")
+"#);
+    }
+
     // Even after the inline form was added, the block form (with a call condition)
     // must still work — regression check.
     #[test]

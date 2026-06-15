@@ -1006,8 +1006,11 @@ impl Interp {
                 // stop the handler instead of falling through to a later `rep`
                 // (the last `rep` used to silently win). In expression position
                 // (`r = rep ...`, an argument) `rep` is just a value — only a
-                // standalone `rep ...` statement returns early.
-                if is_rep_call(e) {
+                // standalone `rep ...` statement returns early. A user binding that
+                // shadows `rep` keeps normal call semantics (the shadowing
+                // invariant — see CLAUDE.md): we only return early when the callee
+                // resolves to the `rep` BUILTIN.
+                if self.is_builtin_rep_call(e, env) {
                     return Err(Flow::Return(v));
                 }
                 Ok(v)
@@ -1538,6 +1541,25 @@ impl Interp {
                 }
             }
         }
+    }
+
+    // True if `e` is a bare `rep ...` call whose callee resolves to the `rep`
+    // BUILTIN. A bare builtin `rep` statement short-circuits the enclosing
+    // function like `ret` (issue #173) — see the `Stmt::Expr` arm. A user
+    // binding that shadows `rep` (a local/param/module export/user fn) must keep
+    // normal call semantics, so we resolve the name first: users cannot create
+    // `Value::Native`, so a `Native` named "rep" is unambiguously the builtin.
+    fn is_builtin_rep_call(&self, e: &Expr, env: &Env) -> bool {
+        let Expr::Call { callee, .. } = e else {
+            return false;
+        };
+        let Expr::Ident(n) = callee.as_ref() else {
+            return false;
+        };
+        if n != "rep" {
+            return false;
+        }
+        matches!(self.lookup(n, env), Ok(Value::Native(nf)) if nf.name == "rep")
     }
 
     // try/catch (issue #125). The body runs in its own scope; if `fail`
@@ -2097,14 +2119,6 @@ fn swallow_benign(res: Result<usize, String>) -> Result<(), Flow> {
             }
         }
     }
-}
-
-// True if the expression is a bare `rep ...` call (the callee is the `rep`
-// builtin ident). A bare `rep` statement short-circuits the enclosing function
-// like `ret` (issue #173) — see the `Stmt::Expr` arm in exec_stmt.
-fn is_rep_call(e: &Expr) -> bool {
-    matches!(e, Expr::Call { callee, .. }
-        if matches!(callee.as_ref(), Expr::Ident(n) if n == "rep"))
 }
 
 // Is the `use` path a user file or a battery? User modules are given as a
