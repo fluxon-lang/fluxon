@@ -446,6 +446,7 @@ str.len s · str.slice s a b · str.up s · str.low s · str.split s sep → lis
 str.has s sub → bool · str.int s · str.str x
 str.trim s · str.replace s old new · str.starts s pre → bool · str.ends s suf → bool
 str.pad s n ch → pads LEFT to n chars ("7"→"007") · str.repeat s n
+str.cmp a b → -1|0|1 (lexicographic). `<` `>` `<=` `>=` also compare strings.
 math.floor x · math.ceil x · math.abs x · math.round x
 math.min a b · math.max a b · math.pow a b · math.sqrt x → flt
 rand.int a b · rand.str n
