@@ -134,10 +134,12 @@ home module and `pub(crate)` them. 94 tests split across the modules they cover.
 
 ---
 
-## Step 3 — `builtins.rs` → `builtins/` submodules
+## Step 3 — `builtins.rs` → `builtins/` submodules ✅ DONE (PR for #186)
 
 Root `builtins.rs` keeps `install()`, the log subsystem, `is_module`/`call_module`
-dispatch, and the shared `arg*` helpers; each built-in module gets its own file.
+dispatch, and `R`; the shared `arg*` helpers moved to `builtins/args.rs`; each
+built-in module got its own file. Façade is 353 lines (down from 2937); test
+count unchanged (456 lib + integration). No external call site touched.
 
 | New file | ~Lines | Contents |
 |----------|-------:|----------|
