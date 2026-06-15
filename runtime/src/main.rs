@@ -935,6 +935,99 @@ r3 = rep 200 {data:1} {set_cookie:"s=abc"}
         );
     }
 
+    // Issue #173: a bare `rep ...` statement short-circuits the enclosing function
+    // like `ret`. A guard clause must stop execution — the FIRST rep on the taken
+    // path wins, not the last rep in the body.
+    #[test]
+    fn rep_guard_clause_short_circuit() {
+        run(r#"
+fn handler ->
+  if true
+    rep 200 {a:1}
+  rep 200 {a:2}
+r = handler()
+(r.status == 200) | (fail "status broke: ${r.status}")
+# Old (buggy) behavior returned {a:2}; the guard's rep must win now.
+(r.body.a == 1) | (fail "rep did not short-circuit, got ${r.body.a}")
+"#);
+    }
+
+    // Issue #173: `ret rep ...` (the old workaround) keeps working unchanged.
+    #[test]
+    fn rep_ret_rep_baribir_ishlaydi() {
+        run(r#"
+fn handler ->
+  if true
+    ret rep 200 {a:1}
+  rep 200 {a:2}
+r = handler()
+(r.body.a == 1) | (fail "ret rep broke, got ${r.body.a}")
+"#);
+    }
+
+    // Issue #173: `rep` in EXPRESSION position (assignment RHS) is still just a
+    // value — it does not short-circuit, so a response can be built and inspected.
+    #[test]
+    fn rep_expr_pozitsiyada_qiymat() {
+        run(r#"
+fn build ->
+  r = rep 200 {a:1}
+  r.body.a + 10
+v = build()
+(v == 11) | (fail "rep in expr position short-circuited, got ${v}")
+"#);
+    }
+
+    // Issue #173 (PR review): the short-circuit must NOT fire when a user binding
+    // shadows the builtin `rep`. Only the BUILTIN `rep` returns early — a user fn
+    // named `rep` keeps normal call semantics so the body runs to completion.
+    #[test]
+    fn rep_shadow_qilingan_short_circuit_qilmaydi() {
+        run(r#"
+fn f ->
+  rep = \x -> x
+  rep 1
+  99
+(f() == 99) | (fail "shadowed rep short-circuited, got ${f()}")
+"#);
+    }
+
+    // Issue #173 (PR review): a `rep` that is the tail of an `if`/`match` branch
+    // used as a VALUE (assignment RHS) must NOT short-circuit — it stays a value
+    // so code after the assignment still runs. Only a value-DISCARDED `rep`
+    // (a guard) returns early.
+    #[test]
+    fn rep_if_branch_qiymat_pozitsiyada_short_circuit_qilmaydi() {
+        run(r#"
+fn handler ->
+  resp = if true
+    rep 200 {a:1}
+  else
+    rep 404 {a:2}
+  # This line must still run — the `rep` above is the value of `resp`, not a return.
+  marker = 1
+  resp.body.a + marker
+v = handler()
+(v == 2) | (fail "rep in value-position if-branch short-circuited, got ${v}")
+"#);
+    }
+
+    // Issue #173 (PR review): the guard case still short-circuits even when the
+    // `if` is in statement position — the value is discarded so the branch `rep`
+    // returns from the function (regression guard alongside the value-position test).
+    #[test]
+    fn rep_guard_if_statement_pozitsiya_short_circuit() {
+        run(r#"
+fn handler ->
+  if true
+    rep 200 {a:1}
+  log.info "should NOT run"
+  rep 200 {a:2}
+r = handler()
+(r.body.a == 1) | (fail "guard rep did not short-circuit, got ${r.body.a}")
+"#);
+    }
+
     // Even after the inline form was added, the block form (with a call condition)
     // must still work — regression check.
     #[test]
