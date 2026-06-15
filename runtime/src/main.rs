@@ -85,7 +85,7 @@ fn main() -> ExitCode {
                 Ok(s) => s,
                 Err(code) => return code,
             };
-            match check_source(&src) {
+            match check_source_at(&src, std::path::Path::new(&path)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("Fluxon error: {}", e);
@@ -255,6 +255,20 @@ fn check_source(src: &str) -> Result<(), String> {
     let prog = parser::parse(toks)?;
     check::analyze(&prog)?;
     Ok(())
+}
+
+// Like `check_source`, but also recursively static-checks the user modules the
+// entry imports (`use ./...`) — resolved relative to the entry file's directory.
+// This is what the `check` command runs so the gate is not blind to the bug
+// living in an imported handler/route module (issue #178).
+fn check_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
+    let toks = lexer::lex(src)?;
+    let prog = parser::parse(toks)?;
+    let base = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    check::check_program_with_imports(&prog, base)
 }
 
 // Runs the source. `path` is the file's path; `use ./file` modules are resolved
@@ -3278,6 +3292,42 @@ log "${fib 10}"
             run_source("x = nomalum_funksiya 5\n").is_err(),
             "run should execute this code and error (unlike check)"
         );
+    }
+
+    // `check` follows relative-path imports: a #178 reassignment hidden in an
+    // imported module is caught up front, not left for run/request time.
+    #[test]
+    fn check_follows_imported_modules() {
+        let dir = std::env::temp_dir().join(format!("fx_check_imports_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let routes = dir.join("routes.fx");
+        let main = dir.join("main.fx");
+        std::fs::write(
+            &routes,
+            "exp fn handler req ->\n  result = {}\n  if true\n    result = result.set \"a\" 1\n  rep 200 result\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main,
+            "use http\nuse ./routes\nhttp.on :get \"/x\" routes.handler\n",
+        )
+        .unwrap();
+
+        let src = std::fs::read_to_string(&main).unwrap();
+        let err = check_source_at(&src, &main)
+            .expect_err("check should follow ./routes and flag the immutable reassignment");
+        assert!(err.contains("is immutable"), "unexpected: {}", err);
+
+        // A clean imported module passes.
+        std::fs::write(
+            &routes,
+            "exp fn handler req ->\n  result <- {}\n  if true\n    result <- result.set \"a\" 1\n  rep 200 result\n",
+        )
+        .unwrap();
+        let src = std::fs::read_to_string(&main).unwrap();
+        check_source_at(&src, &main).expect("a clean imported module should pass check");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // parse_args: recognizes the `check` command and puts the file into Command::Check.

@@ -22,7 +22,8 @@
 //! ever miss an error, never invent one against valid code.
 
 use crate::ast::{Expr, IfExpr, MapEntry, MatchExpr, Program, Stmt, StrPiece};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mutability {
@@ -359,6 +360,99 @@ pub fn analyze_module(prog: &Program, globals: &[(String, bool)]) -> Result<(), 
     // global, exactly like the runtime's `child_of(global)`.
     a.push(false);
     a.stmts(prog)
+}
+
+/// Static-check an entry program together with every relative-path (`use ./...`)
+/// module it imports — the coverage `fluxon check` needs for the common
+/// "entry imports handlers/routes" layout, where the reassignment bug lives in a
+/// module and would otherwise only surface at `run` time. `base` is the entry
+/// file's directory (where its `use ./...` paths resolve from).
+pub fn check_program_with_imports(prog: &Program, base: &Path) -> Result<(), String> {
+    // The entry runs at the global scope — analyze it fresh.
+    analyze(prog)?;
+    // Names a module-level `=`/`<-` can resolve outward to (the entry's top-level
+    // globals). Modules are children of the SAME global regardless of nesting, so
+    // one seed serves them all. We mark every name *mutable* (permissive): we
+    // cannot know the exact runtime mutability/ordering statically, and a
+    // permissive seed can only ever miss an error, never invent one — the real
+    // #178 target (module-/handler-local immutable reassignment) is unaffected.
+    let seed = entry_global_seed(prog);
+    let mut visited = HashSet::new();
+    check_imports(prog, base, &seed, &mut visited)
+}
+
+// Collects the names the entry binds at the top level (so an imported module's
+// outward-resolving `=`/`<-` is not mistaken for a fresh immutable local). Only
+// direct top-level statements define globals — binds inside top-level blocks
+// stay block-local — so we do not recurse here.
+fn entry_global_seed(prog: &Program) -> Vec<(String, bool)> {
+    let mut names = Vec::new();
+    for stmt in prog {
+        match stmt {
+            Stmt::Bind { name, .. } | Stmt::ExpBind { name, .. } | Stmt::FnDecl { name, .. } => {
+                names.push((name.clone(), true))
+            }
+            Stmt::Assign { target, .. } => {
+                if let Expr::Ident(name) = target.as_ref() {
+                    names.push((name.clone(), true));
+                }
+            }
+            Stmt::Use { items } => {
+                for it in items {
+                    if crate::interp::is_user_module_path(&it.path) {
+                        let name = it
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| crate::interp::module_basename(&it.path));
+                        names.push((name, true));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+// Walks a program's `use ./...` imports, resolving + analyzing each user module
+// (and its own imports, recursively). `visited` dedupes shared imports and
+// breaks cycles. Resolution mirrors `interp::load_module`: base + path, `.fx`
+// default extension, canonicalize. A path that cannot be resolved or read is
+// skipped (not a check failure) — `run` reports a genuinely missing module.
+fn check_imports(
+    prog: &Program,
+    base: &Path,
+    seed: &[(String, bool)],
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    for stmt in prog {
+        let Stmt::Use { items } = stmt else { continue };
+        for it in items {
+            if !crate::interp::is_user_module_path(&it.path) {
+                continue;
+            }
+            let mut full = base.join(&it.path);
+            if full.extension().is_none() {
+                full.set_extension("fx");
+            }
+            let Ok(canon) = full.canonicalize() else {
+                continue;
+            };
+            if !visited.insert(canon.clone()) {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&canon) else {
+                continue;
+            };
+            let toks = crate::lexer::lex(&src)?;
+            let modprog = crate::parser::parse(toks)?;
+            analyze_module(&modprog, seed)?;
+            // Nested imports resolve relative to THIS module's directory.
+            let mod_base = canon.parent().unwrap_or(base);
+            check_imports(&modprog, mod_base, seed, visited)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
