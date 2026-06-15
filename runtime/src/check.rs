@@ -322,6 +322,30 @@ pub fn analyze(prog: &Program) -> Result<(), String> {
     a.stmts(prog)
 }
 
+/// Analyze an imported module body. At runtime a module executes in a
+/// transparent child of the global scope (`Scope::child_of(&self.global)`), so a
+/// module-level `=`/`<-` resolves *outward* into the names already visible at the
+/// `use` site — and reassigning an existing **mutable** global there is accepted
+/// by `interp::bind`/`assign`. `globals` seeds that outer scope as
+/// `(name, is_mutable)` so the pass does not mistake such a reassignment for a
+/// fresh immutable module-local and reject a program the runtime runs fine.
+pub fn analyze_module(prog: &Program, globals: &[(String, bool)]) -> Result<(), String> {
+    let mut a = Analyzer::new();
+    for (name, mutable) in globals {
+        let m = if *mutable {
+            Mutability::Mut
+        } else {
+            Mutability::Imm
+        };
+        a.declare(name, m);
+    }
+    // The module body is a transparent (non-boundary) child of the seeded global
+    // scope: a module-local bind shadows rather than collides with a same-named
+    // global, exactly like the runtime's `child_of(global)`.
+    a.push(false);
+    a.stmts(prog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +417,45 @@ each k in [1, 2, 3]
 "#,
         )
         .expect("a `<-` accumulator across a block is valid");
+    }
+
+    fn check_module(src: &str, globals: &[(&str, bool)]) -> Result<(), String> {
+        let toks = lexer::lex(src).expect("lex");
+        let prog = parser::parse(toks).expect("parse");
+        let seed: Vec<(String, bool)> = globals.iter().map(|(n, m)| (n.to_string(), *m)).collect();
+        analyze_module(&prog, &seed)
+    }
+
+    #[test]
+    fn module_reassigns_existing_mutable_global_is_ok() {
+        // The reviewer's case: the entry file declared `x <- 0` (mutable global)
+        // before `use`; a module-level `x = 1` / `x = 2` resolves outward to that
+        // mutable global, which the runtime accepts — so it must not be flagged.
+        check_module("x = 1\nx = 2\n", &[("x", true)])
+            .expect("reassigning an existing mutable global from a module is valid");
+    }
+
+    #[test]
+    fn module_reassigns_immutable_global_errors() {
+        // An immutable global of the same name is not updatable from the module.
+        let err = check_module("x = 1\n", &[("x", false)])
+            .expect_err("binding over an immutable global from a module should error");
+        assert!(err.contains("is immutable"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn module_local_immutable_reassign_in_block_errors() {
+        // A fresh module-local (not a global) still gets the issue #178 check.
+        let err = check_module(
+            r#"
+result = {}
+if true
+  result = result.set "a" 1
+"#,
+            &[("log", false), ("rep", false)],
+        )
+        .expect_err("reassigning a module-local immutable inside a block should error");
+        assert!(err.contains("is immutable"), "unexpected: {err}");
     }
 
     #[test]

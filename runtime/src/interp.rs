@@ -841,7 +841,14 @@ impl Interp {
         // Static analysis on the module body too — an imported handler must not
         // smuggle in a reassignment-of-immutable that would only 500 when hit
         // (the entry file is analyzed up front; modules are loaded here) (#178).
-        crate::check::analyze(&prog).map_err(Flow::err)?;
+        // Seed it with the names visible at the `use` site: the module runs in a
+        // transparent child of global (below), so a module-level `=`/`<-` resolves
+        // outward and may legitimately update an existing mutable global.
+        let globals: Vec<(String, bool)> = {
+            let g = self.global.read();
+            g.vars.iter().map(|(n, _, m)| (n.to_string(), *m)).collect()
+        };
+        crate::check::analyze_module(&prog, &globals).map_err(Flow::err)?;
 
         // Module scope — a child of global: builtins (`log`/`rep`) and top-level
         // fns are visible through the lookup chain, but the module's own
