@@ -279,6 +279,18 @@ fn path_segments(path: &str) -> Vec<&str> {
     path.split('/').filter(|s| !s.is_empty()).collect()
 }
 
+// Normalizes a route method symbol to the lowercase form used by incoming
+// requests (`req.method().as_str().to_lowercase()`). The docs prescribe `:del`
+// as the canonical DELETE form, so we map the documented short spelling onto
+// the actual HTTP method name — otherwise `:del` routes never match (issue #177).
+fn normalize_method(s: &str) -> String {
+    let m = s.to_lowercase();
+    match m.as_str() {
+        "del" => "delete".to_string(),
+        _ => m,
+    }
+}
+
 // Finds the first route matching method+path; on a match returns a params map.
 fn match_route(
     routes: &[Route],
@@ -1189,7 +1201,7 @@ impl Interp {
     // http.on :method "/path" handler
     fn http_on(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let method = match args.first() {
-            Some(Value::Sym(s)) | Some(Value::Str(s)) => s.to_lowercase(),
+            Some(Value::Sym(s)) | Some(Value::Str(s)) => normalize_method(s),
             _ => {
                 return Err(Flow::err(
                     "http.on: argument 1 must be a method (:get/:post...)",
@@ -3543,6 +3555,26 @@ mod tests {
         let (_r, params) =
             match_route(&routes, "get", "/users/a%2Fb").expect("one segment — match");
         assert!(matches!(params.get("name"), Some(Value::Str(s)) if s == "a%2Fb"));
+    }
+
+    #[test]
+    fn del_canonical_delete_ga_map_qilinadi() {
+        // `:del` is the documented canonical DELETE form — it must normalize to
+        // "delete" so the route matches incoming DELETE requests (issue #177).
+        assert_eq!(normalize_method("del"), "delete");
+        assert_eq!(normalize_method("DEL"), "delete");
+        // The explicit/standard spellings stay as-is (lowercased).
+        assert_eq!(normalize_method("delete"), "delete");
+        assert_eq!(normalize_method("DELETE"), "delete");
+        assert_eq!(normalize_method("get"), "get");
+
+        // A `:del` route matches a "delete" request, mirroring runtime dispatch.
+        let routes = vec![Route {
+            method: normalize_method("del"),
+            pattern: parse_pattern("/x"),
+            handler: Value::Nil,
+        }];
+        assert!(match_route(&routes, "delete", "/x").is_some());
     }
 
     // --- CORS (issue #135) ---
