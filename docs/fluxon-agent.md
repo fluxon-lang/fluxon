@@ -59,11 +59,12 @@ new_id()                  # nullary call (empty parens REQUIRED to call)
 new_id                    # NOT a call — the function VALUE (for callbacks/reg)
 \x -> x * 2               # lambda
 ```
-`ret` works INSIDE a lambda too — guard-clause (instead of deep nesting):
+`ret` works INSIDE a lambda too — guard-clause (instead of deep nesting). A bare
+`rep` already short-circuits the handler, so `ret` is optional in front of it:
 ```fluxon
 http.on :post "/x" \req ->
   if !req.body.email
-    ret rep 400 {error:"email required"}
+    rep 400 {error:"email required"}   # stops here — `ret` not needed
   rep 201 (db.ins "t" {...})
 ```
 
@@ -171,7 +172,9 @@ http.serve 8080
   `req.query`, `req.headers`. Missing key → `nil`. Reading repeated headers
   (req and res): values joined `", "` (`cookie`: `"; "`); repeated `set-cookie`
   in `res.headers` → list.
-- `rep status body` (map→auto JSON). Redirect: `rep 302 {location:url}`.
+- `rep status body` (map→auto JSON). A bare `rep` short-circuits the handler
+  (like `ret`): a guard `if cond \n rep 400 ...` stops — code after it on that
+  path does not run. Redirect: `rep 302 {location:url}`.
 - Custom headers: optional 3rd arg map — `rep 200 "<h1>" {content_type:"text/html"}`.
   Key `_`→`-` (`content_type`→`Content-Type`); name case-insensitive. Repeated
   header (multiple Set-Cookie): list value — `rep 200 nil {set_cookie:["a=1" "b=2"]}`.

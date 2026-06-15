@@ -999,7 +999,19 @@ impl Interp {
                 })
             }
             Stmt::Each { vars, iter, body } => self.exec_each(vars, iter, body, env),
-            Stmt::Expr(e) => self.eval(e, env),
+            Stmt::Expr(e) => {
+                let v = self.eval(e, env)?;
+                // A bare `rep ...` statement short-circuits the enclosing function
+                // like `ret` (issue #173): a guard clause `if cond \n rep ...` must
+                // stop the handler instead of falling through to a later `rep`
+                // (the last `rep` used to silently win). In expression position
+                // (`r = rep ...`, an argument) `rep` is just a value — only a
+                // standalone `rep ...` statement returns early.
+                if is_rep_call(e) {
+                    return Err(Flow::Return(v));
+                }
+                Ok(v)
+            }
             // use — module import. Two kinds:
             //  • Battery (`use http`, `use db`) — dispatched by name, NO
             //    registration NEEDED, so a no-op.
@@ -2085,6 +2097,14 @@ fn swallow_benign(res: Result<usize, String>) -> Result<(), Flow> {
             }
         }
     }
+}
+
+// True if the expression is a bare `rep ...` call (the callee is the `rep`
+// builtin ident). A bare `rep` statement short-circuits the enclosing function
+// like `ret` (issue #173) — see the `Stmt::Expr` arm in exec_stmt.
+fn is_rep_call(e: &Expr) -> bool {
+    matches!(e, Expr::Call { callee, .. }
+        if matches!(callee.as_ref(), Expr::Ident(n) if n == "rep"))
 }
 
 // Is the `use` path a user file or a battery? User modules are given as a
