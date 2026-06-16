@@ -62,9 +62,11 @@ else
   tui.print ("  " + (tui.badge "ABORTED" :red))
 
 # ---------- 9. password ----------
+# tui.password returns the typed string ("" on a bare Enter), or nil if cancelled
+# with Esc/Ctrl-C. So "empty" means skipped here, not just nil.
 sec "Password"
-secret = tui.password "Enter a token (or Enter to skip)"
-if secret == nil
+secret = tui.password "Enter a token (Esc to cancel)"
+if (secret == nil) | (secret == "")
   tui.print (tui.dim "  skipped")
 else
   tui.print ("  → received " + (tui.green "${str.len secret} chars"))

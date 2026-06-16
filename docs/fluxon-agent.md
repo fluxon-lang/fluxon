@@ -538,16 +538,18 @@ tui.rule              # full-width divider line ──────────
 tui.rule "Title"      # ── Title ───────────
 tui.box body          # body framed in a rounded box; body may contain \n
 tui.box body "Title"  # box with an inset title
-tui.badge "OK" :green # a colored pill ` OK ` ([OK] without a tty)
+tui.badge "OK" :green # filled pill ([OK] without a tty); color: green/yellow/red/
+                      # blue/cyan/magenta/gray (or status alias ok/warn/danger),
+                      # default + unknown → violet accent
 tui.table rows         # rows = [[cell ..] ..] → aligned columns
 tui.table rows headers # headers = [str ..] → bold titles + underline rule
 
 # interactive (I/O)
 tui.input "Name"             # → str (line); empty stays "", EOF → nil
 tui.input "Name" "default"   # empty Enter → the default
-tui.password "PIN"           # hidden input → str (nil on Ctrl-C)
-tui.confirm "Delete?"        # y/n → bool (default false)
-tui.confirm "Delete?" true   # default true ([Y/n])
+tui.password "PIN"           # hidden input → str ("" on bare Enter; nil on Esc/Ctrl-C)
+tui.confirm "Delete?"        # y/n → bool (bare Enter → default false); EOF → nil
+tui.confirm "Delete?" true   # default true ([Y/n]); EOF still → nil, never auto-yes
 tui.select "Pick" opts       # arrow keys, Enter → chosen str (Esc/Ctrl-C → nil)
 tui.checkbox "Pick" opts     # Space toggles, Enter → [str] of chosen (nil if cancelled)
 ```

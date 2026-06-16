@@ -140,13 +140,14 @@ pub(crate) fn tui_module(func: &str, args: Vec<Value>) -> R {
             Ok(Value::Str(boxed(&body, &title)))
         }
 
-        // tui.badge "OK"  or  tui.badge "OK" :green -> a colored pill ` OK `.
-        // Second arg is a color symbol/str (defaults to blue).
+        // tui.badge "OK"  or  tui.badge "OK" :green -> a filled pill ` OK `.
+        // Second arg is a status color (green/ok, yellow/warn, red/danger/fail,
+        // gray/muted) or the default violet accent; any other name uses the accent.
         "badge" => {
             let label = arg_str(&args, 0, "tui.badge")?;
             let color = match args.get(1) {
                 Some(v) if !matches!(v, Value::Nil) => v.to_text(),
-                _ => "blue".to_string(),
+                _ => "accent".to_string(),
             };
             Ok(Value::Str(badge(&label, &color)))
         }
@@ -330,6 +331,15 @@ fn bold(s: &str) -> String {
         s.to_string()
     }
 }
+// Bold + a truecolor foreground in ONE SGR sequence — avoids nesting bold(fg(..)),
+// whose inner reset would otherwise close the bold mid-string.
+fn fg_bold(c: &Rgb, s: &str) -> String {
+    if color_enabled() {
+        format!("\x1b[1;38;2;{};{};{}m{}{}", c.0, c.1, c.2, s, RESET)
+    } else {
+        s.to_string()
+    }
+}
 
 // --- text widget rendering ---
 
@@ -343,9 +353,11 @@ fn rule(title: &str) -> String {
         // a hairline the full width, in muted gray
         return fg(&MUTED, &"─".repeat(width));
     }
-    // `▌ Title ──────` — accent bar, bold ink title, a trailing hairline.
-    let used = 2 + vis_width(title) + 1; // bar + space + title + space
-    let pad = width.saturating_sub(used + 1);
+    // `▌ Title ──────` — accent bar, bold ink title, a trailing hairline that fills
+    // the line to `width`. Visible columns: bar(1) + space(1) + title + space(1) +
+    // dashes, so dashes = width - title - 3. (The format string adds the two spaces.)
+    let used = 1 + vis_width(title) + 1 + 1; // bar + space + title + space
+    let pad = width.saturating_sub(used);
     format!(
         "{} {} {}",
         fg(&ACCENT, BAR),
@@ -398,14 +410,23 @@ fn boxed(body: &str, title: &str) -> String {
 
 // Badge -> a filled pill in the status color. Modern look: solid background, bold
 // label, a hair of horizontal padding. Off a tty it degrades to `[LABEL]`.
+// Extra badge hues so `:blue`/`:cyan`/`:magenta` (valid in tui.<color>) also work as
+// a badge background, instead of silently falling back to the accent.
+const BLUE: Rgb = Rgb(0x4a, 0x90, 0xff);
+const CYAN: Rgb = Rgb(0x3a, 0xd0, 0xd8);
+const MAGENTA: Rgb = Rgb(0xd6, 0x6f, 0xe0);
+
 fn badge(label: &str, color: &str) -> String {
-    // map the friendly color name to a palette token; default to the accent
+    // map the friendly color name to a palette token; unknown -> the accent
     let bg = match color {
         "green" | "ok" => &OK,
         "yellow" | "warn" => &WARN,
         "red" | "danger" | "fail" => &DANGER,
         "gray" | "grey" | "muted" => &MUTED,
-        _ => &ACCENT,
+        "blue" => &BLUE,
+        "cyan" => &CYAN,
+        "magenta" => &MAGENTA,
+        _ => &ACCENT, // "accent" and any unrecognized name
     };
     if color_enabled() {
         // dark ink ON the color reads cleanly on every status hue
@@ -482,7 +503,10 @@ fn table(rows: &[Value], headers: Option<&[String]>) -> R {
                 )
             })
             .collect();
-        out.push_str(line.join(gap).trim_end());
+        // NOTE: do NOT trim_end() the joined row — a sparse row (fewer cells than
+        // columns) is padded with spaces for the missing columns, and trimming would
+        // collapse them and break alignment. Every row keeps its full column width.
+        out.push_str(&line.join(gap));
         if ri + 1 < grid.len() {
             out.push('\n');
         }
@@ -542,11 +566,16 @@ fn confirm(prompt: &str, default: bool) -> R {
     show(&prompt_line(prompt, Some(hint)))?;
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(0) => Ok(Value::Bool(default)),
+        // EOF (stdin closed/redirected) is NOT the same as pressing Enter — an
+        // unattended run must not silently "accept" a default-yes prompt and trigger
+        // a destructive action. Return nil (falsy in Fluxon) so the caller can detect
+        // "no answer" and a bare `if (tui.confirm ...)` does NOT proceed. Matches
+        // tui.input / io.read_line, which also return nil on EOF.
+        Ok(0) => Ok(Value::Nil),
         Ok(_) => {
             let s = line.trim().to_lowercase();
             let yes = match s.as_str() {
-                "" => default,
+                "" => default, // a bare Enter applies the default
                 "y" | "yes" => true,
                 _ => false,
             };
@@ -697,7 +726,7 @@ fn redraw(options: &[String], cursor: usize, checked: Option<&[bool]>, first: bo
         };
         // active label in bold ink, others muted — focus reads instantly
         let label = if active {
-            bold(&fg(&INK, opt))
+            fg_bold(&INK, opt)
         } else {
             fg(&MUTED, opt)
         };
@@ -927,6 +956,45 @@ mod tests {
         }
     }
 
+    // A titled rule fills the line to the same width as a plain rule — guards the
+    // off-by-one that made `tui.rule "X"` one column short.
+    #[test]
+    fn rule_titled_fills_width() {
+        let plain = match tui_module("rule", vec![]) {
+            Ok(Value::Str(s)) => vis_width(&s),
+            _ => panic!("tui.rule must return a str"),
+        };
+        let titled = match tui_module("rule", vec![s("Title")]) {
+            Ok(Value::Str(s)) => vis_width(&s),
+            _ => panic!("tui.rule must return a str"),
+        };
+        assert_eq!(plain, titled, "titled rule must fill to the same width");
+    }
+
+    // A sparse table row (fewer cells than columns) keeps full width — guards the
+    // trim_end() that used to collapse the missing columns and break alignment.
+    #[test]
+    fn table_sparse_row_stays_aligned() {
+        let rows = Value::List(vec![
+            Value::List(vec![s("aaa"), s("bbb"), s("ccc")]),
+            Value::List(vec![s("x")]), // short row
+        ]);
+        match tui_module(
+            "table",
+            vec![rows, Value::List(vec![s("c1"), s("c2"), s("c3")])],
+        ) {
+            Ok(Value::Str(out)) => {
+                let widths: Vec<usize> = out.lines().map(vis_width).collect();
+                assert!(
+                    widths.windows(2).all(|w| w[0] == w[1]),
+                    "table rows misaligned: {:?}",
+                    widths
+                );
+            }
+            _ => panic!("tui.table must return a str"),
+        }
+    }
+
     // badge without a tty falls back to [LABEL] (no escapes).
     #[test]
     fn badge_plain_without_tty() {
@@ -961,6 +1029,20 @@ mod tests {
     fn require_tty_rejects_non_tty() {
         if !std::io::stdout().is_terminal() {
             assert!(require_tty().is_err());
+        }
+    }
+
+    // confirm must return nil on EOF, NOT the default — an unattended/redirected run
+    // must not silently auto-accept a default-yes prompt. Only run when stdin is not
+    // a tty (cargo test, CI), so read_line hits immediate EOF instead of blocking.
+    #[test]
+    fn confirm_eof_is_nil_not_default() {
+        if !std::io::stdin().is_terminal() {
+            // even with default=true, EOF must yield nil (never auto-yes)
+            match confirm("Ship?", true) {
+                Ok(Value::Nil) => {}
+                _ => panic!("confirm must return nil on EOF, never the default"),
+            }
         }
     }
 }
