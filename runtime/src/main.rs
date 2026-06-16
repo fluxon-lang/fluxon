@@ -20,7 +20,6 @@ mod ai_mod;
 mod ast;
 mod auth_mod;
 mod builtins;
-mod check;
 mod cron_mod;
 mod crypto_mod;
 mod db_mod;
@@ -245,62 +244,21 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     (passed, failed)
 }
 
-// Checks the syntax: lex + parse, plus a static immutability pass — but skips
-// interp, so the code is NOT executed (no side effects). The immutability pass
-// (issue #178) catches reassignment of a `=`-bound var, including from inside a
-// block, statically — a trap that previously only surfaced as a runtime 500 on
-// the specific request that hit it. On success Ok(()), otherwise the error text.
+// Checks the syntax: lex + parse only — the code is NOT executed (no side
+// effects). On success Ok(()), otherwise the error text.
 //
-// Convenience wrapper without a path — resolves `use ./file` imports relative to
-// the current directory (the REPL and snippet tests have no source file).
+// Convenience wrapper without a path (the REPL and snippet tests have no source
+// file); a plain `check` only needs the entry file to lex+parse.
 fn check_source(src: &str) -> Result<(), String> {
     check_source_at(src, std::path::Path::new("."))
 }
 
-// Path-aware check: like `check_source`, but also recursively validates `use
-// ./file` user modules (relative to `path`'s directory) WITHOUT executing them.
-// Otherwise an imported handler's dormant rebind would slip past `fluxon check`
-// and only fail under `run`, leaving CI/check blind to exactly the imported-
-// handler bugs this pass exists to catch.
-fn check_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
+// Path-aware check: like `check_source`. The `path` is accepted for symmetry
+// with `run_source_at` (and so a future check can resolve `use ./file` modules
+// relative to it), but a plain `check` only needs the entry file to lex+parse.
+fn check_source_at(src: &str, _path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
-    let prog = parser::parse(toks)?;
-    let imports = check::check_immutability(&prog)?;
-    let base = path.parent().unwrap_or(std::path::Path::new("."));
-    let mut visited = std::collections::HashSet::new();
-    check_imported_modules(&imports, base, &mut visited)
-}
-
-// Recursively lex/parse/immutability-check imported user modules. `imports` is
-// the relative paths a file `use`s (anywhere — `check_immutability` collects
-// nested ones too); they resolve against `base` (the importer's directory).
-// `visited` (canonical paths) guards against cycles and re-checking. A module
-// that cannot be resolved is skipped silently — `run` surfaces a real "module
-// not found"; `check` stays lenient rather than inventing a new failure mode.
-fn check_imported_modules(
-    imports: &[String],
-    base: &std::path::Path,
-    visited: &mut std::collections::HashSet<std::path::PathBuf>,
-) -> Result<(), String> {
-    for rel in imports {
-        let mut full = base.join(rel);
-        if full.extension().is_none() {
-            full.set_extension("fx");
-        }
-        let Ok(canon) = full.canonicalize() else {
-            continue; // unresolved import — left for `run` to report
-        };
-        if !visited.insert(canon.clone()) {
-            continue; // already checked (or a cycle)
-        }
-        let src = std::fs::read_to_string(&canon)
-            .map_err(|e| format!("could not read module '{}': {}", rel, e))?;
-        let toks = lexer::lex(&src)?;
-        let mprog = parser::parse(toks)?;
-        let mimports = check::check_immutability(&mprog)?;
-        let mbase = canon.parent().unwrap_or(std::path::Path::new("."));
-        check_imported_modules(&mimports, mbase, visited)?;
-    }
+    parser::parse(toks)?;
     Ok(())
 }
 
@@ -309,16 +267,6 @@ fn check_imported_modules(
 fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
-    // Static immutability check (issue #178) BEFORE running: catch a reassigned
-    // `=`-bound var now, so the server fails fast at load instead of 500-ing on
-    // the one request that reaches the offending block. Recurse into imported
-    // modules too — including a `use ./...` nested in a handler that may not be
-    // loaded until that handler runs — so a dormant rebind in any reachable file
-    // is caught at boot, not on the request that finally loads it.
-    let imports = check::check_immutability(&prog)?;
-    let base = path.parent().unwrap_or(std::path::Path::new("."));
-    let mut visited = std::collections::HashSet::new();
-    check_imported_modules(&imports, base, &mut visited)?;
     // Arc<Interp>: http.serve applies handlers on server threads, so the interp
     // must be shareable across threads.
     let interp = interp::Interp::new_arc();

@@ -28,19 +28,27 @@ each e in [{n:"a" v:3} {n:"b" v:7} {n:"c" v:2}]
 "#);
 }
 
-// Immutability is preserved: an outer `=` (immutable) variable cannot be
-// reassigned with `=` from inside a block either (a clear error — NOT a silent shadow).
+// Python model: there is no immutability. An outer `=` variable IS updated by a
+// re-`=` from inside a transparent block (`if`/`each`/`match`) — same as the
+// accumulator pattern, never an error.
 #[test]
-fn bind_in_block_immutable_errors() {
-    let err = run_source(
-        r#"
+fn rebind_in_block_updates_outer() {
+    run(r#"
 x = 10
 if true
   x = 20
-"#,
-    )
-    .expect_err("updating an immutable with = inside a block should error");
-    assert!(err.contains("is immutable"), "unexpected error: {}", err);
+(x == 20) | (fail "= inside block did not update outer x: ${x}")
+"#);
+}
+
+// And a plain re-`=` at the same level just reassigns (no immutability error).
+#[test]
+fn rebind_same_level_ok() {
+    run(r#"
+x = 1
+x = 2
+(x == 2) | (fail "re-= did not update x: ${x}")
+"#);
 }
 
 // fn/lambda BOUNDARY: an inner `=` creates a new LOCAL, not the outer variable

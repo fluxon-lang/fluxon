@@ -166,7 +166,8 @@ impl Interp {
             }
             Stmt::ExpBind { name, value } => {
                 let v = self.eval(value, env)?;
-                // exp bind — an exportable global; immutable (like `=`).
+                // exp bind — an exportable global. (The `false` is the legacy
+                // mutability flag, no longer consulted — see `Scope::vars`.)
                 env.write().define(name, v, false);
                 Ok(Value::Nil)
             }
@@ -280,13 +281,7 @@ impl Interp {
             // parent (previously a write + a separate read — two locks per level).
             let parent = {
                 let mut s = cur.write();
-                if let Some((slot, mutable)) = s.get_mut_entry(name) {
-                    if !mutable {
-                        return Err(Flow::err(format!(
-                            "'{}' is immutable (declared with =), cannot be changed with '<-'",
-                            name
-                        )));
-                    }
+                if let Some(slot) = s.get_mut_value(name) {
                     *slot = v;
                     return Ok(());
                 }
@@ -298,9 +293,11 @@ impl Interp {
                 // FROZEN (an immutable snapshot) — we DO NOT TOUCH the root. If
                 // the name exists as a global, it cannot be changed from inside a
                 // handler with `<-`: we give an EXPLICIT error (NOT a silent
-                // shadow — the developer must not hit a silent failure). If the
-                // name is new we create a local in the current scope. If not
-                // frozen (top-level) we look up/mutate `Interp.global` as usual.
+                // shadow — the developer must not hit a silent failure). This is a
+                // thread-safety guard (handlers run in parallel; a shared mutable
+                // global would race), NOT immutability. If the name is new we
+                // create a local in the current scope. If not frozen (top-level)
+                // we look up/mutate `Interp.global` as usual.
                 Parent::Root => {
                     if let Some(frozen) = self.globals_frozen.get() {
                         if frozen.contains_key(name) {
@@ -356,27 +353,22 @@ impl Interp {
         )))
     }
 
-    // `=` bind: searches for the variable in the scope chain WITHIN THE CURRENT
-    // FUNCTION. if/each/match blocks are lexically transparent — an `=` inside
-    // them updates an outer variable (in the same fn), like other languages. The
-    // search stops at the fn/lambda boundary (`is_fn_boundary`): inside a fn an
-    // `=` does not touch an outer global, it creates a new LOCAL
-    // (isolation/shadowing). If the found variable is immutable (`=`) — an error
-    // (immutability preserved, same rule as `<-`). If not found, creates a new
-    // IMMUTABLE local in the current scope.
+    // `=` bind: searches for the variable WITHIN THE CURRENT FUNCTION. if/each/
+    // match blocks are lexically transparent — an `=` inside them updates an
+    // outer variable in the same fn (Python: if/for open no scope), so an
+    // accumulator (`total = 0` then `each .. total = total + x`) works. The
+    // search STOPS at the fn/lambda boundary (`is_fn_boundary`): inside a fn an
+    // `=` does not reach an outer global, it creates a new LOCAL — the Python
+    // rule (assignment in a function makes a local unless you reach out
+    // explicitly, which here is `<-`). If found within the frame, the variable
+    // is updated in place; if not, a fresh local is created in the current scope.
+    // There is NO immutability: re-binding a name is always allowed, like Python.
     fn bind(&self, name: &str, v: Value, env: &Env) -> Result<(), Flow> {
         let mut cur = env.clone();
         loop {
             let (parent, at_boundary) = {
                 let mut s = cur.write();
-                if let Some((slot, mutable)) = s.get_mut_entry(name) {
-                    if !mutable {
-                        return Err(Flow::err(format!(
-                            "'{}' is immutable (declared with =); cannot be \
-                             reassigned even from inside a block (declare it with `<-`)",
-                            name
-                        )));
-                    }
+                if let Some(slot) = s.get_mut_value(name) {
                     *slot = v;
                     return Ok(());
                 }
@@ -401,8 +393,8 @@ impl Interp {
                 Parent::None => break,
             }
         }
-        // a new immutable variable (in the current scope)
-        env.write().define(name, v, false);
+        // a new variable in the current scope
+        env.write().define(name, v, true);
         Ok(())
     }
 

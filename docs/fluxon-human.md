@@ -161,26 +161,41 @@ two things are falsy.
 ## 3. Variables (bindings)
 
 Fluxon has **two** kinds of binding, and they do **different things** (which is why
-having two does not violate the canonical rule):
+having two does not violate the canonical rule). The model is Python's: an
+assignment is **local to the current function**, and there is no immutability —
+any name can be re-bound.
 
-### `=` — immutable
-A value is assigned once, then cannot be changed:
+### `=` — bind a local (the default)
 ```fluxon
 x = 10
 name = "Aziza"
+x = 20            # re-binding is fine — = just updates x
 ```
-This is the **default** case. Most values do not change.
-
-### `<-` — mutable
-A variable whose value can be changed later. Reassignment is also done with `<-`:
+`=` binds in the **current function**. `if`/`each`/`match` blocks are
+transparent (they open no new scope), so the accumulator pattern reads naturally:
 ```fluxon
-total <- 0.0
-total <- total + 5.0     # reassignment
+total = 0
+each n in [10 20 30]
+  total = total + n     # updates the same `total`
+# total == 60
+```
+Inside a function, `=` always makes a **local** — it never touches an outer or
+global variable of the same name (shadowing, like Python).
+
+### `<-` — reassign, reaching out of the function
+Use `<-` to write to a variable that lives in an **enclosing** function or at the
+top level — it crosses the function boundary (closure capture):
+```fluxon
+counter <- 0
+inc = \n ->
+  counter <- counter + n   # writes the OUTER counter, not a local
+inc 5                       # counter == 5
 ```
 
-> **Rule:** if a value does not change — use `=`. Use `<-` only for things that
-> truly change. This makes the code easier to read: when you see `<-`, you know
-> "this changes".
+> **Rule:** use `=` for a normal (local) value. Reach for `<-` only when a
+> function must write to a variable defined *outside* it — that is the one thing
+> `=` will not do. When you see `<-`, you know "this reaches out and changes
+> something shared".
 
 ---
 

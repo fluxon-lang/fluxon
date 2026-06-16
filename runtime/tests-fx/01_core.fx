@@ -18,13 +18,13 @@ eq true true "bool"
 eq :ok :ok "sym"
 eq nil nil "nil"
 
-# --- Binding: immutable vs mutable ---
+# --- Binding: local (=) vs reach-out (<-) ---
 x = 10
-eq x 10 "= immutable"
+eq x 10 "= local bind"
 total <- 0
 total <- total + 5
 total <- total + 5
-eq total 10 "<- mutable reassign"
+eq total 10 "<- reassign"
 
 # --- Operators ---
 eq (2 + 3 * 4) 14 "precedence * over +"

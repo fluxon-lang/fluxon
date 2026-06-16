@@ -35,9 +35,15 @@ Truthy: only `nil`/`false` are false.
 
 ## Bindings
 ```
-x = 10              # immutable (DEFAULT)
-total <- 0          # mutable; reassign: total <- total + 5
+x = 10              # bind a LOCAL (DEFAULT). Re-`=` updates it: x = 20.
+total <- 0          # reassign + reach OUT of the function (closure / outer var).
 ```
+`=` binds in the current function (like Python assignment) — `if`/`each`/`match`
+are transparent, so `total = 0` then `each .. total = total + 1` accumulates.
+Inside a function `=` makes a LOCAL (it never touches an outer/global of the same
+name). To write to a variable from an ENCLOSING function or the top level, use
+`<-` (it crosses the function boundary — closure capture). No immutability: any
+name can be re-bound.
 
 ## Operators
 ```

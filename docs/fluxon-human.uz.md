@@ -161,27 +161,41 @@ qoida ataylab: faqat ikki narsa yolg'on.
 ## 3. O'zgaruvchilar (bindings)
 
 Fluxon'da **ikki** xil bog'lash bor, va ular **boshqa ish** qiladi (shuning
-uchun ikkitasi bo'lishi canonical qoidaga zid emas):
+uchun ikkitasi bo'lishi canonical qoidaga zid emas). Model Python'niki: tayinlash
+**joriy funksiya ichida lokal** bo'ladi, va immutability yo'q — istalgan nomni
+qayta bog'lash mumkin.
 
-### `=` — o'zgarmas (immutable)
-Bir marta qiymat beriladi, keyin o'zgartirib bo'lmaydi:
+### `=` — lokal bog'lash (standart)
 ```fluxon
 x = 10
 name = "Aziza"
+x = 20            # qayta bog'lash mumkin — = shunchaki x'ni yangilaydi
 ```
-Bu **standart** holat. Ko'pchilik qiymatlar o'zgarmaydi.
-
-### `<-` — o'zgaruvchan (mutable)
-Qiymatini keyin o'zgartirish mumkin bo'lgan o'zgaruvchi. Qayta tayinlash ham
-`<-` bilan:
+`=` **joriy funksiya** ichida bog'laydi. `if`/`each`/`match` bloklari shaffof
+(yangi scope ochmaydi), shuning uchun to'plagich (accumulator) tabiiy o'qiladi:
 ```fluxon
-total <- 0.0
-total <- total + 5.0     # qayta tayinlash
+total = 0
+each n in [10 20 30]
+  total = total + n     # o'sha total'ni yangilaydi
+# total == 60
+```
+Funksiya ichida `=` har doim **lokal** yaratadi — bir xil nomli tashqi yoki
+global o'zgaruvchiga tegmaydi (shadowing, Python kabi).
+
+### `<-` — funksiyadan tashqariga yozib qayta tayinlash
+`<-` ni **tashqi** funksiyada yoki yuqori darajada yashaydigan o'zgaruvchiga
+yozish uchun ishlating — u funksiya chegarasini kesib o'tadi (closure capture):
+```fluxon
+counter <- 0
+inc = \n ->
+  counter <- counter + n   # tashqi counter'ni yozadi, lokal emas
+inc 5                       # counter == 5
 ```
 
-> **Qoida:** agar qiymat o'zgarmasa — `=` ishlating. Faqat haqiqatan
-> o'zgaradigan narsalar uchun `<-`. Bu kod o'qishini osonlashtiradi: `<-`
-> ko'rsangiz, "bu o'zgaradi" deb bilasiz.
+> **Qoida:** oddiy (lokal) qiymat uchun `=` ishlating. `<-` ga faqat funksiya
+> o'zidan *tashqarida* aniqlangan o'zgaruvchiga yozishi kerak bo'lganda murojaat
+> qiling — bu `=` qila olmaydigan yagona narsa. `<-` ko'rsangiz, "bu tashqariga
+> yetib borib, umumiy narsani o'zgartiradi" deb bilasiz.
 
 ---
 

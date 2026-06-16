@@ -151,24 +151,7 @@ fn use_module_fx_kengaytma_avto() {
     .unwrap();
 }
 
-// `fluxon check` recursively validates imported user modules (issue #178): a
-// dormant `=`-rebind in an imported handler must fail at check time, not only
-// when `run` loads the module on the request path.
-#[test]
-fn check_recurses_into_user_modules() {
-    let err = check_modules(&[
-        ("main.fx", "use ./handler\nlog (handler.run)\n"),
-        (
-            "handler.fx",
-            "exp fn run\n  result = {}\n  if true\n    result = result.set \"a\" 1\n  result\n",
-        ),
-    ])
-    .expect_err("an imported module's rebind should fail `check`");
-    assert!(err.contains("is immutable"), "got: {}", err);
-}
-
-// A clean import passes check, and nested imports (main -> a -> b) are walked
-// transitively without infinite recursion.
+// A clean import passes check, and nested imports (main -> a -> b) parse fine.
 #[test]
 fn check_clean_nested_modules_ok() {
     check_modules(&[
@@ -188,37 +171,6 @@ fn check_circular_import_terminates() {
         ("y.fx", "use ./x\nexp b = 2\n"),
     ])
     .unwrap();
-}
-
-// A `use ./...` nested inside a fn body is still validated by `check` (it is a
-// normal statement and may appear in any block): an imported module's rebind
-// must fail check even when the import is not at the top level.
-#[test]
-fn check_recurses_into_nested_use() {
-    let err = check_modules(&[
-        ("main.fx", "fn load\n  use ./bad\n  bad.x\nlog (load)\n"),
-        ("bad.fx", "exp x = 1\ny = 2\ny <- 3\n"),
-    ])
-    .expect_err("a nested import's rebind should fail `check`");
-    assert!(err.contains("is immutable"), "got: {}", err);
-}
-
-// `fluxon run` validates imported modules at BOOT, recursively — even a module
-// imported by a `use ./...` nested in a handler that is never actually called
-// (so the interpreter would never load it). Without the boot-time recursive
-// check this script runs clean and the rebind only surfaces when the handler
-// executes; with it, boot fails fast.
-#[test]
-fn run_validates_nested_import_at_boot() {
-    let err = run_modules(&[
-        (
-            "main.fx",
-            "fn load\n  use ./bad\n  bad.x\nlog \"boot ok\"\n",
-        ),
-        ("bad.fx", "exp x = 1\ny = 2\ny <- 3\n"),
-    ])
-    .expect_err("a dormant rebind in a nested import should fail at boot");
-    assert!(err.contains("is immutable"), "got: {}", err);
 }
 
 // A battery `use` (`use http`) is still a no-op — no file is loaded, dispatch works.

@@ -206,9 +206,9 @@ impl Parser {
 
     // Started by an ident: a bind (=), an assign (<-), or a call expression.
     fn parse_ident_stmt(&mut self) -> ParseResult<Stmt> {
-        // `name = ...` — a bind is only allowed on a plain ident (spec: `=` is an
-        // immutable new name). We detect this up front via `peek2` so that `name`
-        // is not mistaken for a call argument (`f name`).
+        // `name = ...` — a bind is only allowed on a plain ident (`=` binds a
+        // local). We detect this up front via `peek2` so that `name` is not
+        // mistaken for a call argument (`f name`).
         if let Tok::Ident(name) = self.peek().clone()
             && matches!(self.peek2(), Tok::Eq)
         {
