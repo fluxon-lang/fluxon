@@ -311,8 +311,14 @@ fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let prog = parser::parse(toks)?;
     // Static immutability check (issue #178) BEFORE running: catch a reassigned
     // `=`-bound var now, so the server fails fast at load instead of 500-ing on
-    // the one request that reaches the offending block.
-    check::check_immutability(&prog)?;
+    // the one request that reaches the offending block. Recurse into imported
+    // modules too — including a `use ./...` nested in a handler that may not be
+    // loaded until that handler runs — so a dormant rebind in any reachable file
+    // is caught at boot, not on the request that finally loads it.
+    let imports = check::check_immutability(&prog)?;
+    let base = path.parent().unwrap_or(std::path::Path::new("."));
+    let mut visited = std::collections::HashSet::new();
+    check_imported_modules(&imports, base, &mut visited)?;
     // Arc<Interp>: http.serve applies handlers on server threads, so the interp
     // must be shareable across threads.
     let interp = interp::Interp::new_arc();

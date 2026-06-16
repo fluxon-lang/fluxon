@@ -203,6 +203,24 @@ fn check_recurses_into_nested_use() {
     assert!(err.contains("is immutable"), "got: {}", err);
 }
 
+// `fluxon run` validates imported modules at BOOT, recursively — even a module
+// imported by a `use ./...` nested in a handler that is never actually called
+// (so the interpreter would never load it). Without the boot-time recursive
+// check this script runs clean and the rebind only surfaces when the handler
+// executes; with it, boot fails fast.
+#[test]
+fn run_validates_nested_import_at_boot() {
+    let err = run_modules(&[
+        (
+            "main.fx",
+            "fn load\n  use ./bad\n  bad.x\nlog \"boot ok\"\n",
+        ),
+        ("bad.fx", "exp x = 1\ny = 2\ny <- 3\n"),
+    ])
+    .expect_err("a dormant rebind in a nested import should fail at boot");
+    assert!(err.contains("is immutable"), "got: {}", err);
+}
+
 // A battery `use` (`use http`) is still a no-op — no file is loaded, dispatch works.
 #[test]
 fn use_batareya_hamon_no_op() {
