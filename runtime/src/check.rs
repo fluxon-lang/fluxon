@@ -36,14 +36,16 @@ pub fn check_immutability(prog: &Program) -> Result<(), String> {
     let mut c = Checker {
         scopes: Vec::new(),
         fn_base: Vec::new(),
+        hoisted: Vec::new(),
     };
-    c.enter_fn();
-    // Mirror the interpreter's top-level/module hoisting: `Interp::run` (and
-    // `exec_module_body`) register every DIRECT top-level `FnDecl` — immutably —
-    // before executing any statement. So `x = 1` followed by `fn x ...` is a
-    // rebind error at run time; pre-seed the fn names so `check` agrees. (Fn
-    // BODIES are not hoisted — they run in order — so this only applies to the
-    // program/module root, not nested frames.)
+    c.enter_fn(prog);
+    // Mirror the interpreter's top-level/module FnDecl hoisting: `Interp::run`
+    // (and `exec_module_body`) register every DIRECT top-level `FnDecl` —
+    // immutably — before executing any statement. So `x = 1` followed by
+    // `fn x ...` is a rebind error at run time; pre-seed the fn names INTO THE
+    // ORDERED SCOPE so the `=` (resolve_bind) path agrees. (Fn BODIES are not
+    // hoisted — they run in order — so this applies only to the program/module
+    // root, not nested frames.)
     for stmt in prog {
         if let Stmt::FnDecl { name, .. } = stmt {
             c.define(name, Mutability::Imm);
@@ -73,16 +75,25 @@ struct Checker {
     // Index (into `scopes`) of the current function's base scope. `=` resolution
     // never looks below the last entry — that is the fn boundary.
     fn_base: Vec<usize>,
+    // One entry per function frame (aligned with `fn_base`): the COMPLETE set of
+    // names bound at that frame's base level, with the mutability of their first
+    // binding. A closure captures its defining scope and runs after that scope is
+    // fully populated, so a `<-` from an inner fn must see an outer frame's later
+    // globals too (not just what was textually bound before the closure). Used
+    // only for resolving `<-` into OUTER frames — the current frame stays ordered.
+    hoisted: Vec<HashMap<String, Mutability>>,
 }
 
 impl Checker {
-    fn enter_fn(&mut self) {
+    fn enter_fn(&mut self, body: &[Stmt]) {
         self.scopes.push(HashMap::new());
         self.fn_base.push(self.scopes.len() - 1);
+        self.hoisted.push(Self::compute_hoisted(body));
     }
 
     fn exit_fn(&mut self) {
         let base = self.fn_base.pop().expect("fn_base underflow");
+        self.hoisted.pop();
         self.scopes.truncate(base);
     }
 
@@ -98,7 +109,52 @@ impl Checker {
         self.scopes.last_mut().unwrap().insert(name.to_string(), m);
     }
 
+    // The frame-level binding set for a function body. FnDecls are registered
+    // first (hoisted, immutable); then each direct binding takes the mutability
+    // of its FIRST occurrence (`=`/`exp`/`use`-alias → immutable, `<-` → mutable),
+    // except `exp` which always freezes the name (a direct `define(.., false)`).
+    // Sub-blocks (`if`/`each`/...) are NOT descended into — their bindings are
+    // block-local, not frame-level.
+    fn compute_hoisted(body: &[Stmt]) -> HashMap<String, Mutability> {
+        let mut h = HashMap::new();
+        for stmt in body {
+            if let Stmt::FnDecl { name, .. } = stmt {
+                h.insert(name.clone(), Mutability::Imm);
+            }
+        }
+        for stmt in body {
+            match stmt {
+                Stmt::Bind { name, .. } => {
+                    h.entry(name.clone()).or_insert(Mutability::Imm);
+                }
+                Stmt::ExpBind { name, .. } => {
+                    h.insert(name.clone(), Mutability::Imm);
+                }
+                Stmt::Assign { target, .. } => {
+                    if let Expr::Ident(name) = target.as_ref() {
+                        h.entry(name.clone()).or_insert(Mutability::Mut);
+                    }
+                }
+                Stmt::Use { items } => {
+                    for item in items {
+                        if is_user_module_path(&item.path) {
+                            let n = item
+                                .alias
+                                .clone()
+                                .unwrap_or_else(|| module_basename(&item.path));
+                            h.entry(n).or_insert(Mutability::Imm);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        h
+    }
+
     // `=` resolution: innermost scope down to (and including) the current fn base.
+    // `=` never crosses the fn boundary, so the current frame's ordered scopes are
+    // the whole story.
     fn resolve_bind(&self, name: &str) -> Option<Mutability> {
         let base = *self.fn_base.last().unwrap();
         self.scopes[base..]
@@ -107,9 +163,24 @@ impl Checker {
             .find_map(|s| s.get(name).copied())
     }
 
-    // `<-` resolution: the whole lexical chain (crosses fn boundaries — closures).
+    // `<-` resolution: the current frame (ordered scopes) first, then OUTER frames
+    // via their hoisted maps — `<-` crosses fn boundaries (closure capture), and a
+    // captured outer scope is fully populated by the time the closure runs.
     fn resolve_assign(&self, name: &str) -> Option<Mutability> {
-        self.scopes.iter().rev().find_map(|s| s.get(name).copied())
+        let base = *self.fn_base.last().unwrap();
+        if let Some(m) = self.scopes[base..]
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name).copied())
+        {
+            return Some(m);
+        }
+        // Outer frames: innermost-outer to outermost (skip the current frame).
+        self.hoisted
+            .iter()
+            .rev()
+            .skip(1)
+            .find_map(|h| h.get(name).copied())
     }
 
     fn check_block(&mut self, body: &[Stmt]) -> Result<(), String> {
@@ -177,7 +248,7 @@ impl Checker {
                 name, params, body, ..
             } => {
                 self.define(name, Mutability::Imm);
-                self.enter_fn();
+                self.enter_fn(body);
                 for p in params {
                     self.define(p, Mutability::Mut);
                 }
@@ -250,7 +321,7 @@ impl Checker {
             }
             // A lambda body is a fresh function frame with mutable params.
             Expr::Lambda { params, body } => {
-                self.enter_fn();
+                self.enter_fn(body);
                 for p in params {
                     self.define(p, Mutability::Mut);
                 }
@@ -482,5 +553,29 @@ mod tests {
     #[test]
     fn battery_import_not_a_binding_ok() {
         check("use http\nhttp <- 1\n").unwrap();
+    }
+
+    // A fn declared BEFORE an immutable top-level global, that `<-`-assigns it, is
+    // a runtime error — the global is in scope (and immutable) by the time the fn
+    // runs. Hoisting all top-level bindings lets `check` catch it regardless of
+    // textual order.
+    #[test]
+    fn fn_assigns_later_immutable_global_errors() {
+        let err = check("fn bad n\n  counter <- n\ncounter = 0\nbad 1\n").unwrap_err();
+        assert!(err.contains("is immutable"), "got: {}", err);
+    }
+
+    // ...but a fn `<-`-assigning a top-level MUTABLE global is the legitimate
+    // closure-capture pattern and must still pass, no matter the textual order.
+    #[test]
+    fn fn_assigns_later_mutable_global_ok() {
+        check("fn inc n\n  counter <- counter + n\ncounter <- 0\ninc 1\n").unwrap();
+    }
+
+    // Lambda closure capturing a mutable outer var — declared before the lambda —
+    // stays valid (regression guard for the hoisting change).
+    #[test]
+    fn lambda_captures_mutable_outer_ok() {
+        check("counter <- 0\ninc = \\n ->\n  counter <- counter + n\ninc 5\n").unwrap();
     }
 }
