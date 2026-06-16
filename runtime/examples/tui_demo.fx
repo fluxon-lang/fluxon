@@ -3,8 +3,8 @@
 # and would corrupt the layout. Run in a real terminal to see the colors.
 
 # --- colors & styles (str -> str) ---
-tui.print (tui.green "✓ ok") + "  " + (tui.red "✗ fail") + "  " + (tui.dim "muted")
-tui.print (tui.bold "bold") + " " + (tui.underline "underline") + " " + (tui.cyan "cyan")
+tui.print ((tui.green "✓ ok") + "  " + (tui.red "✗ fail") + "  " + (tui.dim "muted"))
+tui.print ((tui.bold "bold") + " " + (tui.underline "underline") + " " + (tui.cyan "cyan"))
 
 # --- a divider with a title ---
 tui.print (tui.rule "Report")
@@ -13,7 +13,7 @@ tui.print (tui.rule "Report")
 tui.print (tui.box "Build passed\n12 tests, 0 failures" "Status")
 
 # --- badges ---
-tui.print (tui.badge "PASS" :green) + " " + (tui.badge "WARN" :yellow) + " " + (tui.badge "FAIL" :red)
+tui.print ((tui.badge "PASS" :green) + " " + (tui.badge "WARN" :yellow) + " " + (tui.badge "FAIL" :red))
 
 # --- an aligned table with headers ---
 rows = [

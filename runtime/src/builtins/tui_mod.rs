@@ -549,12 +549,14 @@ fn confirm(prompt: &str, default: bool) -> R {
 struct RawGuard;
 impl RawGuard {
     fn enter() -> Result<Self, Flow> {
-        // Raw mode needs a real terminal on stdin. Piped/redirected input (a test, a
-        // CI run, `echo ... | fluxon`) can't drive arrow keys — give a clear message
-        // instead of crossterm's cryptic "Device not configured".
-        if !std::io::stdin().is_terminal() {
+        // Raw mode needs a real terminal on BOTH ends. stdin must be a tty to drive
+        // arrow keys; stdout must be a tty because every prompt/redraw is written
+        // there — if stdout is redirected (`fluxon run wizard.fx > out.txt`) the user
+        // sees nothing while cursor-control bytes leak into the file. Require both,
+        // with a clear message instead of crossterm's cryptic "Device not configured".
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             return Err(Flow::err(
-                "tui: this widget needs an interactive terminal (stdin is not a tty)",
+                "tui: this widget needs an interactive terminal (stdin and stdout must both be a tty)",
             ));
         }
         terminal::enable_raw_mode().map_err(|e| Flow::err(format!("tui: raw mode: {}", e)))?;

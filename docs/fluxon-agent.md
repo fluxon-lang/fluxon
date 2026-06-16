@@ -552,16 +552,16 @@ tui.select "Pick" opts       # arrow keys, Enter → chosen str (Esc/Ctrl-C → 
 tui.checkbox "Pick" opts     # Space toggles, Enter → [str] of chosen (nil if cancelled)
 ```
 ```fluxon
-tui.print (tui.green "✓ done") + " " + (tui.dim "in 0.4s")
+tui.print ((tui.green "✓ done") + " " + (tui.dim "in 0.4s"))   # wrap the WHOLE expr
 tui.print (tui.rule "Summary")
 tui.print (tui.table [["alice" "admin"] ["bob" "viewer"]] ["user" "role"])
 env = tui.select "Deploy to" ["dev" "staging" "prod"]
 if (tui.confirm "Ship to ${env}?")
   tui.print (tui.badge "DEPLOYING" :yellow)
 ```
-Note: a parenless call takes the rest of the line as ITS args — wrap a widget you
-pass to `tui.print` in parens: `tui.print (tui.box body "Title")`, not
-`tui.print tui.box body "Title"`.
+Note: a paren-free call grabs the REST of the line as its args, so `tui.print a + b`
+parses as `(tui.print a) + b` — only `a` prints. Wrap the whole argument (including
+any `+` concatenation) in parens: `tui.print ((tui.green x) + " " + (tui.dim y))`.
 
 ### fs (local filesystem)
 Naming in `db.*` style (`fs.read`/`fs.del`). On error `Flow::err` (catch with try);
