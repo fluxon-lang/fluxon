@@ -120,6 +120,12 @@ impl Interp {
         let toks = crate::lexer::lex(&src).map_err(Flow::err)?;
         let prog = crate::parser::parse(toks).map_err(Flow::err)?;
 
+        // Static immutability check (issue #178). Modules are parsed and executed
+        // here at load time, so without this an imported handler with a dormant
+        // `=`-bound reassignment would boot fine and only 500 when that handler
+        // runs — exactly the trap we close for the entry file.
+        crate::check::check_immutability(&prog).map_err(Flow::err)?;
+
         // Module scope — a child of global: builtins (`log`/`rep`) and top-level
         // fns are visible through the lookup chain, but the module's own
         // `exp`/`=` names are searched first (shadowing — isolation is enough).

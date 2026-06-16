@@ -97,9 +97,9 @@ impl Checker {
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            // `x = expr` / `exp x = expr` — immutable bind. The value is evaluated
-            // BEFORE the binding takes effect, so check it first.
-            Stmt::Bind { name, value } | Stmt::ExpBind { name, value } => {
+            // `x = expr` — immutable bind. The value is evaluated BEFORE the
+            // binding takes effect, so check it first.
+            Stmt::Bind { name, value } => {
                 self.check_expr(value)?;
                 match self.resolve_bind(name) {
                     Some(Mutability::Imm) => {
@@ -114,6 +114,16 @@ impl Checker {
                     // New name — a fresh immutable binding in the current scope.
                     None => self.define(name, Mutability::Imm),
                 }
+                Ok(())
+            }
+            // `exp x = expr` — an exported binding. The interpreter writes it with a
+            // direct `define(.., false)`, which OVERWRITES any prior mutability and
+            // never errors (unlike `=`, which goes through `bind`). Mirror that: force
+            // the name immutable without a rebind error here, so a later `=`/`<-`
+            // against it is correctly rejected, while `exp` itself never is.
+            Stmt::ExpBind { name, value } => {
+                self.check_expr(value)?;
+                self.define(name, Mutability::Imm);
                 Ok(())
             }
             // `target <- expr`. A plain-ident target is a (re)assignment; a field
@@ -381,5 +391,26 @@ mod tests {
     #[test]
     fn assign_then_bind_ok() {
         check("x <- 1\nx = 2\n").unwrap();
+    }
+
+    // `exp x = ..` freezes the name immutable, so a later `<-` is rejected.
+    #[test]
+    fn exp_bind_then_assign_errors() {
+        let err = check("exp x = 1\nx <- 2\n").unwrap_err();
+        assert!(err.contains("is immutable"), "got: {}", err);
+    }
+
+    // `exp` writes with a direct overwrite (interp `define(.., false)`), so it
+    // never errors itself — even over a prior mutable binding.
+    #[test]
+    fn assign_then_exp_bind_ok() {
+        check("x <- 1\nexp x = 2\n").unwrap();
+    }
+
+    // ...but it DOES freeze the name, so a `<-` after the `exp` is rejected.
+    #[test]
+    fn exp_bind_freezes_prior_mutable() {
+        let err = check("x <- 1\nexp x = 2\nx <- 3\n").unwrap_err();
+        assert!(err.contains("is immutable"), "got: {}", err);
     }
 }
