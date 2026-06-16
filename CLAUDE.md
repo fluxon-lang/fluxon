@@ -142,8 +142,15 @@ Write a **test for every new behavior**. Test conventions:
 These keep the runtime working — think carefully before changing them and guard
 them with tests:
 
-- **`=`/`exp`/param are immutable**, `<-` is mutable. A param can be reassigned
-  with `<-` (the old behavior is preserved).
+- **Binding model is Python's — there is NO immutability.** `=` binds a local in
+  the current function (re-binding is allowed; `if`/`each`/`match` blocks are
+  transparent, so the accumulator pattern `total = 0` then `each .. total =
+  total + x` works; `=` stops at the fn/lambda boundary — inside a fn it makes a
+  local, never touching an outer/global). `<-` reassigns reaching OUT of the
+  function (crosses the boundary — closure capture / outer var). One exception
+  preserved: inside an `http.serve` handler, `<-` to a frozen global is an
+  explicit error — a **thread-safety** guard (parallel handlers must not race a
+  shared mutable global), NOT immutability.
 - **Closure capture, mutual recursion, shadowing, `each` loop var mutability** —
   these work correctly today; do not introduce regressions.
 - **Scope/`Parent` enum** (`interp.rs`): top-level fns hold a `Parent::Root`

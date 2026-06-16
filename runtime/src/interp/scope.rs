@@ -45,9 +45,10 @@ pub struct Scope {
     // Names — a small VECTOR (not a HashMap). Fn-call / block scopes usually
     // hold 0-4 names; for such a small set a linear scan beats computing a hash
     // + a HashMap allocation, and the per-call allocation is cheap (one Vec
-    // buffer instead of two empty HashMaps). Element: (name, value, is-mutable).
-    // mutable = whether it can be re-bound with `<-` (`=`/`exp`/param are
-    // immutable; `<-` and loop vars are mutable).
+    // buffer instead of two empty HashMaps). Element: (name, value, _flag). The
+    // trailing `bool` is a legacy mutability flag — the Python binding model has
+    // no immutability, so it is no longer read; kept only to preserve the Vec
+    // layout (changing the tuple touches every `define` call site).
     pub(crate) vars: Vec<(Box<str>, Value, bool)>,
     pub(crate) parent: Parent,
     // Is this scope the root (global)? When lookup reaches the root, if the
@@ -127,15 +128,18 @@ impl Scope {
             .find(|(n, _, _)| &**n == name)
             .map(|(_, v, _)| v)
     }
-    // For `<-`: finds the mutable slot. Returns (slot, is-mutable).
-    pub(crate) fn get_mut_entry(&mut self, name: &str) -> Option<(&mut Value, bool)> {
+    // For `=`/`<-`: finds the writable value slot (last declaration first).
+    // There is no mutability gate any more — re-binding is always allowed
+    // (Python model); the `bool` flag is kept only for the Vec layout.
+    pub(crate) fn get_mut_value(&mut self, name: &str) -> Option<&mut Value> {
         self.vars
             .iter_mut()
             .rev()
             .find(|(n, _, _)| &**n == name)
-            .map(|(_, v, m)| (v, *m))
+            .map(|(_, v, _)| v)
     }
-    // For installing builtins: sets an immutable value on a global name.
+    // For installing builtins on a global name. (The `false` flag is the legacy
+    // mutability bit and is no longer consulted — see `vars`.)
     pub fn set_global(&mut self, name: &str, v: Value) {
         self.define(name, v, false);
     }

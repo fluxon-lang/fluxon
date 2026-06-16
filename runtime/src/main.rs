@@ -84,7 +84,7 @@ fn main() -> ExitCode {
                 Ok(s) => s,
                 Err(code) => return code,
             };
-            match check_source(&src) {
+            match check_source_at(&src, std::path::Path::new(&path)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("Fluxon error: {}", e);
@@ -244,9 +244,19 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     (passed, failed)
 }
 
-// Checks the syntax: lex + parse, but skips interp — the code is NOT executed
-// (no side effects). On success Ok(()), otherwise the error text.
+// Checks the syntax: lex + parse only — the code is NOT executed (no side
+// effects). On success Ok(()), otherwise the error text.
+//
+// Convenience wrapper without a path (the REPL and snippet tests have no source
+// file); a plain `check` only needs the entry file to lex+parse.
 fn check_source(src: &str) -> Result<(), String> {
+    check_source_at(src, std::path::Path::new("."))
+}
+
+// Path-aware check: like `check_source`. The `path` is accepted for symmetry
+// with `run_source_at` (and so a future check can resolve `use ./file` modules
+// relative to it), but a plain `check` only needs the entry file to lex+parse.
+fn check_source_at(src: &str, _path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     parser::parse(toks)?;
     Ok(())

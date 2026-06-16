@@ -31,7 +31,7 @@ cargo run -- run examples/demo.fx
 The full language core:
 
 - **Types:** int, flt, str, bool, nil, sym, list, map
-- **Bindings:** `=` (immutable), `<-` (mutable)
+- **Bindings:** `=` (bind a local — like Python assignment), `<-` (reassign, reaching out to an enclosing/global var)
 - **Functions:** `fn`, one-liner `->`, lambda `\x ->`, closure, `ret`, last-expression return, recursion
 - **Control:** `if`/`elif`/`else`, `each` (list/map/range/str), `skip`/`stop`, `match` (symbol/number/`_`)
 - **Operators:** arithmetic (`+ - * / %`), comparison, logical (`& | !`), `??`, `|>`, `..`, member/index (`.` `[]`)

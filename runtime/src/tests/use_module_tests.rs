@@ -151,6 +151,28 @@ fn use_module_fx_kengaytma_avto() {
     .unwrap();
 }
 
+// A clean import passes check, and nested imports (main -> a -> b) parse fine.
+#[test]
+fn check_clean_nested_modules_ok() {
+    check_modules(&[
+        ("main.fx", "use ./a\nlog (a.get())\n"),
+        ("a.fx", "use ./b\nexp fn get -> b.val + 1\n"),
+        ("b.fx", "exp val = 42\n"),
+    ])
+    .unwrap();
+}
+
+// A circular import must not hang the recursive check (the visited set breaks
+// the cycle); a clean pair like this passes.
+#[test]
+fn check_circular_import_terminates() {
+    check_modules(&[
+        ("x.fx", "use ./y\nexp a = 1\n"),
+        ("y.fx", "use ./x\nexp b = 2\n"),
+    ])
+    .unwrap();
+}
+
 // A battery `use` (`use http`) is still a no-op — no file is loaded, dispatch works.
 #[test]
 fn use_batareya_hamon_no_op() {

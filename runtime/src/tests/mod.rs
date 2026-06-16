@@ -78,6 +78,24 @@ fn run_modules(files: &[(&str, &str)]) -> Result<(), String> {
     r
 }
 
+// Like `run_modules`, but `check`s the first file (without executing) — used to
+// verify that `fluxon check` recursively validates imported user modules.
+fn check_modules(files: &[(&str, &str)]) -> Result<(), String> {
+    let dir = temp_module_dir();
+    for (name, src) in files {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, src).unwrap();
+    }
+    let main_path = dir.join(files[0].0);
+    let src = std::fs::read_to_string(&main_path).unwrap();
+    let r = check_source_at(&src, &main_path);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
 // Issue #138: the REPL runs one block and returns the last expression's VALUE
 // (to print). `run` returns () — this difference lets the REPL show the result.
 // lex_parse + run_repl_chunk is exactly how the REPL works.

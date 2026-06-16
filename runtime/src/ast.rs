@@ -158,15 +158,15 @@ pub enum MatchPat {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    // x = expr   (immutable)
+    // x = expr   (bind a local — Python-style; re-binding is allowed)
     Bind {
         name: String,
         value: Expr,
     },
-    // target <- expr  (mutable bind or reassignment). target may be a plain ident
-    // (`x <- v`) or a member field (`req.ctx <- v`, issue #68). A field-target is
-    // only used to write into a shared ctx cell like `req.ctx`
-    // (interp::assign_field) — a plain Map stays immutable.
+    // target <- expr  (reassign, reaching out to an enclosing/global var). target
+    // may be a plain ident (`x <- v`) or a member field (`req.ctx <- v`, issue
+    // #68). A field-target is only used to write into a shared ctx cell like
+    // `req.ctx` (interp::assign_field) — a plain Map value is not mutated in place.
     Assign {
         target: Box<Expr>,
         value: Expr,

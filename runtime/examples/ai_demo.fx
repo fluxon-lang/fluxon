@@ -53,13 +53,13 @@ msgs <- [{role::user content:"What is the weather in Tashkent?"}]
 
 # Tool-loop: spin until the model returns :final (or hits the limit).
 each i in 1..10
-  r = ai.run msgs tools
-  if r.kind == :final
-    log "final answer: ${r.text}"
-    ret r.text
-  # r.kind == :call -> the model wants to call a tool, we run it on the Fluxon side.
-  log "tool call: ${r.tool} args=${r.args}"
-  result = reg.call r.tool r.args
+  step = ai.run msgs tools
+  if step.kind == :final
+    log "final answer: ${step.text}"
+    ret step.text
+  # step.kind == :call -> the model wants to call a tool, we run it on the Fluxon side.
+  log "tool call: ${step.tool} args=${step.args}"
+  result = reg.call step.tool step.args
   # Add the model reply (tool_use) and the tool result to the history.
-  msgs <- msgs.push {role::assistant content:[{type:"tool_use" id:r.id name:r.tool input:r.args}]}
-  msgs <- msgs.push {role::tool id:r.id content:result}
+  msgs <- msgs.push {role::assistant content:[{type:"tool_use" id:step.id name:step.tool input:step.args}]}
+  msgs <- msgs.push {role::tool id:step.id content:result}
