@@ -32,84 +32,23 @@ kontekst. Fluxon teskari yo'ldan boradi: **bir ish = bir yo'l**, qisqa lekin
 tushunarli sintaksis, va AI davridagi dasturlar eng ko'p murojaat qiladigan
 narsalar — LLM ham shu jumlada — to'g'ridan-to'g'ri tilning ichiga qurilgan.
 
-## Tilning ta'mi
+## Butun web-servis — bitta faylda
 
-Oddiy, umumiy maqsadli kod — funksiyalar, rekursiya, ro'yxat pipeline'lari,
-pattern matching. Framework yo'q, import yo'q:
-
-```fx
-fn fib n
-  if n < 2
-    ret n
-  (fib (n - 1)) + (fib (n - 2))
-
-nums = [1 2 3 4 5 6 7 8 9 10]
-evens = nums.filter \x -> x % 2 == 0
-log "evens = ${evens}"
-log "fib 10 = ${fib 10}"
-
-# simvollar bo'yicha pattern matching
-fn status s
-  match s
-    :new  -> "yangi"
-    :done -> "tugatilgan"
-    _     -> "noma'lum"
-```
-
-## Batteries included
-
-Haqiqiy dunyoga murojaat qilganingizda — HTTP, ma'lumotlar bazasi, fayl tizimi —
-ular allaqachon tilning ichida. Mana butun web-servis:
+Murojaat qiladigan hamma narsa — HTTP, ma'lumotlar bazasi, LLM — allaqachon
+tilning ichida. Framework yo'q, `npm install` yo'q:
 
 ```fx
 use http db
 
-tbl notes
-  id   serial pk
-  text str
-  ts   now
-
-http.on :post "/notes" \req ->
-  rep 201 (db.ins "notes" {text:req.body.text})
-
-http.on :get "/notes" \req ->
-  rep 200 (db.q "select * from notes order by ts desc")
+http.on :get "/hello" \req ->
+  rep 200 {msg:"hello, world"}
 
 http.serve 8080
 ```
 
-Mana butun ilova — paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
-
-## AI tilning ichiga qurilgan
-
-LLM chaqirish — kalit so'z, SDK emas. Matnni klassifikatsiya qiling, tilning
-ichidagi ishonch (confidence)ni o'qing va shunga qarab tarmoqlaning — dependency
-yo'q, JSON'ni qo'lda parse qilish yo'q:
-
-```fx
-r = ai.json "bu murojaatni klassifikatsiya qil: ${text}" {topic::a urgency:int}
-if r._.conf > 0.85               # ishonch tilning ichiga qurilgan
-  log "avtomatik · narx: ${r._.cost} · token: ${r._.tokens}"
-else
-  log "past ishonch → odamga yuborish"
-```
-
-Provayderlar muhitdan avtomatik aniqlanadi (`ANTHROPIC_API_KEY` → Claude,
-`OPENAI_API_KEY` → GPT). `ai.run` esa tool ishlatadigan agentlarni qadam-baqadam
-boshqaradi — logging, narx va tasdiqlash SDK ichida emas, **sizning** kodingizda
-qoladi.
-
----
-
-## Nega Fluxon
-
-| | |
-|---|---|
-| 🧩 **Umumiy maqsadli** | Haqiqiy til — skriptlar, CLI'lar, toollar, ma'lumotlar bilan ishlash va to'liq servislar. Funksiyalar, closure'lar, pattern matching, xatolar, parallellik (`par`), pipe'lar (`\|>`). |
-| 🎯 **Bir ish = bir yo'l** | Takrorlash uchun faqat `each`. Chiqarish uchun faqat bitta usul. AI "qaysi yo'lni tanlay?" deb o'ylamaydi — tanlov yo'q, xato kam. |
-| ⚡ **Kam token, lekin tushunarli** | Sintaksis qisqa, lekin shifrli emas. Kalit so'zlar to'liq (`each`, `match`, `else`) — Fluxon'ni birinchi marta ko'rgan AI ham darhol tushunadi. |
-| 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — hammasi tilning ichida. `npm install` yo'q. Faqat ishlatilgani binary'ga kiradi (tree-shaking). |
-| 🤖 **AI — primitiv** | LLM chaqirish — kalit so'z, SDK emas. Strukturalangan natija, ishonch, token soni va narx hammasi tilning ichidan qaytadi. Provayderlar muhitdan avtomatik aniqlanadi. |
+Mana ishlaydigan server — paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate
+yo'q. LLM ham xuddi shunday yaqin: `ai.ask` / `ai.json` / `ai.run` — kalit
+so'zlar, SDK emas, provayderlar esa muhitdan avtomatik aniqlanadi.
 
 ---
 
@@ -152,6 +91,18 @@ cargo run -- run examples/demo.fx
 ```
 
 </details>
+
+---
+
+## Nega Fluxon
+
+| | |
+|---|---|
+| 🧩 **Umumiy maqsadli** | Haqiqiy til — skriptlar, CLI'lar, toollar, ma'lumotlar bilan ishlash va to'liq servislar. Funksiyalar, closure'lar, pattern matching, xatolar, parallellik (`par`), pipe'lar (`\|>`). |
+| 🎯 **Bir ish = bir yo'l** | Takrorlash uchun faqat `each`. Chiqarish uchun faqat bitta usul. AI "qaysi yo'lni tanlay?" deb o'ylamaydi — tanlov yo'q, xato kam. |
+| ⚡ **Kam token, lekin tushunarli** | Sintaksis qisqa, lekin shifrli emas. Kalit so'zlar to'liq (`each`, `match`, `else`) — Fluxon'ni birinchi marta ko'rgan AI ham darhol tushunadi. |
+| 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — hammasi tilning ichida. `npm install` yo'q. Faqat ishlatilgani binary'ga kiradi (tree-shaking). |
+| 🤖 **AI — primitiv** | LLM chaqirish — kalit so'z, SDK emas. Strukturalangan natija, ishonch, token soni va narx hammasi tilning ichidan qaytadi. Provayderlar muhitdan avtomatik aniqlanadi. |
 
 ---
 

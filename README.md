@@ -31,84 +31,23 @@ context. Fluxon takes the opposite path: **one task = one way**, short but
 readable syntax, and the things AI-era programs reach for most — including the
 LLM itself — built right into the language.
 
-## A taste of the language
+## A whole web service in one file
 
-Plain, general-purpose code — functions, recursion, list pipelines, pattern
-matching. No frameworks, no imports:
-
-```fx
-fn fib n
-  if n < 2
-    ret n
-  (fib (n - 1)) + (fib (n - 2))
-
-nums = [1 2 3 4 5 6 7 8 9 10]
-evens = nums.filter \x -> x % 2 == 0
-log "evens = ${evens}"
-log "fib 10 = ${fib 10}"
-
-# pattern matching on symbols
-fn status s
-  match s
-    :new  -> "fresh"
-    :done -> "complete"
-    _     -> "unknown"
-```
-
-## Batteries included
-
-When you do reach for the real world — HTTP, a database, the filesystem — it's
-already in the language. Here's a whole web service:
+Everything you reach for — HTTP, a database, the LLM — is already in the
+language. No frameworks, no `npm install`:
 
 ```fx
 use http db
 
-tbl notes
-  id   serial pk
-  text str
-  ts   now
-
-http.on :post "/notes" \req ->
-  rep 201 (db.ins "notes" {text:req.body.text})
-
-http.on :get "/notes" \req ->
-  rep 200 (db.q "select * from notes order by ts desc")
+http.on :get "/hello" \req ->
+  rep 200 {msg:"hello, world"}
 
 http.serve 8080
 ```
 
-That's the entire application — no package installs, no connection code, no
-boilerplate.
-
-## The AI is built into the language
-
-Calling an LLM is a keyword, not an SDK. Classify some text, read the built-in
-confidence, and branch on it — no dependency, no JSON parsing by hand:
-
-```fx
-r = ai.json "classify this ticket: ${text}" {topic::a urgency:int}
-if r._.conf > 0.85               # confidence is built into the language
-  log "auto-handled · cost: ${r._.cost} · tokens: ${r._.tokens}"
-else
-  log "low confidence → send to a human"
-```
-
-Providers auto-detect from the environment (`ANTHROPIC_API_KEY` → Claude,
-`OPENAI_API_KEY` → GPT). And `ai.run` drives tool-using agents one step at a
-time — so logging, cost, and approval stay in **your** code, not hidden inside
-an SDK.
-
----
-
-## Why Fluxon
-
-| | |
-|---|---|
-| 🧩 **General-purpose** | A real language — scripts, CLIs, tools, data work, and full services. Functions, closures, pattern matching, errors, parallelism (`par`), pipes (`\|>`). |
-| 🎯 **One task = one way** | The only way to iterate is `each`. One way to output. The AI never wonders "which way should I choose?" — there is no choice, so there are fewer mistakes. |
-| ⚡ **Few tokens, still readable** | Short syntax, but never cryptic. Keywords are spelled out in full (`each`, `match`, `else`) — an AI seeing Fluxon for the first time understands it immediately. |
-| 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — all built in. No `npm install`. Only what you use ends up in the binary (tree-shaking). |
-| 🤖 **AI as a primitive** | Calling an LLM is a keyword, not an SDK. Structured output, confidence, token count, and cost all come back built in. Providers auto-detect from the environment. |
+That's a running server — no package installs, no connection code, no
+boilerplate. And the LLM is just as close: `ai.ask` / `ai.json` / `ai.run` are
+keywords, not an SDK, with providers auto-detected from the environment.
 
 ---
 
@@ -151,6 +90,18 @@ cargo run -- run examples/demo.fx
 ```
 
 </details>
+
+---
+
+## Why Fluxon
+
+| | |
+|---|---|
+| 🧩 **General-purpose** | A real language — scripts, CLIs, tools, data work, and full services. Functions, closures, pattern matching, errors, parallelism (`par`), pipes (`\|>`). |
+| 🎯 **One task = one way** | The only way to iterate is `each`. One way to output. The AI never wonders "which way should I choose?" — there is no choice, so there are fewer mistakes. |
+| ⚡ **Few tokens, still readable** | Short syntax, but never cryptic. Keywords are spelled out in full (`each`, `match`, `else`) — an AI seeing Fluxon for the first time understands it immediately. |
+| 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — all built in. No `npm install`. Only what you use ends up in the binary (tree-shaking). |
+| 🤖 **AI as a primitive** | Calling an LLM is a keyword, not an SDK. Structured output, confidence, token count, and cost all come back built in. Providers auto-detect from the environment. |
 
 ---
 
