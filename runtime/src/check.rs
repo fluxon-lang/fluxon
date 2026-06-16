@@ -38,8 +38,32 @@ pub fn check_immutability(prog: &Program) -> Result<(), String> {
         fn_base: Vec::new(),
     };
     c.enter_fn();
+    // Mirror the interpreter's top-level/module hoisting: `Interp::run` (and
+    // `exec_module_body`) register every DIRECT top-level `FnDecl` — immutably —
+    // before executing any statement. So `x = 1` followed by `fn x ...` is a
+    // rebind error at run time; pre-seed the fn names so `check` agrees. (Fn
+    // BODIES are not hoisted — they run in order — so this only applies to the
+    // program/module root, not nested frames.)
+    for stmt in prog {
+        if let Stmt::FnDecl { name, .. } = stmt {
+            c.define(name, Mutability::Imm);
+        }
+    }
     c.check_block(prog)?;
     Ok(())
+}
+
+// Is the `use` path a user file (relative) or a battery (a plain name)? Mirrors
+// `interp::util::is_user_module_path` — only user modules bind an env name.
+fn is_user_module_path(path: &str) -> bool {
+    path.starts_with("./") || path.starts_with("../") || path == "." || path == ".."
+}
+
+// The binding name a module path resolves to: last segment without `.fx`.
+// Mirrors `interp::util::module_basename` (`./lib/greet` -> `greet`).
+fn module_basename(path: &str) -> String {
+    let last = path.rsplit('/').next().unwrap_or(path);
+    last.strip_suffix(".fx").unwrap_or(last).to_string()
 }
 
 struct Checker {
@@ -180,10 +204,24 @@ impl Checker {
                 self.check_expr(message)
             }
             Stmt::Expr(e) => self.check_expr(e),
-            // No bindings / nothing to recurse into.
-            Stmt::Ret(None) | Stmt::Skip | Stmt::Stop | Stmt::Use { .. } | Stmt::Tbl { .. } => {
+            // `use ./mod [as alias]` binds the module namespace immutably
+            // (`exec_use` → `define(.., false)`), so a later `<-`/`=` against the
+            // alias is rejected. Battery imports (`use http`) bind nothing — they
+            // dispatch by name — so they introduce no binding here.
+            Stmt::Use { items } => {
+                for item in items {
+                    if is_user_module_path(&item.path) {
+                        let name = item
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| module_basename(&item.path));
+                        self.define(&name, Mutability::Imm);
+                    }
+                }
                 Ok(())
             }
+            // No bindings / nothing to recurse into.
+            Stmt::Ret(None) | Stmt::Skip | Stmt::Stop | Stmt::Tbl { .. } => Ok(()),
         }
     }
 
@@ -412,5 +450,37 @@ mod tests {
     fn exp_bind_freezes_prior_mutable() {
         let err = check("x <- 1\nexp x = 2\nx <- 3\n").unwrap_err();
         assert!(err.contains("is immutable"), "got: {}", err);
+    }
+
+    // Top-level fns are hoisted immutably, so `x = 1` then `fn x ...` is the same
+    // rebind error at check time as at run time — regardless of textual order.
+    #[test]
+    fn bind_then_fn_decl_same_name_errors() {
+        let err = check("x = 1\nfn x n\n  n\n").unwrap_err();
+        assert!(err.contains("is immutable"), "got: {}", err);
+    }
+
+    // Hoisting also means a fn can be referenced before its declaration — reading
+    // it (not rebinding) is fine.
+    #[test]
+    fn call_fn_before_decl_ok() {
+        check("log (f 1)\nfn f n\n  n + 1\n").unwrap();
+    }
+
+    // A user-module import alias is immutable: assigning it is rejected.
+    #[test]
+    fn assign_to_module_alias_errors() {
+        let err = check("use ./tools as t\nt <- {}\n").unwrap_err();
+        assert!(err.contains("is immutable"), "got: {}", err);
+        // The default basename binding is immutable too.
+        let err2 = check("use ./tools\ntools = 1\n").unwrap_err();
+        assert!(err2.contains("is immutable"), "got: {}", err2);
+    }
+
+    // Battery imports (`use http`) bind no env name — `http <- x` is just a new
+    // local, never an error.
+    #[test]
+    fn battery_import_not_a_binding_ok() {
+        check("use http\nhttp <- 1\n").unwrap();
     }
 }
