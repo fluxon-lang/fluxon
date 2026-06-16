@@ -164,9 +164,18 @@ pub(crate) fn tui_module(func: &str, args: Vec<Value>) -> R {
                     )));
                 }
             };
+            // headers are optional, but if a second arg is GIVEN it must be a list —
+            // a stray nil/str would otherwise silently render a header-less table and
+            // hide the caller's mistake (the rest of tui.table surfaces shape errors).
             let headers = match args.get(1) {
+                None | Some(Value::Nil) => None,
                 Some(Value::List(h)) => Some(h.iter().map(|v| v.to_text()).collect::<Vec<_>>()),
-                _ => None,
+                Some(other) => {
+                    return Err(Flow::err(format!(
+                        "tui.table: headers must be a list, got {}",
+                        other.type_name()
+                    )));
+                }
             };
             table(&rows, headers.as_deref())
         }
@@ -362,8 +371,11 @@ fn boxed(body: &str, title: &str) -> String {
         out.push_str(&fg(&MUTED, &format!("╭{}╮", h)));
         out.push('\n');
     } else {
-        // ╭ Title ───────╮  — title in bold ink, the rest of the edge hairline
-        let pad = inner.saturating_sub(vis_width(title) + 3);
+        // `╭ Title ──────╮` — the top edge spans `inner` columns between the corners,
+        // same as the body rows: ` ` + title + ` ` + dashes = inner, so the dash run
+        // is inner - (title width) - 2 (the two flanking spaces). Off-by-one here used
+        // to shift the top-right corner left and break the frame.
+        let pad = inner.saturating_sub(vis_width(title) + 2);
         out.push_str(&fg(&MUTED, "╭ "));
         out.push_str(&bold(title));
         out.push(' ');
@@ -849,6 +861,17 @@ mod tests {
         assert!(tui_module("table", vec![rows]).is_err());
     }
 
+    // A given-but-non-list headers arg is an explicit error (not silently dropped).
+    // nil headers stay valid (= "no headers").
+    #[test]
+    fn table_rejects_bad_headers() {
+        let rows = Value::List(vec![Value::List(vec![s("a")])]);
+        assert!(tui_module("table", vec![rows.clone(), s("oops")]).is_err());
+        assert!(tui_module("table", vec![rows.clone(), Value::Int(1)]).is_err());
+        // nil -> treated as no headers, ok
+        assert!(tui_module("table", vec![rows, Value::Nil]).is_ok());
+    }
+
     // box frames single and multi-line bodies; output has the corner glyphs.
     #[test]
     fn box_frames_body() {
@@ -858,6 +881,24 @@ mod tests {
                 assert!(out.contains("hello"));
                 assert!(out.contains("world"));
                 assert!(out.ends_with('╯'));
+            }
+            _ => panic!("tui.box must return a str"),
+        }
+    }
+
+    // A titled box stays a rectangle: every line (top edge, body rows, bottom edge)
+    // has the same visible width — guards the off-by-one that shifted the top-right
+    // corner when the body was wider than the title.
+    #[test]
+    fn box_titled_stays_aligned() {
+        match tui_module("box", vec![s("Build passed"), s("Status")]) {
+            Ok(Value::Str(out)) => {
+                let widths: Vec<usize> = out.lines().map(vis_width).collect();
+                assert!(
+                    widths.windows(2).all(|w| w[0] == w[1]),
+                    "box rows misaligned: {:?}",
+                    widths
+                );
             }
             _ => panic!("tui.box must return a str"),
         }
