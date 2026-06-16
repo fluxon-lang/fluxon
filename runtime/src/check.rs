@@ -31,12 +31,16 @@ enum Mutability {
     Mut,
 }
 
-// Entry point: walk the program as the top-level function frame.
-pub fn check_immutability(prog: &Program) -> Result<(), String> {
+// Entry point: walk the program as the top-level function frame. On success
+// returns the user-module (`use ./...`) import paths found ANYWHERE in the
+// program (including inside fn bodies and blocks), so the caller can recursively
+// check them — `use` is a normal statement and may be nested.
+pub fn check_immutability(prog: &Program) -> Result<Vec<String>, String> {
     let mut c = Checker {
         scopes: Vec::new(),
         fn_base: Vec::new(),
         hoisted: Vec::new(),
+        imports: Vec::new(),
     };
     c.enter_fn(prog);
     // Mirror the interpreter's top-level/module FnDecl hoisting: `Interp::run`
@@ -52,7 +56,7 @@ pub fn check_immutability(prog: &Program) -> Result<(), String> {
         }
     }
     c.check_block(prog)?;
-    Ok(())
+    Ok(c.imports)
 }
 
 // Is the `use` path a user file (relative) or a battery (a plain name)? Mirrors
@@ -75,13 +79,18 @@ struct Checker {
     // Index (into `scopes`) of the current function's base scope. `=` resolution
     // never looks below the last entry — that is the fn boundary.
     fn_base: Vec<usize>,
-    // One entry per function frame (aligned with `fn_base`): the COMPLETE set of
-    // names bound at that frame's base level, with the mutability of their first
-    // binding. A closure captures its defining scope and runs after that scope is
-    // fully populated, so a `<-` from an inner fn must see an outer frame's later
-    // globals too (not just what was textually bound before the closure). Used
-    // only for resolving `<-` into OUTER frames — the current frame stays ordered.
+    // One entry per scope (aligned with `scopes`): the COMPLETE set of names
+    // bound at that scope's level, with the mutability of their first binding. A
+    // closure captures its defining scope — which may be a block, not just a fn
+    // frame — and runs after that scope is fully populated, so a `<-` from an
+    // inner fn must see an enclosing scope's LATER bindings too (not only what was
+    // textually bound before the closure). Used only for resolving `<-` into
+    // scopes OUTSIDE the current frame — the current frame stays ordered.
     hoisted: Vec<HashMap<String, Mutability>>,
+    // User-module (`use ./...`) import paths seen during the walk, in order —
+    // collected so the caller can recursively check imported files. Captures
+    // nested `use`s too (the walk visits every statement).
+    imports: Vec<String>,
 }
 
 impl Checker {
@@ -93,28 +102,30 @@ impl Checker {
 
     fn exit_fn(&mut self) {
         let base = self.fn_base.pop().expect("fn_base underflow");
-        self.hoisted.pop();
         self.scopes.truncate(base);
+        self.hoisted.truncate(base);
     }
 
-    fn enter_block(&mut self) {
+    fn enter_block(&mut self, body: &[Stmt]) {
         self.scopes.push(HashMap::new());
+        self.hoisted.push(Self::compute_hoisted(body));
     }
 
     fn exit_block(&mut self) {
         self.scopes.pop();
+        self.hoisted.pop();
     }
 
     fn define(&mut self, name: &str, m: Mutability) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), m);
     }
 
-    // The frame-level binding set for a function body. FnDecls are registered
-    // first (hoisted, immutable); then each direct binding takes the mutability
-    // of its FIRST occurrence (`=`/`exp`/`use`-alias → immutable, `<-` → mutable),
-    // except `exp` which always freezes the name (a direct `define(.., false)`).
-    // Sub-blocks (`if`/`each`/...) are NOT descended into — their bindings are
-    // block-local, not frame-level.
+    // The binding set for a scope body (a fn/lambda body or an `if`/`each`/...
+    // block). FnDecls are registered first (hoisted, immutable); then each direct
+    // binding takes the mutability of its FIRST occurrence (`=`/`exp`/`use`-alias →
+    // immutable, `<-` → mutable), except `exp` which always freezes the name (a
+    // direct `define(.., false)`). Sub-blocks are NOT descended into — their
+    // bindings live in their own scope, which gets its own hoisted map.
     fn compute_hoisted(body: &[Stmt]) -> HashMap<String, Mutability> {
         let mut h = HashMap::new();
         for stmt in body {
@@ -163,9 +174,10 @@ impl Checker {
             .find_map(|s| s.get(name).copied())
     }
 
-    // `<-` resolution: the current frame (ordered scopes) first, then OUTER frames
-    // via their hoisted maps — `<-` crosses fn boundaries (closure capture), and a
-    // captured outer scope is fully populated by the time the closure runs.
+    // `<-` resolution: the current frame (ordered scopes) first, then scopes
+    // OUTSIDE the frame via their hoisted maps — `<-` crosses fn boundaries
+    // (closure capture), and a captured outer scope (frame OR block) is fully
+    // populated by the time the closure runs.
     fn resolve_assign(&self, name: &str) -> Option<Mutability> {
         let base = *self.fn_base.last().unwrap();
         if let Some(m) = self.scopes[base..]
@@ -175,12 +187,10 @@ impl Checker {
         {
             return Some(m);
         }
-        // Outer frames: innermost-outer to outermost (skip the current frame).
-        self.hoisted
-            .iter()
+        // Enclosing scopes (innermost-out): their hoisted maps (complete sets).
+        (0..base)
             .rev()
-            .skip(1)
-            .find_map(|h| h.get(name).copied())
+            .find_map(|i| self.hoisted[i].get(name).copied())
     }
 
     fn check_block(&mut self, body: &[Stmt]) -> Result<(), String> {
@@ -259,7 +269,7 @@ impl Checker {
             // `each [k,] v in iter` — loop vars are mutable, scoped to the body.
             Stmt::Each { vars, iter, body } => {
                 self.check_expr(iter)?;
-                self.enter_block();
+                self.enter_block(body);
                 for v in vars {
                     self.define(v, Mutability::Mut);
                 }
@@ -287,6 +297,9 @@ impl Checker {
                             .clone()
                             .unwrap_or_else(|| module_basename(&item.path));
                         self.define(&name, Mutability::Imm);
+                        // Record for the caller's recursive module check (issue
+                        // #178); a nested `use` (in a fn/block) is captured too.
+                        self.imports.push(item.path.clone());
                     }
                 }
                 Ok(())
@@ -307,10 +320,10 @@ impl Checker {
                 catch_var,
                 catch_body,
             } => {
-                self.enter_block();
+                self.enter_block(body);
                 self.check_block(body)?;
                 self.exit_block();
-                self.enter_block();
+                self.enter_block(catch_body);
                 // The caught error is bound immutable (Scope::define(.., false)).
                 if let Some(name) = catch_var {
                     self.define(name, Mutability::Imm);
@@ -399,12 +412,12 @@ impl Checker {
     fn check_if(&mut self, ifx: &IfExpr) -> Result<(), String> {
         for (cond, block) in &ifx.arms {
             self.check_expr(cond)?;
-            self.enter_block();
+            self.enter_block(block);
             self.check_block(block)?;
             self.exit_block();
         }
         if let Some(block) = &ifx.else_block {
-            self.enter_block();
+            self.enter_block(block);
             self.check_block(block)?;
             self.exit_block();
         }
@@ -415,7 +428,7 @@ impl Checker {
         self.check_expr(&mx.subject)?;
         for arm in &mx.arms {
             // Patterns are symbol/int literals or `_` — they bind no variables.
-            self.enter_block();
+            self.enter_block(&arm.body);
             self.check_block(&arm.body)?;
             self.exit_block();
         }
@@ -431,7 +444,7 @@ mod tests {
     fn check(src: &str) -> Result<(), String> {
         let toks = lexer::lex(src).unwrap();
         let prog = parser::parse(toks).unwrap();
-        check_immutability(&prog)
+        check_immutability(&prog).map(|_| ())
     }
 
     // The headline case from issue #178: a `=`-bound var reassigned inside a block.
@@ -577,5 +590,21 @@ mod tests {
     #[test]
     fn lambda_captures_mutable_outer_ok() {
         check("counter <- 0\ninc = \\n ->\n  counter <- counter + n\ninc 5\n").unwrap();
+    }
+
+    // A fn declared inside a BLOCK captures that block scope; a `<-` to an
+    // immutable binding made later in the same block is a runtime error (the
+    // binding is in the captured scope by the time the fn runs). Block scopes are
+    // hoisted too, so `check` catches it.
+    #[test]
+    fn fn_in_block_assigns_later_block_immutable_errors() {
+        let err = check("if true\n  fn bad\n    x <- 1\n  x = 0\n  bad()\n").unwrap_err();
+        assert!(err.contains("is immutable"), "got: {}", err);
+    }
+
+    // ...but capturing a MUTABLE block-local var is the legitimate pattern.
+    #[test]
+    fn fn_in_block_assigns_mutable_block_ok() {
+        check("if true\n  fn inc\n    c <- c + 1\n  c <- 0\n  inc()\n").unwrap();
     }
 }

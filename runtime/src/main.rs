@@ -265,48 +265,41 @@ fn check_source(src: &str) -> Result<(), String> {
 fn check_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
-    check::check_immutability(&prog)?;
+    let imports = check::check_immutability(&prog)?;
     let base = path.parent().unwrap_or(std::path::Path::new("."));
     let mut visited = std::collections::HashSet::new();
-    check_module_imports(&prog, base, &mut visited)
+    check_imported_modules(&imports, base, &mut visited)
 }
 
-// Recursively lex/parse/immutability-check the user modules a program imports.
-// `base` is the directory imports resolve against; `visited` (canonical paths)
-// guards against cycles and re-checking. A module that cannot be resolved is
-// skipped silently — `run` surfaces a real "module not found"; `check` stays
-// lenient rather than inventing a new failure mode.
-fn check_module_imports(
-    prog: &ast::Program,
+// Recursively lex/parse/immutability-check imported user modules. `imports` is
+// the relative paths a file `use`s (anywhere — `check_immutability` collects
+// nested ones too); they resolve against `base` (the importer's directory).
+// `visited` (canonical paths) guards against cycles and re-checking. A module
+// that cannot be resolved is skipped silently — `run` surfaces a real "module
+// not found"; `check` stays lenient rather than inventing a new failure mode.
+fn check_imported_modules(
+    imports: &[String],
     base: &std::path::Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> Result<(), String> {
-    for stmt in prog {
-        let ast::Stmt::Use { items } = stmt else {
-            continue;
-        };
-        for item in items {
-            if !check::is_user_module_path(&item.path) {
-                continue;
-            }
-            let mut full = base.join(&item.path);
-            if full.extension().is_none() {
-                full.set_extension("fx");
-            }
-            let Ok(canon) = full.canonicalize() else {
-                continue; // unresolved import — left for `run` to report
-            };
-            if !visited.insert(canon.clone()) {
-                continue; // already checked (or a cycle)
-            }
-            let src = std::fs::read_to_string(&canon)
-                .map_err(|e| format!("could not read module '{}': {}", item.path, e))?;
-            let toks = lexer::lex(&src)?;
-            let mprog = parser::parse(toks)?;
-            check::check_immutability(&mprog)?;
-            let mbase = canon.parent().unwrap_or(std::path::Path::new("."));
-            check_module_imports(&mprog, mbase, visited)?;
+    for rel in imports {
+        let mut full = base.join(rel);
+        if full.extension().is_none() {
+            full.set_extension("fx");
         }
+        let Ok(canon) = full.canonicalize() else {
+            continue; // unresolved import — left for `run` to report
+        };
+        if !visited.insert(canon.clone()) {
+            continue; // already checked (or a cycle)
+        }
+        let src = std::fs::read_to_string(&canon)
+            .map_err(|e| format!("could not read module '{}': {}", rel, e))?;
+        let toks = lexer::lex(&src)?;
+        let mprog = parser::parse(toks)?;
+        let mimports = check::check_immutability(&mprog)?;
+        let mbase = canon.parent().unwrap_or(std::path::Path::new("."));
+        check_imported_modules(&mimports, mbase, visited)?;
     }
     Ok(())
 }

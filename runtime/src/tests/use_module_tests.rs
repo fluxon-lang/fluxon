@@ -190,6 +190,19 @@ fn check_circular_import_terminates() {
     .unwrap();
 }
 
+// A `use ./...` nested inside a fn body is still validated by `check` (it is a
+// normal statement and may appear in any block): an imported module's rebind
+// must fail check even when the import is not at the top level.
+#[test]
+fn check_recurses_into_nested_use() {
+    let err = check_modules(&[
+        ("main.fx", "fn load\n  use ./bad\n  bad.x\nlog (load)\n"),
+        ("bad.fx", "exp x = 1\ny = 2\ny <- 3\n"),
+    ])
+    .expect_err("a nested import's rebind should fail `check`");
+    assert!(err.contains("is immutable"), "got: {}", err);
+}
+
 // A battery `use` (`use http`) is still a no-op — no file is loaded, dispatch works.
 #[test]
 fn use_batareya_hamon_no_op() {
