@@ -4,9 +4,9 @@
      <img src="assets/logo.png" alt="Fluxon" width="120" /> -->
 <h1>🌊 Fluxon</h1>
 
-### The AI-native programming language
+### The AI-native general-purpose programming language
 
-**A backend language that AI agents write well — and that makes the LLM a first-class part of the backend.**
+**A simple, fast, batteries-included language — designed so AI agents write it well, with the LLM built in as a first-class primitive.**
 
 [![Build](https://github.com/fluxon-lang/fluxon/actions/workflows/ci.yml/badge.svg)](https://github.com/fluxon-lang/fluxon/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/fluxon-lang/fluxon?color=blue)](https://github.com/fluxon-lang/fluxon/releases)
@@ -20,18 +20,45 @@
 
 > **Philosophy:** *"The language adapts to the AI, not the AI to the language."*
 
+Fluxon is a general-purpose programming language — like Go or Python, you use it
+to write scripts, tools, data-processing, services, and full applications. What
+makes it different is **who it was designed for**: AI agents.
+
 Today's languages were built for humans. They let you do one thing a dozen ways,
-with syntax that's convenient but token-wasteful, where even the simplest task
-needs an extra package. For an AI agent that's noise — every "decision point" is
-a chance to slip, every redundant character wastes context. And calling an LLM,
-the thing AI-era backends do constantly, means dragging in an SDK, wiring keys,
-and parsing JSON by hand.
+with syntax that's convenient but token-wasteful. For an AI agent that's noise —
+every "decision point" is a chance to slip, every redundant character wastes
+context. Fluxon takes the opposite path: **one task = one way**, short but
+readable syntax, and the things AI-era programs reach for most — including the
+LLM itself — built right into the language.
 
-**Fluxon is built differently** — by measuring what AI writes easily and
-reliably, shaping the language around that, and making the LLM a keyword
-(`ai.ask` / `ai.json` / `ai.run`) instead of a dependency.
+## A taste of the language
 
-## A whole app in one file
+Plain, general-purpose code — functions, recursion, list pipelines, pattern
+matching. No frameworks, no imports:
+
+```fx
+fn fib n
+  if n < 2
+    ret n
+  (fib (n - 1)) + (fib (n - 2))
+
+nums = [1 2 3 4 5 6 7 8 9 10]
+evens = nums.filter \x -> x % 2 == 0
+log "evens = ${evens}"
+log "fib 10 = ${fib 10}"
+
+# pattern matching on symbols
+fn status s
+  match s
+    :new  -> "fresh"
+    :done -> "complete"
+    _     -> "unknown"
+```
+
+## Batteries included
+
+When you do reach for the real world — HTTP, a database, the filesystem — it's
+already in the language. Here's a whole web service:
 
 ```fx
 use http db
@@ -50,30 +77,26 @@ http.on :get "/notes" \req ->
 http.serve 8080
 ```
 
-That's the entire application. No package installs, no connection code, no
+That's the entire application — no package installs, no connection code, no
 boilerplate.
 
-## The AI is right there in the language
+## The AI is built into the language
 
-Classify a request, read the built-in confidence, and route on it — no SDK, no
-JSON parsing:
+Calling an LLM is a keyword, not an SDK. Classify some text, read the built-in
+confidence, and branch on it — no dependency, no JSON parsing by hand:
 
 ```fx
-use http ai
-
-http.on :post "/triage" \req ->
-  r = ai.json "classify this ticket: ${req.body.text}" {topic::a urgency:int}
-  if r._.conf > 0.85
-    rep 200 {auto:true result:r}      # confidence is built into the language
-  else
-    rep 200 {auto:false review:true}  # low confidence → send to a human
-
-http.serve 8080
+r = ai.json "classify this ticket: ${text}" {topic::a urgency:int}
+if r._.conf > 0.85               # confidence is built into the language
+  log "auto-handled · cost: ${r._.cost} · tokens: ${r._.tokens}"
+else
+  log "low confidence → send to a human"
 ```
 
-Need a tool-using agent? `ai.run` returns one step of the loop and hands control
-back to you — so logging, cost, and approval stay in **your** code, not hidden
-inside an SDK.
+Providers auto-detect from the environment (`ANTHROPIC_API_KEY` → Claude,
+`OPENAI_API_KEY` → GPT). And `ai.run` drives tool-using agents one step at a
+time — so logging, cost, and approval stay in **your** code, not hidden inside
+an SDK.
 
 ---
 
@@ -81,19 +104,11 @@ inside an SDK.
 
 | | |
 |---|---|
+| 🧩 **General-purpose** | A real language — scripts, CLIs, tools, data work, and full services. Functions, closures, pattern matching, errors, parallelism (`par`), pipes (`\|>`). |
 | 🎯 **One task = one way** | The only way to iterate is `each`. One way to output. The AI never wonders "which way should I choose?" — there is no choice, so there are fewer mistakes. |
 | ⚡ **Few tokens, still readable** | Short syntax, but never cryptic. Keywords are spelled out in full (`each`, `match`, `else`) — an AI seeing Fluxon for the first time understands it immediately. |
 | 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — all built in. No `npm install`. Only what you use ends up in the binary (tree-shaking). |
-| 🤖 **AI as a primitive** | Calling an LLM is a keyword, not an SDK. Structured output, confidence, token count, and cost all come back built in. Providers are auto-detected from the environment. |
-
-```fx
-r = ai.json "extract the order: ${text}" {intent::a items:[{product:str qty:int}]}
-if r._.conf > 0.85          # confidence metadata is built into the language
-  log "cost: ${r._.cost} · tokens: ${r._.tokens}"
-```
-
-Providers auto-detect from the environment (`ANTHROPIC_API_KEY` → Claude,
-`OPENAI_API_KEY` → GPT) — nothing to configure.
+| 🤖 **AI as a primitive** | Calling an LLM is a keyword, not an SDK. Structured output, confidence, token count, and cost all come back built in. Providers auto-detect from the environment. |
 
 ---
 
@@ -186,8 +201,7 @@ Fluxon was built through **stress testing** — with evidence, not guesswork:
    language (opus, sonnet, haiku) and asked to build real projects. Each "spec
    gap" a model hit exposed a real shortcoming.
 4. **Refinement** — the gaps were closed, then re-tested. Over several rounds the
-   language deepened — from small utilities to large systems (e-commerce,
-   realtime chat).
+   language deepened — from small utilities to large systems.
 
 The whole process is preserved in the [`research/`](research/) folder.
 

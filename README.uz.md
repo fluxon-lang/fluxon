@@ -4,9 +4,9 @@
      <img src="assets/logo.png" alt="Fluxon" width="120" /> -->
 <h1>🌊 Fluxon</h1>
 
-### AI-native dasturlash tili
+### AI-native umumiy maqsadli dasturlash tili
 
-**AI agentlar yaxshi yozadigan, va LLM'ni backend'ning birinchi darajali qismiga aylantiradigan backend tili.**
+**Oddiy, tez, batteries-included til — AI agentlar yaxshi yozadigan tarzda dizayn qilingan, LLM esa birinchi darajali primitiv sifatida tilning ichida.**
 
 [![Build](https://github.com/fluxon-lang/fluxon/actions/workflows/ci.yml/badge.svg)](https://github.com/fluxon-lang/fluxon/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/fluxon-lang/fluxon?color=blue)](https://github.com/fluxon-lang/fluxon/releases)
@@ -20,18 +20,46 @@
 
 > **Falsafa:** *"Til AI'ga moslashadi, AI tilga emas."*
 
-Hozirgi dasturlash tillari odamlar uchun yaratilgan. Ularda bir ishni o'nlab
-yo'l bilan qilish mumkin, sintaksis qulay lekin token-isrofgar, va eng oddiy
-narsa ham qo'shimcha paket talab qiladi. AI agent uchun bu — shovqin: har
-"tanlov nuqtasi" potensial xato, har ortiqcha belgi sarflangan kontekst. Va
-LLM chaqirish — AI davridagi backend'lar doim qiladigan ish — SDK tortish, kalit
-ulash va JSON'ni qo'lda parse qilish demakdir.
+Fluxon — umumiy maqsadli dasturlash tili. Go yoki Python kabi, undan skript,
+tool, ma'lumotlarni qayta ishlash, servis va to'liq ilovalar yozish uchun
+foydalanasiz. Uni boshqacha qiladigan narsa — **u kim uchun dizayn qilingani**:
+AI agentlar uchun.
 
-**Fluxon boshqacha qurilgan** — AI nimani oson va ishonchli yozishini o'lchab,
-tilni shunga moslab, va LLM'ni dependency emas, kalit so'z qilib (`ai.ask` /
-`ai.json` / `ai.run`).
+Hozirgi tillar odamlar uchun yaratilgan. Ularda bir ishni o'nlab yo'l bilan
+qilish mumkin, sintaksis qulay lekin token-isrofgar. AI agent uchun bu —
+shovqin: har "tanlov nuqtasi" potensial xato, har ortiqcha belgi sarflangan
+kontekst. Fluxon teskari yo'ldan boradi: **bir ish = bir yo'l**, qisqa lekin
+tushunarli sintaksis, va AI davridagi dasturlar eng ko'p murojaat qiladigan
+narsalar — LLM ham shu jumlada — to'g'ridan-to'g'ri tilning ichiga qurilgan.
 
-## Butun ilova — bitta faylda
+## Tilning ta'mi
+
+Oddiy, umumiy maqsadli kod — funksiyalar, rekursiya, ro'yxat pipeline'lari,
+pattern matching. Framework yo'q, import yo'q:
+
+```fx
+fn fib n
+  if n < 2
+    ret n
+  (fib (n - 1)) + (fib (n - 2))
+
+nums = [1 2 3 4 5 6 7 8 9 10]
+evens = nums.filter \x -> x % 2 == 0
+log "evens = ${evens}"
+log "fib 10 = ${fib 10}"
+
+# simvollar bo'yicha pattern matching
+fn status s
+  match s
+    :new  -> "yangi"
+    :done -> "tugatilgan"
+    _     -> "noma'lum"
+```
+
+## Batteries included
+
+Haqiqiy dunyoga murojaat qilganingizda — HTTP, ma'lumotlar bazasi, fayl tizimi —
+ular allaqachon tilning ichida. Mana butun web-servis:
 
 ```fx
 use http db
@@ -50,29 +78,26 @@ http.on :get "/notes" \req ->
 http.serve 8080
 ```
 
-Mana butun ilova. Paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
+Mana butun ilova — paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.
 
-## AI to'g'ridan-to'g'ri tilning ichida
+## AI tilning ichiga qurilgan
 
-So'rovni klassifikatsiya qiling, tilning ichidagi ishonch (confidence) ni o'qing
-va shunga qarab yo'naltiring — SDK yo'q, JSON parse qilish yo'q:
+LLM chaqirish — kalit so'z, SDK emas. Matnni klassifikatsiya qiling, tilning
+ichidagi ishonch (confidence)ni o'qing va shunga qarab tarmoqlaning — dependency
+yo'q, JSON'ni qo'lda parse qilish yo'q:
 
 ```fx
-use http ai
-
-http.on :post "/triage" \req ->
-  r = ai.json "bu murojaatni klassifikatsiya qil: ${req.body.text}" {topic::a urgency:int}
-  if r._.conf > 0.85
-    rep 200 {auto:true result:r}      # ishonch tilning ichiga qurilgan
-  else
-    rep 200 {auto:false review:true}  # past ishonch → odamga yuborish
-
-http.serve 8080
+r = ai.json "bu murojaatni klassifikatsiya qil: ${text}" {topic::a urgency:int}
+if r._.conf > 0.85               # ishonch tilning ichiga qurilgan
+  log "avtomatik · narx: ${r._.cost} · token: ${r._.tokens}"
+else
+  log "past ishonch → odamga yuborish"
 ```
 
-Tool ishlatadigan agent kerakmi? `ai.run` loop'ning bitta qadamini qaytaradi va
-boshqaruvni **sizga** qaytaradi — logging, narx va tasdiqlash SDK ichida emas,
-sizning kodingizda qoladi.
+Provayderlar muhitdan avtomatik aniqlanadi (`ANTHROPIC_API_KEY` → Claude,
+`OPENAI_API_KEY` → GPT). `ai.run` esa tool ishlatadigan agentlarni qadam-baqadam
+boshqaradi — logging, narx va tasdiqlash SDK ichida emas, **sizning** kodingizda
+qoladi.
 
 ---
 
@@ -80,19 +105,11 @@ sizning kodingizda qoladi.
 
 | | |
 |---|---|
+| 🧩 **Umumiy maqsadli** | Haqiqiy til — skriptlar, CLI'lar, toollar, ma'lumotlar bilan ishlash va to'liq servislar. Funksiyalar, closure'lar, pattern matching, xatolar, parallellik (`par`), pipe'lar (`\|>`). |
 | 🎯 **Bir ish = bir yo'l** | Takrorlash uchun faqat `each`. Chiqarish uchun faqat bitta usul. AI "qaysi yo'lni tanlay?" deb o'ylamaydi — tanlov yo'q, xato kam. |
 | ⚡ **Kam token, lekin tushunarli** | Sintaksis qisqa, lekin shifrli emas. Kalit so'zlar to'liq (`each`, `match`, `else`) — Fluxon'ni birinchi marta ko'rgan AI ham darhol tushunadi. |
 | 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — hammasi tilning ichida. `npm install` yo'q. Faqat ishlatilgani binary'ga kiradi (tree-shaking). |
 | 🤖 **AI — primitiv** | LLM chaqirish — kalit so'z, SDK emas. Strukturalangan natija, ishonch, token soni va narx hammasi tilning ichidan qaytadi. Provayderlar muhitdan avtomatik aniqlanadi. |
-
-```fx
-r = ai.json "buyurtmani ajrat: ${text}" {intent::a items:[{product:str qty:int}]}
-if r._.conf > 0.85          # ishonch metadata tilning ichida
-  log "narx: ${r._.cost} · token: ${r._.tokens}"
-```
-
-Provayderlar muhitdan avtomatik aniqlanadi (`ANTHROPIC_API_KEY` → Claude,
-`OPENAI_API_KEY` → GPT) — sozlash shart emas.
 
 ---
 
@@ -185,8 +202,7 @@ Fluxon **stress-test orqali** qurildi — taxmin bilan emas, dalil bilan:
    haiku) berilib, real loyihalar yozdirildi. Har model topgan "spec bo'shliqlari"
    tilning haqiqiy kamchiligini ko'rsatdi.
 4. **Sayqal** — topilgan bo'shliqlar yopildi, qayta sinaldi. Bir necha raundda
-   til chuqurlashdi — kichik utilitalardan katta tizimlargacha (e-commerce,
-   realtime chat).
+   til chuqurlashdi — kichik utilitalardan katta tizimlargacha.
 
 Bu jarayon [`research/`](research/) papkasida to'liq saqlangan.
 
