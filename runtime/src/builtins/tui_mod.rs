@@ -556,21 +556,25 @@ fn confirm(prompt: &str, default: bool) -> R {
     }
 }
 
+// An interactive widget needs a real terminal on BOTH ends: stdin to drive keys, and
+// stdout because every prompt/redraw is written there. If either is redirected
+// (`fluxon run wizard.fx > out.txt`) the user sees nothing and control bytes leak
+// into the file. Call this BEFORE printing any prompt so nothing leaks on failure.
+fn require_tty() -> Result<(), Flow> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(Flow::err(
+            "tui: this widget needs an interactive terminal (stdin and stdout must both be a tty)",
+        ));
+    }
+    Ok(())
+}
+
 // A RAII guard that turns raw mode off on drop — so any early return / `?` / panic
 // still restores the terminal. Entering twice is harmless; crossterm tracks state.
 struct RawGuard;
 impl RawGuard {
     fn enter() -> Result<Self, Flow> {
-        // Raw mode needs a real terminal on BOTH ends. stdin must be a tty to drive
-        // arrow keys; stdout must be a tty because every prompt/redraw is written
-        // there — if stdout is redirected (`fluxon run wizard.fx > out.txt`) the user
-        // sees nothing while cursor-control bytes leak into the file. Require both,
-        // with a clear message instead of crossterm's cryptic "Device not configured".
-        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-            return Err(Flow::err(
-                "tui: this widget needs an interactive terminal (stdin and stdout must both be a tty)",
-            ));
-        }
+        require_tty()?;
         terminal::enable_raw_mode().map_err(|e| Flow::err(format!("tui: raw mode: {}", e)))?;
         Ok(RawGuard)
     }
@@ -588,11 +592,13 @@ enum Key {
     Down,
     Enter,
     Space,
-    Char(char),
     Cancel, // Esc or Ctrl-C
-    Other,
+    Other,  // any other key — ignored by the navigation widgets
 }
 
+// Map a key event to a navigation action for select/checkbox. The vim (j/k) and
+// space mappings live HERE, local to navigation — password reads raw events itself
+// so those characters are never stolen from a typed secret.
 fn read_key() -> Result<Key, Flow> {
     loop {
         match event::read().map_err(|e| Flow::err(format!("tui: read key: {}", e)))? {
@@ -603,14 +609,11 @@ fn read_key() -> Result<Key, Flow> {
                     return Ok(Key::Cancel);
                 }
                 return Ok(match k.code {
-                    KeyCode::Up => Key::Up,
-                    KeyCode::Down => Key::Down,
-                    KeyCode::Char('k') => Key::Up,
-                    KeyCode::Char('j') => Key::Down,
+                    KeyCode::Up | KeyCode::Char('k') => Key::Up,
+                    KeyCode::Down | KeyCode::Char('j') => Key::Down,
                     KeyCode::Enter => Key::Enter,
                     KeyCode::Char(' ') => Key::Space,
                     KeyCode::Esc => Key::Cancel,
-                    KeyCode::Char(c) => Key::Char(c),
                     _ => Key::Other,
                 });
             }
@@ -620,33 +623,51 @@ fn read_key() -> Result<Key, Flow> {
 }
 
 fn password(prompt: &str) -> R {
+    // Check the tty BEFORE printing, so a redirected run leaks nothing.
+    require_tty()?;
     show(&prompt_line(prompt, None))?;
     let _guard = RawGuard::enter()?;
     let mut buf = String::new();
+    // Password reads RAW keys directly — NOT through read_key(), whose vim/space
+    // mappings (j->Down, k->Up, ' '->Space) would silently swallow those very chars
+    // from the secret. Here every printable char counts, including j/k/space.
     loop {
-        match read_key()? {
-            Key::Enter => break,
-            Key::Cancel => {
-                // newline so the next output isn't glued to the prompt
-                print!("\r\n");
-                let _ = std::io::stdout().flush();
-                return Ok(Value::Nil);
+        match event::read().map_err(|e| Flow::err(format!("tui: read key: {}", e)))? {
+            Event::Key(k) if k.kind != KeyEventKind::Release => {
+                let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                match k.code {
+                    KeyCode::Enter => break,
+                    KeyCode::Esc => return password_cancel(),
+                    KeyCode::Char('c') if ctrl => return password_cancel(),
+                    KeyCode::Backspace => {
+                        if buf.pop().is_some() {
+                            // erase one dot: back up, overwrite with space, back up again
+                            print!("\x08 \x08");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        buf.push(c);
+                        // echo a dot per char so the user sees progress, length hidden
+                        print!("{}", fg(&MUTED, "•"));
+                        let _ = std::io::stdout().flush();
+                    }
+                    _ => {}
+                }
             }
-            // echo a dot per char so the user sees progress without revealing length-by-blank
-            Key::Char(c) => {
-                buf.push(c);
-                print!("{}", fg(&MUTED, "•"));
-                let _ = std::io::stdout().flush();
-            }
-            // Backspace comes through as Other for our mapping; handle it explicitly
-            // by re-reading is overkill — keep password simple (no edit). Most CLIs
-            // accept this for short secrets/PINs.
-            _ => {}
+            _ => continue,
         }
     }
     print!("\r\n");
     let _ = std::io::stdout().flush();
     Ok(Value::Str(buf))
+}
+
+// Cancel a password prompt: drop a newline so the next output isn't glued on, return nil.
+fn password_cancel() -> R {
+    print!("\r\n");
+    let _ = std::io::stdout().flush();
+    Ok(Value::Nil)
 }
 
 // Draw the option list for select/checkbox. Each row is rewritten in place by moving
@@ -690,6 +711,7 @@ fn select(prompt: &str, options: &[String]) -> R {
     if options.is_empty() {
         return Err(Flow::err("tui.select: options list is empty"));
     }
+    require_tty()?; // before any print — a redirected run must leak nothing
     println!(
         "{} {}  {}",
         fg(&ACCENT, BAR),
@@ -728,6 +750,7 @@ fn checkbox(prompt: &str, options: &[String]) -> R {
     if options.is_empty() {
         return Err(Flow::err("tui.checkbox: options list is empty"));
     }
+    require_tty()?; // before any print — a redirected run must leak nothing
     println!(
         "{} {}  {}",
         fg(&ACCENT, BAR),
@@ -927,5 +950,17 @@ mod tests {
     fn select_empty_options_errors() {
         assert!(tui_module("select", vec![s("pick"), Value::List(vec![])]).is_err());
         assert!(tui_module("checkbox", vec![s("pick"), Value::List(vec![])]).is_err());
+    }
+
+    // require_tty must reject when stdout is not a terminal — the guard that keeps a
+    // redirected run (`fluxon run wizard.fx > out.txt`) from leaking prompts. Under
+    // `cargo test` stdout is piped, so this exercises the rejecting path. (We test
+    // the guard directly rather than the widgets, so a tty-attached runner can't
+    // make password() block waiting on a keypress.)
+    #[test]
+    fn require_tty_rejects_non_tty() {
+        if !std::io::stdout().is_terminal() {
+            assert!(require_tty().is_err());
+        }
     }
 }
