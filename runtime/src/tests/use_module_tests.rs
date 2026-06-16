@@ -151,6 +151,45 @@ fn use_module_fx_kengaytma_avto() {
     .unwrap();
 }
 
+// `fluxon check` recursively validates imported user modules (issue #178): a
+// dormant `=`-rebind in an imported handler must fail at check time, not only
+// when `run` loads the module on the request path.
+#[test]
+fn check_recurses_into_user_modules() {
+    let err = check_modules(&[
+        ("main.fx", "use ./handler\nlog (handler.run)\n"),
+        (
+            "handler.fx",
+            "exp fn run\n  result = {}\n  if true\n    result = result.set \"a\" 1\n  result\n",
+        ),
+    ])
+    .expect_err("an imported module's rebind should fail `check`");
+    assert!(err.contains("is immutable"), "got: {}", err);
+}
+
+// A clean import passes check, and nested imports (main -> a -> b) are walked
+// transitively without infinite recursion.
+#[test]
+fn check_clean_nested_modules_ok() {
+    check_modules(&[
+        ("main.fx", "use ./a\nlog (a.get())\n"),
+        ("a.fx", "use ./b\nexp fn get -> b.val + 1\n"),
+        ("b.fx", "exp val = 42\n"),
+    ])
+    .unwrap();
+}
+
+// A circular import must not hang the recursive check (the visited set breaks
+// the cycle); a clean pair like this passes.
+#[test]
+fn check_circular_import_terminates() {
+    check_modules(&[
+        ("x.fx", "use ./y\nexp a = 1\n"),
+        ("y.fx", "use ./x\nexp b = 2\n"),
+    ])
+    .unwrap();
+}
+
 // A battery `use` (`use http`) is still a no-op — no file is loaded, dispatch works.
 #[test]
 fn use_batareya_hamon_no_op() {

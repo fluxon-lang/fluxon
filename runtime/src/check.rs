@@ -55,7 +55,7 @@ pub fn check_immutability(prog: &Program) -> Result<(), String> {
 
 // Is the `use` path a user file (relative) or a battery (a plain name)? Mirrors
 // `interp::util::is_user_module_path` — only user modules bind an env name.
-fn is_user_module_path(path: &str) -> bool {
+pub(crate) fn is_user_module_path(path: &str) -> bool {
     path.starts_with("./") || path.starts_with("../") || path == "." || path == ".."
 }
 

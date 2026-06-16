@@ -85,7 +85,7 @@ fn main() -> ExitCode {
                 Ok(s) => s,
                 Err(code) => return code,
             };
-            match check_source(&src) {
+            match check_source_at(&src, std::path::Path::new(&path)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("Fluxon error: {}", e);
@@ -250,10 +250,64 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
 // (issue #178) catches reassignment of a `=`-bound var, including from inside a
 // block, statically — a trap that previously only surfaced as a runtime 500 on
 // the specific request that hit it. On success Ok(()), otherwise the error text.
+//
+// Convenience wrapper without a path — resolves `use ./file` imports relative to
+// the current directory (the REPL and snippet tests have no source file).
 fn check_source(src: &str) -> Result<(), String> {
+    check_source_at(src, std::path::Path::new("."))
+}
+
+// Path-aware check: like `check_source`, but also recursively validates `use
+// ./file` user modules (relative to `path`'s directory) WITHOUT executing them.
+// Otherwise an imported handler's dormant rebind would slip past `fluxon check`
+// and only fail under `run`, leaving CI/check blind to exactly the imported-
+// handler bugs this pass exists to catch.
+fn check_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
     check::check_immutability(&prog)?;
+    let base = path.parent().unwrap_or(std::path::Path::new("."));
+    let mut visited = std::collections::HashSet::new();
+    check_module_imports(&prog, base, &mut visited)
+}
+
+// Recursively lex/parse/immutability-check the user modules a program imports.
+// `base` is the directory imports resolve against; `visited` (canonical paths)
+// guards against cycles and re-checking. A module that cannot be resolved is
+// skipped silently — `run` surfaces a real "module not found"; `check` stays
+// lenient rather than inventing a new failure mode.
+fn check_module_imports(
+    prog: &ast::Program,
+    base: &std::path::Path,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<(), String> {
+    for stmt in prog {
+        let ast::Stmt::Use { items } = stmt else {
+            continue;
+        };
+        for item in items {
+            if !check::is_user_module_path(&item.path) {
+                continue;
+            }
+            let mut full = base.join(&item.path);
+            if full.extension().is_none() {
+                full.set_extension("fx");
+            }
+            let Ok(canon) = full.canonicalize() else {
+                continue; // unresolved import — left for `run` to report
+            };
+            if !visited.insert(canon.clone()) {
+                continue; // already checked (or a cycle)
+            }
+            let src = std::fs::read_to_string(&canon)
+                .map_err(|e| format!("could not read module '{}': {}", item.path, e))?;
+            let toks = lexer::lex(&src)?;
+            let mprog = parser::parse(toks)?;
+            check::check_immutability(&mprog)?;
+            let mbase = canon.parent().unwrap_or(std::path::Path::new("."));
+            check_module_imports(&mprog, mbase, visited)?;
+        }
+    }
     Ok(())
 }
 
