@@ -12,7 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/fluxon-lang/fluxon?color=blue)](https://github.com/fluxon-lang/fluxon/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[**Quickstart**](#install) · [**Docs**](docs/fluxon-human.md) · [**Examples**](examples/) · [**Spec**](docs/fluxon-agent.md) · [**Roadmap**](docs/ROADMAP.md) · [O'zbek](README.uz.md)
+[**Install**](#install) · [**Docs**](docs/fluxon-human.md) · [**Examples**](examples/) · [**Spec**](docs/fluxon-agent.md) · [**Roadmap**](docs/ROADMAP.md) · [O'zbek](README.uz.md)
 
 </div>
 
