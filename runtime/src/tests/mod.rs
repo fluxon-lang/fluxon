@@ -131,4 +131,5 @@ mod str_order_tests;
 mod str_time_tests;
 mod sym_tests;
 mod try_tests;
+mod tui_tests;
 mod use_module_tests;

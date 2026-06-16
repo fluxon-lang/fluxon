@@ -516,6 +516,53 @@ each i in inf
   log "reply:" line
 ```
 
+### tui (terminal UI — for CLI tools & agents)
+A modern, truecolor terminal UI (violet accent, thin frames). Colors/styles return a
+`str` (no `\n`, compose with `+`); they emit ANSI codes only on a real terminal —
+piped/redirected output stays clean. Text widgets render a `str`. Interactive widgets
+read keys (arrow-key ones use raw mode, always restored). Honors `NO_COLOR` (off) and
+`FORCE_COLOR`/`CLICOLOR_FORCE=1` (on, even through a pipe — for demos/recordings).
+```fluxon
+tui.print s            # print to STDOUT + newline, NO prefix (the TUI output channel)
+tui.print              # blank line
+# `log` is for diagnostics (stderr, `[INFO]` prefix) — it corrupts a rendered TUI.
+# Print widgets with tui.print, never log.
+
+# styling (str → str): green red yellow blue cyan magenta gray white black
+#                      bold dim italic underline
+tui.green s   tui.bold s   tui.dim s        # wrap text in a color/attribute
+tui.strip s                                 # remove ANSI codes → str
+
+# text widgets (→ str, pure — log them yourself)
+tui.rule              # full-width divider line ──────────
+tui.rule "Title"      # ── Title ───────────
+tui.box body          # body framed in a rounded box; body may contain \n
+tui.box body "Title"  # box with an inset title
+tui.badge "OK" :green # a colored pill ` OK ` ([OK] without a tty)
+tui.table rows         # rows = [[cell ..] ..] → aligned columns
+tui.table rows headers # headers = [str ..] → bold titles + underline rule
+
+# interactive (I/O)
+tui.input "Name"             # → str (line); empty stays "", EOF → nil
+tui.input "Name" "default"   # empty Enter → the default
+tui.password "PIN"           # hidden input → str (nil on Ctrl-C)
+tui.confirm "Delete?"        # y/n → bool (default false)
+tui.confirm "Delete?" true   # default true ([Y/n])
+tui.select "Pick" opts       # arrow keys, Enter → chosen str (Esc/Ctrl-C → nil)
+tui.checkbox "Pick" opts     # Space toggles, Enter → [str] of chosen (nil if cancelled)
+```
+```fluxon
+tui.print (tui.green "✓ done") + " " + (tui.dim "in 0.4s")
+tui.print (tui.rule "Summary")
+tui.print (tui.table [["alice" "admin"] ["bob" "viewer"]] ["user" "role"])
+env = tui.select "Deploy to" ["dev" "staging" "prod"]
+if (tui.confirm "Ship to ${env}?")
+  tui.print (tui.badge "DEPLOYING" :yellow)
+```
+Note: a parenless call takes the rest of the line as ITS args — wrap a widget you
+pass to `tui.print` in parens: `tui.print (tui.box body "Title")`, not
+`tui.print tui.box body "Title"`.
+
 ### fs (local filesystem)
 Naming in `db.*` style (`fs.read`/`fs.del`). On error `Flow::err` (catch with try);
 `fs.read` is the only exception — `nil` if the file is missing:

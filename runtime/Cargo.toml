@@ -60,3 +60,8 @@ argon2 = "0.5"
 # (MAX_CALL_DEPTH) depends only on a counter, not on native stack size —
 # even on a 2MB spawn_blocking thread it yields a graceful error instead of an abort.
 stacker = "0.1"
+# tui battery: interactive terminal components (select/checkbox/confirm/spinner).
+# crossterm gives cross-platform raw-mode + key events (Windows included) — doing
+# this by hand with ANSI escapes is brittle off Unix. Plain colors/styles in `tui`
+# don't need it; only the interactive widgets enter raw mode (and always restore it).
+crossterm = "0.28"
