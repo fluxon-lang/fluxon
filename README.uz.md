@@ -58,13 +58,13 @@ so'zlar, SDK emas, provayderlar esa muhitdan avtomatik aniqlanadi.
 checksum'ini tekshiradi va PATH'ga o'rnatadi):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.sh | sh
+curl -fsSL https://fluxon-lang.com/install.sh | sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.ps1 | iex
+irm https://fluxon-lang.com/install.ps1 | iex
 ```
 
 So'ng faylni ishga tushiring:

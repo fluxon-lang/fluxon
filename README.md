@@ -57,13 +57,13 @@ keywords, not an SDK, with providers auto-detected from the environment.
 checksum, and installs it onto your PATH):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.sh | sh
+curl -fsSL https://fluxon-lang.com/install.sh | sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/fluxon-lang/fluxon/master/install.ps1 | iex
+irm https://fluxon-lang.com/install.ps1 | iex
 ```
 
 Then run a file:
