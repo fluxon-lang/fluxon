@@ -20,6 +20,7 @@ mod ai_mod;
 mod ast;
 mod auth_mod;
 mod builtins;
+mod check;
 mod cron_mod;
 mod crypto_mod;
 mod db_mod;
@@ -244,11 +245,15 @@ fn run_test_files(files: &[std::path::PathBuf]) -> (usize, usize) {
     (passed, failed)
 }
 
-// Checks the syntax: lex + parse, but skips interp — the code is NOT executed
-// (no side effects). On success Ok(()), otherwise the error text.
+// Checks the syntax: lex + parse, plus a static immutability pass — but skips
+// interp, so the code is NOT executed (no side effects). The immutability pass
+// (issue #178) catches reassignment of a `=`-bound var, including from inside a
+// block, statically — a trap that previously only surfaced as a runtime 500 on
+// the specific request that hit it. On success Ok(()), otherwise the error text.
 fn check_source(src: &str) -> Result<(), String> {
     let toks = lexer::lex(src)?;
-    parser::parse(toks)?;
+    let prog = parser::parse(toks)?;
+    check::check_immutability(&prog)?;
     Ok(())
 }
 
@@ -257,6 +262,10 @@ fn check_source(src: &str) -> Result<(), String> {
 fn run_source_at(src: &str, path: &std::path::Path) -> Result<(), String> {
     let toks = lexer::lex(src)?;
     let prog = parser::parse(toks)?;
+    // Static immutability check (issue #178) BEFORE running: catch a reassigned
+    // `=`-bound var now, so the server fails fast at load instead of 500-ing on
+    // the one request that reaches the offending block.
+    check::check_immutability(&prog)?;
     // Arc<Interp>: http.serve applies handlers on server threads, so the interp
     // must be shareable across threads.
     let interp = interp::Interp::new_arc();
