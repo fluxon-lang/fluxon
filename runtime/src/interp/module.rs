@@ -120,6 +120,15 @@ impl Interp {
         let toks = crate::lexer::lex(&src).map_err(Flow::err)?;
         let prog = crate::parser::parse(toks).map_err(Flow::err)?;
 
+        // We collect only the exported names: `exp NAME =` and `exp fn`.
+        let exported = collect_exported(&prog);
+
+        // Optional `.pkg` manifest sibling (#202): if present, its AI-doc block
+        // is validated against the exports BEFORE executing any module top-level
+        // code. A malformed/empty manifest must reject the import without
+        // allowing side effects such as fs/db writes or server scheduling.
+        self.validate_pkg(&canon.with_extension("pkg"), &exported)?;
+
         // Module scope — a child of global: builtins (`log`/`rep`) and top-level
         // fns are visible through the lookup chain, but the module's own
         // `exp`/`=` names are searched first (shadowing — isolation is enough).
@@ -136,8 +145,6 @@ impl Interp {
         self.set_base(&prev_base);
         exec?;
 
-        // We collect only the exported names: `exp NAME =` and `exp fn`.
-        let exported = collect_exported(&prog);
         let mut ns = BTreeMap::new();
         for (name, v, _) in mod_scope.read().vars.iter() {
             if exported.contains(&**name) {
@@ -145,6 +152,63 @@ impl Interp {
             }
         }
         Ok(Value::Map(ns))
+    }
+
+    // Validates an optional `.pkg` manifest sibling of the loaded module (#202).
+    // Policy (soft): no `.pkg` -> backward-compatible (loads fine); present with
+    // an empty doc -> hard error (the AI-doc is mandatory); present but malformed
+    // -> hard error (a broken manifest must surface); a CANONICAL reference to a
+    // name the module does not `exp` -> stderr warning (not an error).
+    //
+    // Phase 3 seam: the doc is validated and dropped. The external skill/hook
+    // (#202 phase 3) re-reads the plain `<module>.pkg` file directly from disk —
+    // the runtime need not store the doc in-process.
+    fn validate_pkg(
+        &self,
+        pkg_path: &std::path::Path,
+        exported: &std::collections::HashSet<String>,
+    ) -> Result<(), Flow> {
+        // Only a genuine "absent" is the backward-compatible no-manifest case.
+        // Any other read failure (invalid UTF-8, a directory at that path,
+        // permissions) means a manifest is present but unusable — surface it
+        // rather than silently loading as if there were no manifest.
+        let src = match std::fs::read_to_string(pkg_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(Flow::err(format!(
+                    "module manifest '{}': could not read: {}",
+                    pkg_path.display(),
+                    e
+                )));
+            }
+        };
+        let manifest = super::pkg::parse_pkg(&src).map_err(Flow::err)?;
+        if manifest.doc.trim().is_empty() {
+            return Err(Flow::err(format!(
+                "module manifest '{}': doc is empty (the AI-doc block is mandatory)",
+                pkg_path.display()
+            )));
+        }
+        // Soft check: every `<name>.<fn>` the doc advertises should be an
+        // exported name. The prefix is the manifest's own `name` (not the file
+        // stem), so a vendored `aws.fx` with `name s3` whose CANONICAL says
+        // `s3.upload` is still checked correctly.
+        let modname = &manifest.name;
+        let mut missing: Vec<String> = super::pkg::referenced_names(&manifest.doc, modname)
+            .into_iter()
+            .filter(|r| !exported.contains(r))
+            .collect();
+        missing.sort(); // deterministic stderr order
+        for name in missing {
+            eprintln!(
+                "warning: module manifest '{}' references '{}.{}' but it is not exported (exp) by the module",
+                pkg_path.display(),
+                modname,
+                name
+            );
+        }
+        Ok(())
     }
 
     // Executes the module body in the given scope. Differences from `run`:

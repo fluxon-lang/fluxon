@@ -182,3 +182,135 @@ use math
 (math.floor 3.7 == 3) | (fail "floor wrong")
 "#);
 }
+
+// ---- battery-shaped modules: optional `.pkg` manifest (#202) ----
+
+// A valid `.pkg` sibling (doc references a real exported name) loads cleanly.
+#[test]
+fn use_module_pkg_valid_loads() {
+    run_modules(&[
+        (
+            "main.fx",
+            "use ./s3\n(s3.upload \"b\" \"k\" == \"b/k\") | (fail \"upload wrong\")\n",
+        ),
+        ("s3.fx", "exp fn upload bucket key -> \"${bucket}/${key}\"\n"),
+        (
+            "s3.pkg",
+            "name s3\ndoc \"\"\"\n  WHAT: upload to S3.\n  CANONICAL:\n    url = s3.upload \"b\" \"k\"\n\"\"\"\n",
+        ),
+    ])
+    .unwrap();
+}
+
+// An empty doc is a hard load error — the AI-doc block is mandatory.
+#[test]
+fn use_module_pkg_empty_doc_fails() {
+    let err = run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+        ("s3.pkg", "name s3\ndoc \"\"\"\n   \n\"\"\"\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("doc is empty"), "{}", err);
+}
+
+// A CANONICAL reference to a name the module does NOT export is a soft warning
+// (stderr), not an error — the module still loads.
+#[test]
+fn use_module_pkg_missing_exp_warns() {
+    run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+        (
+            "s3.pkg",
+            "name s3\ndoc \"\"\"\n  CANONICAL: s3.presign \"k\"\n\"\"\"\n",
+        ),
+    ])
+    .unwrap();
+}
+
+// No `.pkg` sibling -> backward compatible: the module loads as before.
+#[test]
+fn use_module_no_pkg_backward_compatible() {
+    run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+    ])
+    .unwrap();
+}
+
+// A malformed `.pkg` (unterminated doc block) is a hard load error.
+#[test]
+fn use_module_pkg_malformed_fails() {
+    let err = run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+        ("s3.pkg", "name s3\ndoc \"\"\"\nnever closed\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("unterminated doc block"), "{}", err);
+}
+
+// A malformed `.pkg` must be rejected before the module body runs, so
+// top-level effects are not allowed to leak from a failed import.
+#[test]
+fn use_module_pkg_invalid_does_not_execute_module_body() {
+    let dir = temp_module_dir();
+    let marker = dir.join("marker.txt");
+    std::fs::write(dir.join("main.fx"), "use ./s3\n").unwrap();
+    std::fs::write(
+        dir.join("s3.fx"),
+        format!(
+            "fs.write {:?} \"ran\"\nexp fn upload b k -> b\n",
+            marker.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("s3.pkg"), "name s3\ndoc \"\"\"\nnever closed\n").unwrap();
+
+    let main_path = dir.join("main.fx");
+    let src = std::fs::read_to_string(&main_path).unwrap();
+    let err = run_source_at(&src, &main_path).unwrap_err();
+    assert!(err.contains("unterminated doc block"), "{}", err);
+    assert!(
+        !marker.exists(),
+        "module body executed before manifest validation"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A present-but-unreadable `.pkg` (here: a directory at that path) is an error,
+// NOT silently treated as the no-manifest case. Only a genuine NotFound is.
+#[test]
+fn use_module_pkg_unreadable_fails() {
+    let dir = temp_module_dir();
+    std::fs::write(dir.join("main.fx"), "use ./s3\n").unwrap();
+    std::fs::write(dir.join("s3.fx"), "exp fn upload b k -> b\n").unwrap();
+    // A directory at `s3.pkg` -> read_to_string fails with a non-NotFound kind.
+    std::fs::create_dir(dir.join("s3.pkg")).unwrap();
+
+    let main_path = dir.join("main.fx");
+    let src = std::fs::read_to_string(&main_path).unwrap();
+    let err = run_source_at(&src, &main_path).unwrap_err();
+    assert!(err.contains("could not read"), "{}", err);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The doc reference check uses the manifest's `name`, not the file stem: a
+// vendored module file `aws.fx` with `name s3` and a CANONICAL `s3.upload`
+// loads cleanly (the referenced name resolves against `s3`, and `upload` IS
+// exported, so there is no spurious warning and no failure).
+#[test]
+fn use_module_pkg_name_differs_from_file_stem() {
+    run_modules(&[
+        ("main.fx", "use ./aws\nlog aws.upload\n"),
+        ("aws.fx", "exp fn upload b k -> b\n"),
+        (
+            "aws.pkg",
+            "name s3\ndoc \"\"\"\n  CANONICAL: s3.upload \"b\" \"k\"\n\"\"\"\n",
+        ),
+    ])
+    .unwrap();
+}
