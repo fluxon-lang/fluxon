@@ -175,10 +175,17 @@ fn parse_override(opts: &BTreeMap<String, Value>) -> Result<AiOverride, Flow> {
             "headers" => match v {
                 Value::Map(m) => {
                     for (hk, hv) in m {
-                        // Header values are strings; other scalars are coerced to
+                        // Header NAMES are normalized to lowercase: HTTP header
+                        // names are case-insensitive, so without this a global
+                        // `Authorization` and a per-call `authorization` would be
+                        // two distinct BTreeMap keys — the merge would keep both
+                        // and `add_extra_headers` would send DUPLICATE headers
+                        // (the override would not actually win). Lowercase on the
+                        // wire is always valid (and required by HTTP/2).
+                        // Header VALUES are strings; other scalars are coerced to
                         // their text form (`to_text`, so a symbol value does NOT
                         // keep its `:` prefix — `X-Title::app` sends `app`).
-                        ov.headers.insert(hk.clone(), hv.to_text());
+                        ov.headers.insert(hk.to_lowercase(), hv.to_text());
                     }
                 }
                 _ => return Err(Flow::err("ai: opts.headers must be a map")),
@@ -240,8 +247,10 @@ fn add_extra_headers(
     b
 }
 
-// True if `headers` contains `name` (case-insensitive — HTTP header names are
-// case-insensitive, so `Authorization` overrides the default `authorization`).
+// True if `headers` contains `name`. Override header names are stored lowercased
+// (see `parse_override`), and every `name` passed here is already lowercase, so a
+// case-insensitive compare is belt-and-suspenders — it keeps the guard correct
+// even if a header reaches the map by another path.
 fn header_overridden(headers: &BTreeMap<String, String>, name: &str) -> bool {
     headers.keys().any(|k| k.eq_ignore_ascii_case(name))
 }
@@ -1373,8 +1382,11 @@ mod tests {
         assert_eq!(ov.style, Some(Provider::OpenAI));
         assert_eq!(ov.key.as_deref(), Some("sk-x"));
         assert_eq!(ov.model.as_deref(), Some("glm-4.6"));
-        assert_eq!(ov.headers.get("X-Title").map(|s| s.as_str()), Some("App"));
-        assert_eq!(ov.headers.get("X-Mode").map(|s| s.as_str()), Some("fast"));
+        // Header names are normalized to lowercase (case-insensitive on the wire).
+        assert_eq!(ov.headers.get("x-title").map(|s| s.as_str()), Some("App"));
+        assert_eq!(ov.headers.get("x-mode").map(|s| s.as_str()), Some("fast"));
+        assert!(!ov.headers.contains_key("X-Title"), "name not lowercased");
+        // extra (body) keys keep their case — JSON fields are case-sensitive.
         assert!(ov.extra.contains_key("route"));
     }
 
@@ -1770,6 +1782,56 @@ mod tests {
             "inline key must be on the wire: {}",
             req
         );
+    }
+
+    #[test]
+    fn header_keys_case_insensitive_across_merge() {
+        // Regression for PR #205 review (P2): a global `ai.config` header and a
+        // per-call header that differ ONLY in case must NOT both reach the wire
+        // (HTTP names are case-insensitive; duplicates confuse gateways). The
+        // per-call value must win, as a single header.
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        // Global config sets `Authorization` (capitalized) to a stale value.
+        let mut g_headers = BTreeMap::new();
+        g_headers.insert(
+            "Authorization".to_string(),
+            Value::Str("Bearer stale".to_string()),
+        );
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk".to_string())),
+            ("headers", Value::Map(g_headers)),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        // Per-call overrides the SAME header with different casing.
+        let mut p_headers = BTreeMap::new();
+        p_headers.insert(
+            "authorization".to_string(),
+            Value::Str("Bearer fresh".to_string()),
+        );
+        let per = opts(&[("headers", Value::Map(p_headers))]);
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string()), Value::Map(per)])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+        let req = handle.join().unwrap().to_lowercase();
+        // Exactly one authorization header, and it is the per-call value. (The
+        // default Bearer is also skipped because authorization is overridden.)
+        assert_eq!(
+            req.matches("authorization:").count(),
+            1,
+            "exactly one authorization header: {}",
+            req
+        );
+        assert!(req.contains("authorization: bearer fresh"), "{}", req);
+        assert!(!req.contains("bearer stale"), "{}", req);
     }
 
     #[test]

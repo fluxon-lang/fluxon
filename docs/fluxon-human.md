@@ -905,7 +905,9 @@ There are two ways to override, and they compose (per-call wins over global):
 
 > A map key is a bare identifier, which cannot contain `-`. HTTP header names
 > with a hyphen must therefore be written as **string keys**:
-> `{"HTTP-Referer": "…" "X-Title": "…"}`.
+> `{"HTTP-Referer": "…" "X-Title": "…"}`. Header names are matched
+> case-insensitively (and sent lowercased), so a per-call header replaces a
+> global one regardless of casing.
 
 ```fluxon
 # GLM (Z.AI): the OpenAI wire format at a different URL — that's the whole change.
