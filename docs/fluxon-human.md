@@ -900,8 +900,12 @@ There are two ways to override, and they compose (per-call wins over global):
 | `style`   | wire format: `:openai` or `:anthropic` (the request/response shape) |
 | `key`     | API key (same role as `$AI_KEY`, inline)                       |
 | `model`   | model name (same role as `$AI_MODEL`, inline)                  |
-| `headers` | extra HTTP headers, **merged** onto the defaults               |
+| `headers` | extra HTTP headers, **merged** onto the defaults (hyphenated names like `HTTP-Referer` must be **string keys** — see below) |
 | `extra`   | extra request-body fields, **merged** into the JSON            |
+
+> A map key is a bare identifier, which cannot contain `-`. HTTP header names
+> with a hyphen must therefore be written as **string keys**:
+> `{"HTTP-Referer": "…" "X-Title": "…"}`.
 
 ```fluxon
 # GLM (Z.AI): the OpenAI wire format at a different URL — that's the whole change.
@@ -919,7 +923,7 @@ ai.config {
   url:     "https://openrouter.ai/api/v1/chat/completions"
   key:     env.OPENROUTER_KEY
   model:   "anthropic/claude-3.5-sonnet"
-  headers: {HTTP-Referer: "https://myapp.dev" X-Title: "My App"}
+  headers: {"HTTP-Referer": "https://myapp.dev" "X-Title": "My App"}  # hyphenated → string keys
   extra:   {provider: {sort: "throughput"}}   # OpenRouter-specific knob
 }
 ```

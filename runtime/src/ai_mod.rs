@@ -324,9 +324,12 @@ impl Interp {
     fn ai_config(&self, ov: &AiOverride) -> Result<AiConfig, Flow> {
         let anthropic = self.ai_env("ANTHROPIC_API_KEY");
         let openai = self.ai_env("OPENAI_API_KEY");
-        // $AI_KEY ?? the inline `key` override (opts/config). Either is a generic
-        // provider-agnostic key (the GLM/OpenRouter case: only `key` + `url`).
-        let generic = self.ai_env("AI_KEY").or_else(|| ov.key.clone());
+        // Generic provider-agnostic key (the GLM/OpenRouter case: only `key` +
+        // `url`). The INLINE override wins over $AI_KEY — consistent with
+        // url/style/model, and required so a per-call/config `{key:...}` can
+        // actually retarget a deployment that already has $AI_KEY set (otherwise
+        // it would keep authenticating against the env key / wrong provider).
+        let generic = ov.key.clone().or_else(|| self.ai_env("AI_KEY"));
         // Wire style: the inline `style` override wins, then $AI_STYLE, then the
         // legacy $AI_PROVIDER (kept for backward compatibility).
         let forced_style = self
@@ -1733,6 +1736,40 @@ mod tests {
             req
         );
         assert!(req.contains("content-type: application/json; charset=utf-8"));
+    }
+
+    #[test]
+    fn inline_key_wins_over_env() {
+        // Regression for PR #205 review (P2): an inline `key` must win over a key
+        // present in the environment, otherwise a per-call/config override on a
+        // deployment that already has $AI_KEY/$OPENAI_API_KEY set would keep
+        // sending the env key (wrong provider). We don't touch the env here: the
+        // test machine may have a standard key set, but the inline `key` must be
+        // the one on the wire regardless. (generic = ov.key.or(env), so a Some
+        // inline key short-circuits before the env is read.)
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-inline-wins".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string())])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+        let req = handle.join().unwrap().to_lowercase();
+        assert!(
+            req.contains("authorization: bearer sk-inline-wins"),
+            "inline key must be on the wire: {}",
+            req
+        );
     }
 
     #[test]

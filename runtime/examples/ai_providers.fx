@@ -34,14 +34,15 @@ log "quick model: ${quick}"
 # --- Option B: OpenRouter (extra body params + recommended headers) -----------
 # Uncomment to use OpenRouter instead. It accepts vendor-specific body fields
 # (`provider`/`route`/...) and recommends HTTP-Referer / X-Title headers — both
-# merge onto the defaults.
+# merge onto the defaults. Hyphenated header names must be STRING keys (a bare
+# map key cannot contain `-`).
 #
 # ai.config {
 #   style:   :openai
 #   url:     "https://openrouter.ai/api/v1/chat/completions"
 #   key:     env.OPENROUTER_KEY
 #   model:   "anthropic/claude-3.5-sonnet"
-#   headers: {HTTP-Referer: "https://myapp.dev" X-Title: "Fluxon demo"}
+#   headers: {"HTTP-Referer": "https://myapp.dev" "X-Title": "Fluxon demo"}
 #   extra:   {provider: {sort: "throughput"}}
 # }
 # log ai.ask "Salom!"
