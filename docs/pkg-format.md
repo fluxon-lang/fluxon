@@ -71,7 +71,13 @@ When a module is loaded with `use ./...`, the runtime looks for a sibling
 | `.pkg` present, valid doc | Module loads |
 | `.pkg` present, **empty doc** | **Load fails** — the AI-doc is mandatory |
 | `.pkg` present, **malformed** (e.g. unterminated `doc` block) | **Load fails** |
+| `.pkg` present but **unreadable** (invalid UTF-8, a directory, permissions) | **Load fails** |
 | `CANONICAL` references a name not `exp`-orted | **Warning** on stderr, still loads |
+
+Only a genuine *file-not-found* is the backward-compatible no-manifest case;
+any other read failure means a manifest is present but unusable and is surfaced.
+The `CANONICAL` reference check resolves names against the manifest's own `name`
+field (so a vendored `aws.fx` carrying `name s3` is checked against `s3.`).
 
 The empty-doc and malformed cases are hard errors because a manifest that exists
 on purpose but carries no usable doc defeats the entire point. The missing-`exp`

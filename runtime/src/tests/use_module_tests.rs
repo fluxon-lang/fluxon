@@ -279,3 +279,38 @@ fn use_module_pkg_invalid_does_not_execute_module_body() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// A present-but-unreadable `.pkg` (here: a directory at that path) is an error,
+// NOT silently treated as the no-manifest case. Only a genuine NotFound is.
+#[test]
+fn use_module_pkg_unreadable_fails() {
+    let dir = temp_module_dir();
+    std::fs::write(dir.join("main.fx"), "use ./s3\n").unwrap();
+    std::fs::write(dir.join("s3.fx"), "exp fn upload b k -> b\n").unwrap();
+    // A directory at `s3.pkg` -> read_to_string fails with a non-NotFound kind.
+    std::fs::create_dir(dir.join("s3.pkg")).unwrap();
+
+    let main_path = dir.join("main.fx");
+    let src = std::fs::read_to_string(&main_path).unwrap();
+    let err = run_source_at(&src, &main_path).unwrap_err();
+    assert!(err.contains("could not read"), "{}", err);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The doc reference check uses the manifest's `name`, not the file stem: a
+// vendored module file `aws.fx` with `name s3` and a CANONICAL `s3.upload`
+// loads cleanly (the referenced name resolves against `s3`, and `upload` IS
+// exported, so there is no spurious warning and no failure).
+#[test]
+fn use_module_pkg_name_differs_from_file_stem() {
+    run_modules(&[
+        ("main.fx", "use ./aws\nlog aws.upload\n"),
+        ("aws.fx", "exp fn upload b k -> b\n"),
+        (
+            "aws.pkg",
+            "name s3\ndoc \"\"\"\n  CANONICAL: s3.upload \"b\" \"k\"\n\"\"\"\n",
+        ),
+    ])
+    .unwrap();
+}

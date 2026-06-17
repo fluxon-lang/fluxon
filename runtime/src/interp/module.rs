@@ -168,9 +168,20 @@ impl Interp {
         pkg_path: &std::path::Path,
         exported: &std::collections::HashSet<String>,
     ) -> Result<(), Flow> {
-        // Optional file: absent/unreadable -> no manifest, old behavior.
-        let Ok(src) = std::fs::read_to_string(pkg_path) else {
-            return Ok(());
+        // Only a genuine "absent" is the backward-compatible no-manifest case.
+        // Any other read failure (invalid UTF-8, a directory at that path,
+        // permissions) means a manifest is present but unusable — surface it
+        // rather than silently loading as if there were no manifest.
+        let src = match std::fs::read_to_string(pkg_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(Flow::err(format!(
+                    "module manifest '{}': could not read: {}",
+                    pkg_path.display(),
+                    e
+                )));
+            }
         };
         let manifest = super::pkg::parse_pkg(&src).map_err(Flow::err)?;
         if manifest.doc.trim().is_empty() {
@@ -179,14 +190,12 @@ impl Interp {
                 pkg_path.display()
             )));
         }
-        // Soft check: every `<modname>.<name>` the doc advertises should be an
-        // exported name. The module name is the file stem (`s3.pkg` -> `s3`),
-        // matching what `module_basename("./lib/s3")` yields.
-        let modname = pkg_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let mut missing: Vec<String> = super::pkg::referenced_names(&manifest.doc, &modname)
+        // Soft check: every `<name>.<fn>` the doc advertises should be an
+        // exported name. The prefix is the manifest's own `name` (not the file
+        // stem), so a vendored `aws.fx` with `name s3` whose CANONICAL says
+        // `s3.upload` is still checked correctly.
+        let modname = &manifest.name;
+        let mut missing: Vec<String> = super::pkg::referenced_names(&manifest.doc, modname)
             .into_iter()
             .filter(|r| !exported.contains(r))
             .collect();
