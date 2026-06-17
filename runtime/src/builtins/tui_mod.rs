@@ -991,12 +991,13 @@ fn parse_blocks(src: &str) -> Vec<Block> {
     blocks
 }
 
-// Render a parsed block list into a terminal string. Blocks are separated by a blank
-// line, matching how Markdown reads on the page.
+// Render a parsed block list into a terminal string. Blocks are separated by a BLANK
+// line (`\n\n`), matching how Markdown reads on the page — a paragraph followed by a
+// list/heading must not sit flush against it.
 fn render_markdown(src: &str) -> String {
     let blocks = parse_blocks(src);
     let parts: Vec<String> = blocks.iter().map(render_block).collect();
-    parts.join("\n")
+    parts.join("\n\n")
 }
 
 fn render_block(b: &Block) -> String {
@@ -1130,15 +1131,20 @@ fn parse_link(chars: &[char], start: usize) -> Option<Link> {
 // but render as junk on terminals that don't support them; the dim-url form is safe
 // everywhere and still shows the destination.)
 fn render_link(text: &str, url: &str) -> String {
+    // The link label can itself carry markup (`[**docs**](url)`), so render it through
+    // the inline pass in BOTH branches — off a tty that strips the markers to clean
+    // text (the no-tty promise), on a tty it styles them. Only the underline wrapper
+    // and dim url are color-gated.
+    let label = render_inline(text);
     if color_enabled() {
         format!(
             "\x1b[4m{}{} {}",
-            render_inline(text),
+            label,
             RESET,
             fg(&MUTED, &format!("({})", url))
         )
     } else {
-        format!("{} ({})", text, url)
+        format!("{} ({})", label, url)
     }
 }
 
@@ -1654,6 +1660,42 @@ mod tests {
         let out = md("see [the docs](https://example.com) now");
         assert!(out.contains("the docs"));
         assert!(out.contains("https://example.com"));
+    }
+
+    // Markup INSIDE link text is rendered, not left literal — off a tty the markers
+    // are stripped (the no-tty clean-text promise applies to link labels too).
+    #[test]
+    fn md_link_text_markup_is_stripped_off_tty() {
+        let out = md("see [**the docs**](https://example.com)");
+        assert!(out.contains("the docs"));
+        assert!(
+            !out.contains("**"),
+            "link label markers must be stripped off a tty: {:?}",
+            out
+        );
+        let code_label = md("read [`config`](https://x.io)");
+        assert!(code_label.contains("config"));
+        assert!(
+            !code_label.contains('`'),
+            "code-span markers in a link label must be stripped: {:?}",
+            code_label
+        );
+    }
+
+    // Blocks are separated by a BLANK line — a paragraph followed by a list/heading
+    // must not render flush against it. Guards the `\n` (vs `\n\n`) join.
+    #[test]
+    fn md_blocks_separated_by_blank_line() {
+        let out = md("a paragraph\n\n- item one\n- item two");
+        // exactly one empty line sits between the paragraph and the first list item
+        let lines: Vec<&str> = out.lines().collect();
+        let para = lines.iter().position(|l| l.contains("paragraph")).unwrap();
+        let first_item = lines.iter().position(|l| l.contains("item one")).unwrap();
+        assert!(
+            first_item == para + 2 && lines[para + 1].is_empty(),
+            "a blank line must separate the blocks: {:?}",
+            lines
+        );
     }
 
     // A blockquote keeps its text (marker stripped).
