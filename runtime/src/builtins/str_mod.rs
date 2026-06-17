@@ -141,6 +141,38 @@ pub(crate) fn str_module(func: &str, args: Vec<Value>) -> R {
                 other.type_name()
             ))),
         },
+        // str.url_enc s → RFC 3986 percent-encoding. EVERY byte that is not an
+        // unreserved char (A-Z a-z 0-9 - _ . ~) becomes %XX (uppercase hex). This
+        // is AWS's exact `UriEncode` for SigV4 query/path segments — note `/` is
+        // also encoded, so to keep slashes in an object key, split on "/", encode
+        // each segment, and re-join (the s3 package does this). Operates on UTF-8
+        // bytes, so non-ASCII keys round-trip.
+        "url_enc" => {
+            let s = arg_str(&args, 0, "str.url_enc")?;
+            let mut out = String::with_capacity(s.len());
+            for b in s.bytes() {
+                let unreserved =
+                    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
+                if unreserved {
+                    out.push(b as char);
+                } else {
+                    out.push('%');
+                    out.push(hex_upper(b >> 4));
+                    out.push(hex_upper(b & 0x0f));
+                }
+            }
+            Ok(Value::Str(out))
+        }
         _ => Err(Flow::err(format!("str module has no function '{}'", func))),
+    }
+}
+
+// One hex digit (0-15) as an uppercase ASCII char. SigV4 requires UPPERCASE
+// percent-encoding (`%2F`, not `%2f`) — a lowercased escape changes the
+// canonical request and produces a SignatureDoesNotMatch error.
+fn hex_upper(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        _ => (b'A' + (nibble - 10)) as char,
     }
 }

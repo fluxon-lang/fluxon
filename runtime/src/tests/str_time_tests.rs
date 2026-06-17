@@ -22,6 +22,22 @@ fn str_trim_replace_starts_ends_pad_repeat() {
 "#);
 }
 
+// str.url_enc — RFC 3986 percent-encoding (the AWS SigV4 `UriEncode`). Reserved
+// chars become uppercase %XX; unreserved (A-Za-z0-9-_.~) pass through; `/` and
+// space are encoded; non-ASCII goes byte-by-byte over its UTF-8 encoding.
+#[test]
+fn str_url_enc() {
+    run(r#"
+(str.url_enc "abc" == "abc") | (fail "url_enc unreserved")
+(str.url_enc "a-_.~z" == "a-_.~z") | (fail "url_enc unreserved set")
+(str.url_enc "my file.png" == "my%20file.png") | (fail "url_enc space")
+(str.url_enc "a/b" == "a%2Fb") | (fail "url_enc slash uppercase")
+(str.url_enc "a=b&c" == "a%3Db%26c") | (fail "url_enc query chars")
+(str.url_enc "é" == "%C3%A9") | (fail "url_enc utf8")
+(str.url_enc "" == "") | (fail "url_enc empty")
+"#);
+}
+
 // str.repeat with a negative number and str.pad with an empty filler — a clear
 // error (not a silent wrong result).
 #[test]

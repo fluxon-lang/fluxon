@@ -3,6 +3,8 @@
 // Language API:
 //   crypto.sha256 s        # -> SHA-256 hex (lowercase)
 //   crypto.hmac key msg    # -> HMAC-SHA256 hex — verify webhook signatures
+//   crypto.hmac key msg {raw:true}  # -> HMAC-SHA256 bytes — for binary key
+//                                   #    chaining (AWS SigV4 signing-key derivation)
 //   crypto.b64 s           # -> base64 (standard alphabet, with padding)
 //   crypto.b64d s          # -> decode base64 (UTF-8 text), or err
 //   crypto.b64db s         # -> decode base64 (bytes — binary safe)
@@ -64,7 +66,16 @@ pub fn crypto_module(func: &str, args: Vec<Value>) -> R {
             let mut mac = Hmac::<Sha256>::new_from_slice(key.as_slice())
                 .expect("HMAC accepts keys of any length");
             mac.update(msg.as_slice());
-            Ok(Value::Str(to_hex(&mac.finalize().into_bytes())))
+            let tag = mac.finalize().into_bytes();
+            // {raw:true} returns the 32 raw bytes instead of hex. AWS SigV4
+            // derives the signing key as a chain of HMACs where each result is
+            // the binary KEY of the next — hex output would break the chain
+            // (`key` already accepts Value::Bytes, so the chain round-trips).
+            if raw_opt(&args, 2) {
+                Ok(Value::Bytes(Arc::new(tag.to_vec())))
+            } else {
+                Ok(Value::Str(to_hex(&tag)))
+            }
         }
         "b64" => {
             let b = arg_bytes(&args, 0, "crypto.b64")?;
@@ -94,6 +105,16 @@ pub fn crypto_module(func: &str, args: Vec<Value>) -> R {
             "crypto.{} not found (sha256/hmac/b64/b64d/b64db/hex/uuid)",
             func
         ))),
+    }
+}
+
+// Reads the optional `{raw:true}` flag from an opts map at position `i`.
+// Absent map / missing key / falsey value all mean "no" — so the default
+// (hex output) is preserved for every existing caller.
+fn raw_opt(args: &[Value], i: usize) -> bool {
+    match args.get(i) {
+        Some(Value::Map(m)) => m.get("raw").map(|v| v.truthy()).unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -174,6 +195,65 @@ mod tests {
                 vec![s("Jefe"), s("what do ya want for nothing?")]
             )),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    // {raw:true} returns the bytes whose hex equals the default output — same
+    // computation, only the wrapping differs.
+    #[test]
+    fn hmac_raw_matches_hex() {
+        let hex = out_str(crypto_module("hmac", vec![s("k"), s("msg")]));
+        let raw = match crypto_module(
+            "hmac",
+            vec![
+                s("k"),
+                s("msg"),
+                Value::Map(std::collections::BTreeMap::from([(
+                    "raw".to_string(),
+                    Value::Bool(true),
+                )])),
+            ],
+        ) {
+            Ok(Value::Bytes(b)) => b,
+            _ => panic!("expected bytes"),
+        };
+        assert_eq!(to_hex(&raw), hex);
+        assert_eq!(raw.len(), 32);
+    }
+
+    // The whole point of {raw:true}: AWS SigV4 derives the signing key as a
+    // chain of HMACs where each result is the binary KEY of the next. This is
+    // the official AWS worked example (Signature V4 test suite): secret
+    // wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY, 20150830 / us-east-1 / iam.
+    // If raw chaining were broken (hex key reuse), the final hex would differ.
+    #[test]
+    fn sigv4_signing_key_derivation() {
+        let raw = |key: Value, msg: &str| -> Arc<Vec<u8>> {
+            match crypto_module(
+                "hmac",
+                vec![
+                    key,
+                    s(msg),
+                    Value::Map(std::collections::BTreeMap::from([(
+                        "raw".to_string(),
+                        Value::Bool(true),
+                    )])),
+                ],
+            ) {
+                Ok(Value::Bytes(b)) => b,
+                _ => panic!("expected bytes"),
+            }
+        };
+        let k_date = raw(
+            s("AWS4wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+            "20150830",
+        );
+        let k_region = raw(Value::Bytes(k_date), "us-east-1");
+        let k_service = raw(Value::Bytes(k_region), "iam");
+        let k_signing = raw(Value::Bytes(k_service), "aws4_request");
+        assert_eq!(
+            to_hex(&k_signing),
+            "2c94c0cf5378ada6887f09bb697df8fc0affdb34ba1cdd5bda32b664bd55b73c"
         );
     }
 
