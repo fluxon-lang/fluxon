@@ -101,6 +101,16 @@ pub(crate) fn tui_module(func: &str, args: Vec<Value>) -> R {
             Ok(Value::Str(strip_ansi(&s)))
         }
 
+        // tui.md s -> str: render a Markdown string for the terminal (the subset AI
+        // batteries actually emit — headings, bold/italic, inline+fenced code, lists,
+        // quotes, links, rules). Reuses the same palette as the rest of the battery,
+        // so AI output looks like the assistant, not a raw pager. Pure (-> str), the
+        // caller decides where it goes — `tui.print (tui.md (ai.ask "…"))`.
+        "md" => {
+            let s = arg_str(&args, 0, "tui.md")?;
+            Ok(Value::Str(render_markdown(&s)))
+        }
+
         // tui.print s -> write s to STDOUT with a trailing newline, no prefix.
         // `log` is for diagnostics (stderr, `[INFO]` prefix) — it corrupts a TUI.
         // tui.print is the clean channel for rendered widgets (box/table/badge).
@@ -230,7 +240,7 @@ pub(crate) fn tui_module(func: &str, args: Vec<Value>) -> R {
         }
 
         _ => Err(Flow::err(format!(
-            "tui module has no function '{}' (colors: green/red/yellow/blue/cyan/magenta/gray/white/bold/dim/italic/underline; widgets: rule/box/badge/table/input/password/confirm/select/checkbox/strip)",
+            "tui module has no function '{}' (colors: green/red/yellow/blue/cyan/magenta/gray/white/bold/dim/italic/underline; widgets: rule/box/badge/table/md/input/password/confirm/select/checkbox/strip)",
             func
         ))),
     }
@@ -822,6 +832,455 @@ fn checkbox(prompt: &str, options: &[String]) -> R {
     Ok(Value::List(chosen))
 }
 
+// --- markdown rendering ---
+//
+// A tight, hand-rolled renderer for the Markdown subset AI batteries emit. We do NOT
+// pull a CommonMark crate on purpose: the subset is small and fixed, and we want full
+// control over how each element maps onto the battery's palette (so AI output looks
+// like the rest of `tui`, not a bolted-on theme).
+//
+// The pipeline is two layers, mirroring Markdown's own block/inline split:
+//
+//   parse_blocks(src) -> Vec<Block>   — group lines into block elements (heading,
+//                                        paragraph, code fence, list, quote, rule).
+//   render_block(&Block) -> String    — render one block, calling render_inline for
+//                                        any text that can carry `**`/`*`/`code`/links.
+//
+// The block layer is deliberately the seam for a future STREAMING renderer (#198 v2):
+// a streaming caller buffers incoming chunks, splits off the COMPLETE blocks (every
+// block but the last, which may still be growing — an open ``` fence, an unfinished
+// list), renders and prints those, and keeps the tail in the buffer. Keeping all
+// multi-line state (fence open/closed, list nesting) inside parse_blocks — not smeared
+// across a line-at-a-time loop — is what makes that buffering tractable later.
+
+// One Markdown block element. Inline markup inside text fields is resolved at render
+// time by render_inline, not here.
+enum Block {
+    // `# H` .. `### H` — level is 1..=3 (deeper headings render as level 3).
+    Heading { level: u8, text: String },
+    // a run of consecutive non-blank text lines, joined — inline markup applies.
+    Paragraph(Vec<String>),
+    // a ``` fenced block: raw lines (NO inline markup — code is literal) + optional lang.
+    Code { lang: String, lines: Vec<String> },
+    // a list: each item is (marker, indent depth, text). Ordered items carry their
+    // number in `marker` ("1."), unordered a bullet ("-"). Nesting is by indent.
+    List(Vec<ListItem>),
+    // `> quote` — the quoted lines (markers stripped); inline markup applies.
+    Quote(Vec<String>),
+    // `---` / `***` / `___` — a horizontal rule.
+    Rule,
+}
+
+struct ListItem {
+    depth: usize,  // indent level (0 = top), one level per ~2 leading spaces
+    ordered: bool, // true for `1.`, false for `-`/`*`/`+`
+    number: usize, // the item's number when ordered (else unused)
+    text: String,  // the item text — inline markup applies
+}
+
+// Split Markdown source into blocks. Walks lines, tracking the multi-line state that
+// a line-at-a-time renderer would get wrong: an open code fence swallows everything
+// (including blank lines and `#`) until its closing fence.
+fn parse_blocks(src: &str) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+
+        // fenced code: ``` or ~~~ (optionally with a language). Everything up to the
+        // matching closing fence is literal — no inline markup, no other block parsing.
+        if let Some(fence) = code_fence(trimmed) {
+            let lang = trimmed[fence.len()..].trim().to_string();
+            i += 1;
+            let mut code = Vec::new();
+            while i < lines.len() && code_fence(lines[i].trim_start()).is_none() {
+                code.push(lines[i].to_string());
+                i += 1;
+            }
+            i += 1; // consume the closing fence (or run off the end — unterminated is ok)
+            blocks.push(Block::Code { lang, lines: code });
+            continue;
+        }
+
+        // blank line — a block separator, nothing to emit.
+        if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // horizontal rule — a line of only -, * or _ (3+), possibly spaced.
+        if is_hr(trimmed) {
+            blocks.push(Block::Rule);
+            i += 1;
+            continue;
+        }
+
+        // heading — 1..6 leading `#` then a space. Levels deeper than 3 clamp to 3.
+        if let Some((level, text)) = heading(trimmed) {
+            blocks.push(Block::Heading {
+                level,
+                text: text.to_string(),
+            });
+            i += 1;
+            continue;
+        }
+
+        // blockquote — consecutive `>` lines, markers stripped.
+        if trimmed.starts_with('>') {
+            let mut quoted = Vec::new();
+            while i < lines.len() && lines[i].trim_start().starts_with('>') {
+                let q = lines[i].trim_start();
+                // strip the leading `>` and one optional following space
+                let rest = q[1..].strip_prefix(' ').unwrap_or(&q[1..]);
+                quoted.push(rest.to_string());
+                i += 1;
+            }
+            blocks.push(Block::Quote(quoted));
+            continue;
+        }
+
+        // list — consecutive lines that each start with a bullet or `N.` marker.
+        if list_marker(line).is_some() {
+            let mut items = Vec::new();
+            while i < lines.len() {
+                match list_marker(lines[i]) {
+                    Some((ordered, number, depth, text)) => {
+                        items.push(ListItem {
+                            depth,
+                            ordered,
+                            number,
+                            text: text.to_string(),
+                        });
+                        i += 1;
+                    }
+                    None => break,
+                }
+            }
+            blocks.push(Block::List(items));
+            continue;
+        }
+
+        // otherwise a paragraph — gather consecutive "plain" lines until a blank line
+        // or the start of another block kind.
+        let mut para = Vec::new();
+        while i < lines.len() {
+            let t = lines[i].trim_start();
+            if t.is_empty()
+                || code_fence(t).is_some()
+                || is_hr(t)
+                || heading(t).is_some()
+                || t.starts_with('>')
+                || list_marker(lines[i]).is_some()
+            {
+                break;
+            }
+            para.push(lines[i].trim().to_string());
+            i += 1;
+        }
+        blocks.push(Block::Paragraph(para));
+    }
+    blocks
+}
+
+// Render a parsed block list into a terminal string. Blocks are separated by a blank
+// line, matching how Markdown reads on the page.
+fn render_markdown(src: &str) -> String {
+    let blocks = parse_blocks(src);
+    let parts: Vec<String> = blocks.iter().map(render_block).collect();
+    parts.join("\n")
+}
+
+fn render_block(b: &Block) -> String {
+    match b {
+        Block::Heading { level, text } => render_heading(*level, text),
+        Block::Paragraph(lines) => {
+            let joined = lines.join(" ");
+            render_inline(&joined)
+        }
+        Block::Code { lang, lines } => render_code(lang, lines),
+        Block::List(items) => render_list(items),
+        Block::Quote(lines) => render_quote(lines),
+        Block::Rule => rule(""),
+    }
+}
+
+// Heading: the signature accent bar + bold text. H1 also gets an underline rule beneath
+// (it's the document title); H2/H3 step down to plain accent, dim accent — a clear but
+// quiet hierarchy that reuses ACCENT/MUTED rather than inventing new colors.
+fn render_heading(level: u8, text: &str) -> String {
+    let inline = render_inline(text);
+    match level {
+        1 => {
+            let head = format!("{} {}", fg(&ACCENT, BAR), fg_bold(&ACCENT, &strip_md(text)));
+            // underline the title's visible width with a hairline
+            let w = vis_width(&head);
+            format!("{}\n{}", head, fg(&MUTED, &"─".repeat(w)))
+        }
+        2 => format!("{} {}", fg(&ACCENT, BAR), fg_bold(&INK, &strip_md(text))),
+        _ => format!("{} {}", fg(&MUTED, BAR), bold(&inline)),
+    }
+}
+
+// Inline markup pass over one line of text. Handles, in a single left-to-right scan:
+//   `code`            -> distinct color, never re-parsed (literal)
+//   **bold** / __b__  -> bold SGR
+//   *italic* / _i_    -> italic SGR
+//   [text](url)       -> underlined text + dim url
+// Backtick code spans win over emphasis (so `**` inside `code` stays literal), matching
+// CommonMark precedence for the common cases agents emit.
+fn render_inline(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            // inline code span — copy verbatim between the backticks, styled.
+            '`' => {
+                if let Some(end) = find_char(&chars, i + 1, '`') {
+                    let code: String = chars[i + 1..end].iter().collect();
+                    out.push_str(&code_span(&code));
+                    i = end + 1;
+                    continue;
+                }
+                out.push(c);
+                i += 1;
+            }
+            // link [text](url)
+            '[' => {
+                if let Some(link) = parse_link(&chars, i) {
+                    out.push_str(&render_link(&link.text, &link.url));
+                    i = link.end;
+                    continue;
+                }
+                out.push(c);
+                i += 1;
+            }
+            // bold (** or __) — needs the doubled marker.
+            '*' | '_' if i + 1 < chars.len() && chars[i + 1] == c => {
+                if let Some(end) = find_run(&chars, i + 2, c, 2) {
+                    let inner: String = chars[i + 2..end].iter().collect();
+                    out.push_str(&bold(&render_inline(&inner)));
+                    i = end + 2;
+                    continue;
+                }
+                out.push(c);
+                i += 1;
+            }
+            // italic (* or _) — single marker.
+            '*' | '_' => {
+                if let Some(end) = find_char(&chars, i + 1, c) {
+                    let inner: String = chars[i + 1..end].iter().collect();
+                    out.push_str(&italic(&inner));
+                    i = end + 1;
+                    continue;
+                }
+                out.push(c);
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+struct Link {
+    text: String,
+    url: String,
+    end: usize, // index just past the closing `)`
+}
+
+// Parse a `[text](url)` link starting at `[`. Returns None if the shape doesn't match
+// (a lone `[` stays literal).
+fn parse_link(chars: &[char], start: usize) -> Option<Link> {
+    let close_text = find_char(chars, start + 1, ']')?;
+    if chars.get(close_text + 1) != Some(&'(') {
+        return None;
+    }
+    let close_url = find_char(chars, close_text + 2, ')')?;
+    Some(Link {
+        text: chars[start + 1..close_text].iter().collect(),
+        url: chars[close_text + 2..close_url].iter().collect(),
+        end: close_url + 1,
+    })
+}
+
+// underlined link text + a dim url in parens. (OSC 8 hyperlinks are a tempting upgrade
+// but render as junk on terminals that don't support them; the dim-url form is safe
+// everywhere and still shows the destination.)
+fn render_link(text: &str, url: &str) -> String {
+    if color_enabled() {
+        format!(
+            "\x1b[4m{}{} {}",
+            render_inline(text),
+            RESET,
+            fg(&MUTED, &format!("({})", url))
+        )
+    } else {
+        format!("{} ({})", text, url)
+    }
+}
+
+// inline `code` — a distinct color so it reads as code without a heavy background
+// (which fights with the body text on most themes). Cyan reads as "literal/technical".
+fn code_span(s: &str) -> String {
+    fg(&CYAN, s)
+}
+
+fn italic(s: &str) -> String {
+    if color_enabled() {
+        format!("\x1b[3m{}{}", s, RESET)
+    } else {
+        s.to_string()
+    }
+}
+
+// A fenced code block: each line indented under a muted frame bar, with an optional
+// dim language label on top. The bar (reused signature element) sets it apart from the
+// prose without a full box, and survives copy-paste better than a background fill.
+fn render_code(lang: &str, lines: &[String]) -> String {
+    let bar = fg(&MUTED, "│");
+    let mut out = String::new();
+    if !lang.is_empty() {
+        out.push_str(&fg(&MUTED, &format!("{} {}", "│", lang)));
+        out.push('\n');
+    }
+    for (i, l) in lines.iter().enumerate() {
+        // code is literal — no inline markup; INK keeps it readable, the bar marks it.
+        out.push_str(&format!("{} {}", bar, fg(&INK, l)));
+        if i + 1 < lines.len() {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+// A list: one line per item, indented by depth, marked with a violet bullet (unordered)
+// or its dim number (ordered). Inline markup applies to the item text.
+fn render_list(items: &[ListItem]) -> String {
+    let mut out = String::new();
+    for (i, it) in items.iter().enumerate() {
+        let indent = "  ".repeat(it.depth);
+        let marker = if it.ordered {
+            fg(&MUTED, &format!("{}.", it.number))
+        } else {
+            fg(&ACCENT, "•")
+        };
+        out.push_str(&format!("{}{} {}", indent, marker, render_inline(&it.text)));
+        if i + 1 < items.len() {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+// A blockquote: the signature accent bar down the left, dim text — the "reuses the
+// signature element" note from the issue. Each quoted line keeps inline markup.
+fn render_quote(lines: &[String]) -> String {
+    let bar = fg(&ACCENT, BAR);
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        out.push_str(&format!("{} {}", bar, fg(&MUTED, &render_inline(l))));
+        if i + 1 < lines.len() {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+// --- markdown parse helpers ---
+
+// If `s` opens a code fence (``` or ~~~, 3+ of the same char), return the fence run so
+// the caller can read the trailing language. Else None.
+fn code_fence(s: &str) -> Option<&str> {
+    for marker in ['`', '~'] {
+        let run: String = s.chars().take_while(|&c| c == marker).collect();
+        if run.len() >= 3 {
+            // return the fence slice (its byte length equals the run length, ASCII).
+            return Some(&s[..run.len()]);
+        }
+    }
+    None
+}
+
+// A horizontal rule: 3+ of -, * or _ and nothing else but spaces.
+fn is_hr(s: &str) -> bool {
+    let stripped: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    stripped.len() >= 3
+        && (stripped.chars().all(|c| c == '-')
+            || stripped.chars().all(|c| c == '*')
+            || stripped.chars().all(|c| c == '_'))
+}
+
+// `# Heading` -> (level, text). Level is the count of leading `#` (1..=6, clamped to 3
+// at render), then at least one space.
+fn heading(s: &str) -> Option<(u8, &str)> {
+    let hashes = s.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && s.as_bytes().get(hashes) == Some(&b' ') {
+        let level = hashes.min(3) as u8;
+        Some((level, s[hashes + 1..].trim()))
+    } else {
+        None
+    }
+}
+
+// A list item marker at the START of `line` (leading spaces set the depth). Returns
+// (ordered, number, depth, text). `- `/`* `/`+ ` are unordered; `N. `/`N) ` ordered.
+fn list_marker(line: &str) -> Option<(bool, usize, usize, &str)> {
+    let indent = line.len() - line.trim_start().len();
+    let depth = indent / 2; // ~2 spaces per nesting level (the common agent style)
+    let rest = line.trim_start();
+    // unordered: a bullet then a space
+    for b in ['-', '*', '+'] {
+        if let Some(after) = rest.strip_prefix(b)
+            && after.starts_with(' ')
+        {
+            return Some((false, 0, depth, after.trim_start()));
+        }
+    }
+    // ordered: digits, then `.` or `)`, then a space
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        let after = &rest[digits..];
+        if (after.starts_with(". ") || after.starts_with(") "))
+            && let Ok(n) = rest[..digits].parse()
+        {
+            return Some((true, n, depth, after[2..].trim_start()));
+        }
+    }
+    None
+}
+
+// Find the next index >= from where chars[idx] == target. None if absent.
+fn find_char(chars: &[char], from: usize, target: char) -> Option<usize> {
+    (from..chars.len()).find(|&i| chars[i] == target)
+}
+
+// Find the start of the next run of `n` consecutive `target` chars at/after `from`.
+// Used to close a `**bold**` span (n=2).
+fn find_run(chars: &[char], from: usize, target: char, n: usize) -> Option<usize> {
+    let mut i = from;
+    while i + n <= chars.len() {
+        if chars[i..i + n].iter().all(|&c| c == target) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+// Strip Markdown inline markers from text, leaving the words — used where a heading is
+// re-styled wholesale (H1/H2 are already bold+colored, so nested `**`/`*` would just
+// add stray markers). Removes `*`, `_`, backticks; keeps link text, drops the url.
+fn strip_md(s: &str) -> String {
+    strip_ansi(&render_inline(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,5 +1503,150 @@ mod tests {
                 _ => panic!("confirm must return nil on EOF, never the default"),
             }
         }
+    }
+
+    // --- markdown ---
+
+    // Helper: render via the public dispatch and return the string (panics otherwise).
+    fn md(src: &str) -> String {
+        match tui_module("md", vec![s(src)]) {
+            Ok(Value::Str(out)) => out,
+            _ => panic!("tui.md must return a str"),
+        }
+    }
+
+    // Under `cargo test` stdout is piped, so color is OFF — tui.md returns CLEAN text
+    // (no ANSI escapes, no literal `**`/`#`/backticks). This is the contract that makes
+    // the output safe for files and grep, and it lets us assert on the plain text.
+    #[test]
+    fn md_plain_without_tty() {
+        let out = md("# Title\n\nSome **bold** and *italic* and `code` here.");
+        assert!(!out.contains('\x1b'), "no escapes off a tty: {:?}", out);
+        // markup markers are consumed, only the words remain
+        assert!(out.contains("Title"));
+        assert!(out.contains("bold"));
+        assert!(out.contains("italic"));
+        assert!(out.contains("code"));
+        assert!(
+            !out.contains("**"),
+            "bold markers must be stripped: {:?}",
+            out
+        );
+        assert!(
+            !out.contains('#'),
+            "heading marker must be stripped: {:?}",
+            out
+        );
+        assert!(
+            !out.contains('`'),
+            "code markers must be stripped: {:?}",
+            out
+        );
+    }
+
+    // A heading renders its text (and H1 gets an underline rule line beneath it).
+    #[test]
+    fn md_heading_h1_underlined() {
+        let out = md("# Hello");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains("Hello"));
+        // second line is the hairline underline (box-drawing dashes)
+        assert!(lines.len() >= 2 && lines[1].chars().all(|c| c == '─'));
+    }
+
+    // A fenced code block keeps its lines LITERAL — `**` inside code is not bolded
+    // away, and the content survives verbatim.
+    #[test]
+    fn md_code_fence_is_literal() {
+        let out = md("```rust\nlet x = **y;\n```");
+        assert!(
+            out.contains("let x = **y;"),
+            "code must stay literal: {:?}",
+            out
+        );
+    }
+
+    // An unterminated fence (no closing ```) still renders its body — agents stream
+    // partial output, and a missing close must not drop the code.
+    #[test]
+    fn md_unterminated_fence_renders() {
+        let out = md("```\nhello world");
+        assert!(out.contains("hello world"));
+    }
+
+    // Ordered and unordered lists render each item; nested items indent.
+    #[test]
+    fn md_lists_render_items() {
+        let out = md("- one\n- two\n  - nested");
+        assert!(out.contains("one") && out.contains("two") && out.contains("nested"));
+        // the nested item is indented relative to a top-level one
+        let nested = out.lines().find(|l| l.contains("nested")).unwrap();
+        assert!(
+            nested.starts_with("  "),
+            "nested item must indent: {:?}",
+            nested
+        );
+
+        let ordered = md("1. first\n2. second");
+        assert!(ordered.contains("first") && ordered.contains("second"));
+        // ordered items keep their numbers
+        assert!(ordered.contains("1.") && ordered.contains("2."));
+    }
+
+    // A link keeps both the text and the url (so the destination is never lost).
+    #[test]
+    fn md_link_keeps_text_and_url() {
+        let out = md("see [the docs](https://example.com) now");
+        assert!(out.contains("the docs"));
+        assert!(out.contains("https://example.com"));
+    }
+
+    // A blockquote keeps its text (marker stripped).
+    #[test]
+    fn md_quote_strips_marker() {
+        let out = md("> a wise note");
+        assert!(out.contains("a wise note"));
+        assert!(
+            !out.contains('>'),
+            "quote marker must be stripped: {:?}",
+            out
+        );
+    }
+
+    // `---` becomes a rule (a full line of the box-drawing dash).
+    #[test]
+    fn md_thematic_break_is_rule() {
+        let out = md("above\n\n---\n\nbelow");
+        assert!(
+            out.lines()
+                .any(|l| !l.is_empty() && l.chars().all(|c| c == '─'))
+        );
+    }
+
+    // The block parser — the streaming seam — groups lines into the right block kinds
+    // and keeps a code fence as ONE block (not split at its blank/`#` inner lines).
+    #[test]
+    fn md_parse_blocks_groups_correctly() {
+        let blocks =
+            parse_blocks("# H\n\npara line\n\n```\n# not a heading\n\ncode\n```\n\n- item");
+        // heading, paragraph, code, list — exactly four blocks
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(blocks[0], Block::Heading { level: 1, .. }));
+        assert!(matches!(blocks[1], Block::Paragraph(_)));
+        match &blocks[2] {
+            Block::Code { lines, .. } => {
+                // the `#` and blank line inside the fence are CODE, not new blocks
+                assert!(lines.iter().any(|l| l.contains("# not a heading")));
+            }
+            _ => panic!("third block must be a code fence"),
+        }
+        assert!(matches!(blocks[3], Block::List(_)));
+    }
+
+    // A bare paragraph with no markup passes through unchanged.
+    #[test]
+    fn md_plain_paragraph_passthrough() {
+        let out = md("just some words");
+        assert_eq!(out, "just some words");
     }
 }

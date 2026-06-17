@@ -543,6 +543,8 @@ tui.badge "OK" :green # filled pill ([OK] without a tty); color: green/yellow/re
                       # default + unknown → violet accent
 tui.table rows         # rows = [[cell ..] ..] → aligned columns
 tui.table rows headers # headers = [str ..] → bold titles + underline rule
+tui.md s               # render Markdown → styled str (headings, **bold**, *italic*,
+                       # `code`, ```fences```, lists, > quotes, [links](url), ---)
 
 # interactive (I/O)
 tui.input "Name"             # → str (line); empty stays "", EOF → nil
@@ -557,6 +559,7 @@ tui.checkbox "Pick" opts     # Space toggles, Enter → [str] of chosen (nil if 
 tui.print ((tui.green "✓ done") + " " + (tui.dim "in 0.4s"))   # wrap the WHOLE expr
 tui.print (tui.rule "Summary")
 tui.print (tui.table [["alice" "admin"] ["bob" "viewer"]] ["user" "role"])
+tui.print (tui.md (ai.ask "Explain async in 3 bullets"))   # AI Markdown → pretty
 env = tui.select "Deploy to" ["dev" "staging" "prod"]
 if (tui.confirm "Ship to ${env}?")
   tui.print (tui.badge "DEPLOYING" :yellow)
