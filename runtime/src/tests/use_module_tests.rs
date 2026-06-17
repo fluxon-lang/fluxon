@@ -250,3 +250,32 @@ fn use_module_pkg_malformed_fails() {
     .unwrap_err();
     assert!(err.contains("unterminated doc block"), "{}", err);
 }
+
+// A malformed `.pkg` must be rejected before the module body runs, so
+// top-level effects are not allowed to leak from a failed import.
+#[test]
+fn use_module_pkg_invalid_does_not_execute_module_body() {
+    let dir = temp_module_dir();
+    let marker = dir.join("marker.txt");
+    std::fs::write(dir.join("main.fx"), "use ./s3\n").unwrap();
+    std::fs::write(
+        dir.join("s3.fx"),
+        format!(
+            "fs.write {:?} \"ran\"\nexp fn upload b k -> b\n",
+            marker.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("s3.pkg"), "name s3\ndoc \"\"\"\nnever closed\n").unwrap();
+
+    let main_path = dir.join("main.fx");
+    let src = std::fs::read_to_string(&main_path).unwrap();
+    let err = run_source_at(&src, &main_path).unwrap_err();
+    assert!(err.contains("unterminated doc block"), "{}", err);
+    assert!(
+        !marker.exists(),
+        "module body executed before manifest validation"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

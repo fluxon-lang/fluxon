@@ -120,6 +120,15 @@ impl Interp {
         let toks = crate::lexer::lex(&src).map_err(Flow::err)?;
         let prog = crate::parser::parse(toks).map_err(Flow::err)?;
 
+        // We collect only the exported names: `exp NAME =` and `exp fn`.
+        let exported = collect_exported(&prog);
+
+        // Optional `.pkg` manifest sibling (#202): if present, its AI-doc block
+        // is validated against the exports BEFORE executing any module top-level
+        // code. A malformed/empty manifest must reject the import without
+        // allowing side effects such as fs/db writes or server scheduling.
+        self.validate_pkg(&canon.with_extension("pkg"), &exported)?;
+
         // Module scope — a child of global: builtins (`log`/`rep`) and top-level
         // fns are visible through the lookup chain, but the module's own
         // `exp`/`=` names are searched first (shadowing — isolation is enough).
@@ -135,14 +144,6 @@ impl Interp {
         let exec = self.exec_module_body(&prog, &mod_scope);
         self.set_base(&prev_base);
         exec?;
-
-        // We collect only the exported names: `exp NAME =` and `exp fn`.
-        let exported = collect_exported(&prog);
-
-        // Optional `.pkg` manifest sibling (#202): if present, its AI-doc block
-        // is validated against the exports. Runs here (not in load_module) so it
-        // fires once per real load — a cache hit returns before this point.
-        self.validate_pkg(&canon.with_extension("pkg"), &exported)?;
 
         let mut ns = BTreeMap::new();
         for (name, v, _) in mod_scope.read().vars.iter() {
