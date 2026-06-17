@@ -138,6 +138,12 @@ impl Interp {
 
         // We collect only the exported names: `exp NAME =` and `exp fn`.
         let exported = collect_exported(&prog);
+
+        // Optional `.pkg` manifest sibling (#202): if present, its AI-doc block
+        // is validated against the exports. Runs here (not in load_module) so it
+        // fires once per real load — a cache hit returns before this point.
+        self.validate_pkg(&canon.with_extension("pkg"), &exported)?;
+
         let mut ns = BTreeMap::new();
         for (name, v, _) in mod_scope.read().vars.iter() {
             if exported.contains(&**name) {
@@ -145,6 +151,54 @@ impl Interp {
             }
         }
         Ok(Value::Map(ns))
+    }
+
+    // Validates an optional `.pkg` manifest sibling of the loaded module (#202).
+    // Policy (soft): no `.pkg` -> backward-compatible (loads fine); present with
+    // an empty doc -> hard error (the AI-doc is mandatory); present but malformed
+    // -> hard error (a broken manifest must surface); a CANONICAL reference to a
+    // name the module does not `exp` -> stderr warning (not an error).
+    //
+    // Phase 3 seam: the doc is validated and dropped. The external skill/hook
+    // (#202 phase 3) re-reads the plain `<module>.pkg` file directly from disk —
+    // the runtime need not store the doc in-process.
+    fn validate_pkg(
+        &self,
+        pkg_path: &std::path::Path,
+        exported: &std::collections::HashSet<String>,
+    ) -> Result<(), Flow> {
+        // Optional file: absent/unreadable -> no manifest, old behavior.
+        let Ok(src) = std::fs::read_to_string(pkg_path) else {
+            return Ok(());
+        };
+        let manifest = super::pkg::parse_pkg(&src).map_err(Flow::err)?;
+        if manifest.doc.trim().is_empty() {
+            return Err(Flow::err(format!(
+                "module manifest '{}': doc is empty (the AI-doc block is mandatory)",
+                pkg_path.display()
+            )));
+        }
+        // Soft check: every `<modname>.<name>` the doc advertises should be an
+        // exported name. The module name is the file stem (`s3.pkg` -> `s3`),
+        // matching what `module_basename("./lib/s3")` yields.
+        let modname = pkg_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut missing: Vec<String> = super::pkg::referenced_names(&manifest.doc, &modname)
+            .into_iter()
+            .filter(|r| !exported.contains(r))
+            .collect();
+        missing.sort(); // deterministic stderr order
+        for name in missing {
+            eprintln!(
+                "warning: module manifest '{}' references '{}.{}' but it is not exported (exp) by the module",
+                pkg_path.display(),
+                modname,
+                name
+            );
+        }
+        Ok(())
     }
 
     // Executes the module body in the given scope. Differences from `run`:

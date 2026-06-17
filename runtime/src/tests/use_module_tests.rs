@@ -182,3 +182,71 @@ use math
 (math.floor 3.7 == 3) | (fail "floor wrong")
 "#);
 }
+
+// ---- battery-shaped modules: optional `.pkg` manifest (#202) ----
+
+// A valid `.pkg` sibling (doc references a real exported name) loads cleanly.
+#[test]
+fn use_module_pkg_valid_loads() {
+    run_modules(&[
+        (
+            "main.fx",
+            "use ./s3\n(s3.upload \"b\" \"k\" == \"b/k\") | (fail \"upload wrong\")\n",
+        ),
+        ("s3.fx", "exp fn upload bucket key -> \"${bucket}/${key}\"\n"),
+        (
+            "s3.pkg",
+            "name s3\ndoc \"\"\"\n  WHAT: upload to S3.\n  CANONICAL:\n    url = s3.upload \"b\" \"k\"\n\"\"\"\n",
+        ),
+    ])
+    .unwrap();
+}
+
+// An empty doc is a hard load error — the AI-doc block is mandatory.
+#[test]
+fn use_module_pkg_empty_doc_fails() {
+    let err = run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+        ("s3.pkg", "name s3\ndoc \"\"\"\n   \n\"\"\"\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("doc is empty"), "{}", err);
+}
+
+// A CANONICAL reference to a name the module does NOT export is a soft warning
+// (stderr), not an error — the module still loads.
+#[test]
+fn use_module_pkg_missing_exp_warns() {
+    run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+        (
+            "s3.pkg",
+            "name s3\ndoc \"\"\"\n  CANONICAL: s3.presign \"k\"\n\"\"\"\n",
+        ),
+    ])
+    .unwrap();
+}
+
+// No `.pkg` sibling -> backward compatible: the module loads as before.
+#[test]
+fn use_module_no_pkg_backward_compatible() {
+    run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+    ])
+    .unwrap();
+}
+
+// A malformed `.pkg` (unterminated doc block) is a hard load error.
+#[test]
+fn use_module_pkg_malformed_fails() {
+    let err = run_modules(&[
+        ("main.fx", "use ./s3\nlog s3.upload\n"),
+        ("s3.fx", "exp fn upload b k -> b\n"),
+        ("s3.pkg", "name s3\ndoc \"\"\"\nnever closed\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("unterminated doc block"), "{}", err);
+}

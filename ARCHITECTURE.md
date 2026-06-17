@@ -28,6 +28,11 @@ source (.fx)
 The batteries (`http`, `db`, `ai`, `auth`, `ws`, `cron`, `queue`, `reg`) live in
 separate modules (`*_mod.rs`) and hook in from the dispatch point in `interp.rs`.
 
+User modules (`use ./lib/x`) load in `interp/module.rs::run_module_file`, which —
+after collecting the `exp`-ed names — validates an optional sibling `.pkg`
+manifest (the "battery-shaped module" AI-doc, parsed by `interp/pkg.rs`; see
+`docs/pkg-format.md`).
+
 CLI entry: `runtime/src/main.rs` → `fluxon run file.fx`.
 
 ---

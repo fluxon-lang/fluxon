@@ -20,6 +20,7 @@ mod call;
 mod exec;
 mod expr;
 mod module;
+mod pkg;
 mod scope;
 mod util;
 
