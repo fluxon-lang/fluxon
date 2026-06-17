@@ -106,6 +106,12 @@ pub struct Interp {
     // `queue.push` adds work (non-blocking), `queue.on` registers a handler; the
     // worker pulls from the queue and runs them in order.
     pub queue: Arc<crate::queue_mod::QueueState>,
+    // ai battery overrides (issue #199): base URL / wire style / extra headers /
+    // extra body params, set by `ai.config {...}`. Default is empty (every field
+    // None) — zero-config behavior is byte-for-byte unchanged. `ai.config` is a
+    // top-level setup call (like `http.cors`); Arc<Mutex> so a later call can
+    // overwrite it and server threads read the snapshot after freeze.
+    pub ai_override: Arc<Mutex<crate::ai_mod::AiOverride>>,
     // Pending (deferred) servers: `http.serve`/`ws.serve` do not block
     // immediately, they add a server description here. Once top-level code is
     // done (end of `run`), they are all spawned on ONE shared tokio runtime — so
@@ -165,6 +171,7 @@ impl Interp {
             reg: Arc::new(crate::reg_mod::RegState::new()),
             cron: Arc::new(crate::cron_mod::CronState::new()),
             queue: Arc::new(crate::queue_mod::QueueState::new()),
+            ai_override: Arc::new(Mutex::new(crate::ai_mod::AiOverride::default())),
             pending_servers: Arc::new(Mutex::new(Vec::new())),
             module_cache: Mutex::new(HashMap::new()),
             // module_loading/current_base — thread-local (see comment above).

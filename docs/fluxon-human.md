@@ -882,6 +882,68 @@ each i in 1..10                          # maximum 10 steps
 > automatically and uncontrolled, you could not do logging/cost/confirmation. The
 > loop is yours — so you see and control every tool call.
 
+**Connecting to other providers (advanced).** Everything above works with **zero
+config** — a standard key in `.env` is all you need, and most programs never go
+further. But the `ai` battery also speaks any **OpenAI-compatible** API (Z.AI /
+GLM, OpenRouter, Ollama, vLLM, LM Studio, Azure, Groq, …). You override the parts
+of the request that differ, and **nothing else changes** — the default behavior
+is byte-for-byte the same when you pass no overrides.
+
+There are two ways to override, and they compose (per-call wins over global):
+
+`ai.config {…}` — set global defaults once, at the top of the program (like
+`http.cors`; call it before `http.serve`). The keys, all optional:
+
+| key       | meaning                                                        |
+|-----------|----------------------------------------------------------------|
+| `url`     | full endpoint URL (replaces the provider default)              |
+| `style`   | wire format: `:openai` or `:anthropic` (the request/response shape) |
+| `key`     | API key (same role as `$AI_KEY`, inline)                       |
+| `model`   | model name (same role as `$AI_MODEL`, inline)                  |
+| `headers` | extra HTTP headers, **merged** onto the defaults               |
+| `extra`   | extra request-body fields, **merged** into the JSON            |
+
+```fluxon
+# GLM (Z.AI): the OpenAI wire format at a different URL — that's the whole change.
+ai.config {
+  style: :openai
+  url:   "https://api.z.ai/api/paas/v4/chat/completions"
+  key:   env.ZAI_KEY
+  model: "glm-4.6"
+}
+answer = ai.ask "Salom, dunyo"          # now goes to Z.AI
+
+# OpenRouter: extra body params + its recommended headers.
+ai.config {
+  style:   :openai
+  url:     "https://openrouter.ai/api/v1/chat/completions"
+  key:     env.OPENROUTER_KEY
+  model:   "anthropic/claude-3.5-sonnet"
+  headers: {HTTP-Referer: "https://myapp.dev" X-Title: "My App"}
+  extra:   {provider: {sort: "throughput"}}   # OpenRouter-specific knob
+}
+```
+
+A trailing **opts map** on any `ai.ask`/`ai.json`/`ai.run` overrides the global
+config for that one call (same keys). Omit it and the call behaves exactly as
+before — it is purely additive:
+
+```fluxon
+# Same global config, but this one call uses a cheaper/faster model.
+r = ai.ask "quick check" {model: "glm-4.5-air"}
+r = ai.json prompt schema {model: "glm-4.6"}
+r = ai.run msgs tools {extra: {temperature: 0}}
+# To pass opts to ai.run WITHOUT tools, use nil for tools:
+r = ai.run msgs nil {model: "glm-4.6"}
+```
+
+`headers` and `extra` **merge** key-by-key (a key you give wins; the rest of the
+defaults stay), while `url`/`style`/`key`/`model` **replace**. `style` selects
+only the wire format — a GLM endpoint speaks OpenAI, so `style::openai` + a custom
+`url` is enough; you don't need the official OpenAI key. Env equivalents exist for
+the scalars: `$AI_STYLE`, `$AI_BASE_URL` (alongside the existing `$AI_KEY` /
+`$AI_MODEL` / `$AI_PROVIDER`).
+
 ### 9.4 `reg` — function registry (dynamic dispatch)
 
 Storing and calling a function **by its string name**. Essential for agent tools:
