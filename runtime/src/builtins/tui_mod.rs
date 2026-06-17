@@ -892,10 +892,17 @@ fn parse_blocks(src: &str) -> Vec<Block> {
         // fenced code: ``` or ~~~ (optionally with a language). Everything up to the
         // matching closing fence is literal — no inline markup, no other block parsing.
         if let Some(fence) = code_fence(trimmed) {
-            let lang = trimmed[fence.len()..].trim().to_string();
+            // The opener's marker char + length define the close: a ``` block is NOT
+            // closed by a `~~~` line, nor by a SHORTER run — only a same-char run of at
+            // least the opener's length, with nothing after it (CommonMark). Without
+            // this, a `~~~` (or longer ```) appearing inside the code would falsely end
+            // the block and the rest of the literal body would be re-parsed as Markdown.
+            let marker = fence.chars().next().unwrap();
+            let open_len = fence.len();
+            let lang = trimmed[open_len..].trim().to_string();
             i += 1;
             let mut code = Vec::new();
-            while i < lines.len() && code_fence(lines[i].trim_start()).is_none() {
+            while i < lines.len() && !closes_fence(lines[i].trim_start(), marker, open_len) {
                 code.push(lines[i].to_string());
                 i += 1;
             }
@@ -1060,7 +1067,13 @@ fn render_inline(s: &str) -> String {
             }
             // bold (** or __) — needs the doubled marker.
             '*' | '_' if i + 1 < chars.len() && chars[i + 1] == c => {
-                if let Some(end) = find_run(&chars, i + 2, c, 2) {
+                // `_` emphasis does NOT open inside a word (CommonMark intraword rule),
+                // so `created_at`/`foo__bar` keep their underscores literal; `*` may
+                // open anywhere. The close marker must likewise not sit inside a word.
+                if can_open(&chars, i, c)
+                    && let Some(end) = find_run(&chars, i + 2, c, 2)
+                    && can_close(&chars, end, 2, c)
+                {
                     let inner: String = chars[i + 2..end].iter().collect();
                     out.push_str(&bold(&render_inline(&inner)));
                     i = end + 2;
@@ -1071,7 +1084,10 @@ fn render_inline(s: &str) -> String {
             }
             // italic (* or _) — single marker.
             '*' | '_' => {
-                if let Some(end) = find_char(&chars, i + 1, c) {
+                if can_open(&chars, i, c)
+                    && let Some(end) = find_char(&chars, i + 1, c)
+                    && can_close(&chars, end, 1, c)
+                {
                     let inner: String = chars[i + 1..end].iter().collect();
                     out.push_str(&italic(&inner));
                     i = end + 1;
@@ -1195,7 +1211,7 @@ fn render_quote(lines: &[String]) -> String {
 
 // --- markdown parse helpers ---
 
-// If `s` opens a code fence (``` or ~~~, 3+ of the same char), return the fence run so
+// If `s` OPENS a code fence (``` or ~~~, 3+ of the same char), return the fence run so
 // the caller can read the trailing language. Else None.
 fn code_fence(s: &str) -> Option<&str> {
     for marker in ['`', '~'] {
@@ -1206,6 +1222,15 @@ fn code_fence(s: &str) -> Option<&str> {
         }
     }
     None
+}
+
+// Does `s` CLOSE a fence opened with `marker` x `open_len`? A close is a run of the
+// SAME marker char, at least as long as the opener, and nothing else after it (only
+// trailing spaces). This is stricter than code_fence: a ``` block ignores a `~~~` line
+// and a shorter ``` run, so neither falsely terminates the literal body.
+fn closes_fence(s: &str, marker: char, open_len: usize) -> bool {
+    let run = s.chars().take_while(|&c| c == marker).count();
+    run >= open_len && s[run..].trim().is_empty()
 }
 
 // A horizontal rule: 3+ of -, * or _ and nothing else but spaces.
@@ -1254,6 +1279,36 @@ fn list_marker(line: &str) -> Option<(bool, usize, usize, &str)> {
         }
     }
     None
+}
+
+// Markdown's intraword-underscore rule, simplified to what agents emit: a `_` run may
+// open emphasis only at a word boundary, and close only at one. A `*` run has no such
+// restriction — `foo*bar*baz` is valid emphasis — so `*` always passes. This keeps
+// `created_at`, `foo_bar_baz`, `a__b__c` literal in plain prose.
+//
+// "word boundary" = the char just OUTSIDE the marker run is not part of a word. We
+// treat both alphanumerics AND other `_` markers as word material: in `a__b__c`, the
+// `_` flanking `b` is glued to surrounding underscores, not a true boundary, so no span
+// opens or closes. (`is_word_edge` returns true at the string edge or a real separator.)
+fn is_word_edge(c: Option<&char>) -> bool {
+    match c {
+        None => true,
+        Some(c) => !c.is_alphanumeric() && *c != '_',
+    }
+}
+fn can_open(chars: &[char], idx: usize, marker: char) -> bool {
+    if marker != '_' {
+        return true;
+    }
+    is_word_edge(idx.checked_sub(1).and_then(|p| chars.get(p)))
+}
+fn can_close(chars: &[char], end: usize, run_len: usize, marker: char) -> bool {
+    if marker != '_' {
+        return true;
+    }
+    // `end` is the closing run's first marker char; the char just PAST the whole run
+    // (end + run_len) must be a word edge — so `a_b_c` doesn't italicize `b`.
+    is_word_edge(chars.get(end + run_len))
 }
 
 // Find the next index >= from where chars[idx] == target. None if absent.
@@ -1648,5 +1703,60 @@ mod tests {
     fn md_plain_paragraph_passthrough() {
         let out = md("just some words");
         assert_eq!(out, "just some words");
+    }
+
+    // A snake_case identifier in plain prose keeps its underscores — `_` emphasis must
+    // not open/close inside a word (CommonMark intraword rule). Guards the bug where
+    // `created_at` rendered as `createdat` and `foo_bar_baz` as `foobarbaz`.
+    #[test]
+    fn md_intraword_underscores_preserved() {
+        assert_eq!(md("the created_at column"), "the created_at column");
+        assert_eq!(md("call foo_bar_baz here"), "call foo_bar_baz here");
+        assert_eq!(md("a__b__c stays"), "a__b__c stays");
+        // but a real `_italic_` at a word boundary still works (text survives, marker gone)
+        let out = md("an _emphasized_ word");
+        assert!(out.contains("emphasized") && !out.contains('_'));
+        // `*` emphasis is allowed intraword (CommonMark) — text survives, markers gone
+        let star = md("foo*bar*baz");
+        assert!(star.contains("bar") && !star.contains('*'));
+    }
+
+    // A code fence is closed ONLY by a run of the SAME marker char, at least as long as
+    // the opener. Guards the bug where a `~~~` (or longer ```) line inside a ``` block
+    // falsely ended it and the rest leaked back into Markdown parsing.
+    #[test]
+    fn md_fence_close_matches_opener() {
+        // a ~~~ line inside a ``` block is just code, not the close
+        let out = md("```\nline one\n~~~\nline two\n```");
+        assert!(out.contains("line one") && out.contains("line two"));
+        assert!(
+            out.contains("~~~"),
+            "the inner ~~~ must stay literal: {:?}",
+            out
+        );
+        // the whole thing is ONE code block, so the inner lines are never re-parsed
+        let blocks = parse_blocks("```\n# not a heading\n~~~\n```");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            Block::Code { lines, .. } => {
+                assert!(lines.iter().any(|l| l.contains("# not a heading")));
+                assert!(lines.iter().any(|l| l.contains("~~~")));
+            }
+            _ => panic!("must be a single code block"),
+        }
+    }
+
+    // A shorter ``` run does not close a longer ```` opener (CommonMark length rule).
+    #[test]
+    fn md_fence_close_needs_open_length() {
+        let blocks = parse_blocks("````\n```\nstill code\n````");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            Block::Code { lines, .. } => {
+                assert!(lines.iter().any(|l| l.contains("```")));
+                assert!(lines.iter().any(|l| l.contains("still code")));
+            }
+            _ => panic!("must be a single code block"),
+        }
     }
 }
