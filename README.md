@@ -100,7 +100,7 @@ cargo run -- run examples/demo.fx
 | 🧩 **General-purpose** | A real language — scripts, CLIs, tools, data work, and full services. Functions, closures, pattern matching, errors, parallelism (`par`), pipes (`\|>`). |
 | 🎯 **One task = one way** | The only way to iterate is `each`. One way to output. The AI never wonders "which way should I choose?" — there is no choice, so there are fewer mistakes. |
 | ⚡ **Few tokens, still readable** | Short syntax, but never cryptic. Keywords are spelled out in full (`each`, `match`, `else`) — an AI seeing Fluxon for the first time understands it immediately. |
-| 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `json` — all built in. No `npm install`. Only what you use ends up in the binary (tree-shaking). |
+| 🔋 **Batteries included** | `http`, `db`, `ai`, `auth`, `crypto`, `ws`, `cron`, `queue`, `reg`, `sh`, `tui`, `json` — all built in. No `npm install`. Only what you use ends up in the binary (tree-shaking). |
 | 🤖 **AI as a primitive** | Calling an LLM is a keyword, not an SDK. Structured output, confidence, token count, and cost all come back built in. Providers auto-detect from the environment. |
 
 ---

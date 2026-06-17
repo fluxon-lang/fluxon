@@ -57,6 +57,7 @@ Before adding a new battery or making a change, find the relevant file:
 | `db` battery (SQLite, tx, schema) | `runtime/src/db_mod.rs` |
 | `auth` battery (JWT HS256 + password hash argon2id) | `runtime/src/auth_mod.rs` |
 | `crypto` battery (sha256/hmac/b64/hex/uuid) | `runtime/src/crypto_mod.rs` |
+| `tui` battery (colors + table/box/select/input — CLI UX) | `runtime/src/builtins/tui_mod.rs` |
 | CLI entry point + integration tests | `runtime/src/main.rs` |
 
 **If you need to read the spec:** `docs/fluxon-agent.md` (~2700 tokens, compact —

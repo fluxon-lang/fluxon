@@ -20,6 +20,7 @@ mod rand_mod;
 mod sh_mod;
 mod str_mod;
 mod time_mod;
+mod tui_mod;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,6 +38,7 @@ use rand_mod::rand_module;
 use sh_mod::sh_module;
 use str_mod::str_module;
 use time_mod::{fmt_unix, now_unix, time_module};
+use tui_mod::tui_module;
 
 // json_encode/json_decode are part of the public surface used by other modules
 // (http/db/ai call them as `crate::builtins::json_encode`) — re-exported here so
@@ -237,7 +239,7 @@ pub fn log_value_shim() -> Value {
 pub fn is_module(name: &str) -> bool {
     matches!(
         name,
-        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh" | "bytes"
+        "str" | "math" | "rand" | "json" | "time" | "io" | "fs" | "sh" | "bytes" | "tui"
     )
 }
 
@@ -253,6 +255,7 @@ pub fn call_module(module: &str, func: &str, args: Vec<Value>) -> R {
         "fs" => fs_module(func, args),
         "sh" => sh_module(func, args),
         "bytes" => bytes_module(func, args),
+        "tui" => tui_module(func, args),
         _ => Err(Flow::err(format!("unknown module: {}", module))),
     }
 }
