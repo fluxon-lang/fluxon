@@ -64,7 +64,7 @@ const DEFAULT_AI_TIMEOUT_SECS: u64 = 120;
 // Supported LLM providers. The battery detects it ITSELF (auto) — the Fluxon
 // user configures nothing: a standard provider key in `.env`
 // (ANTHROPIC_API_KEY / OPENAI_API_KEY) is enough.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Provider {
     Anthropic,
     OpenAI,
@@ -77,13 +77,196 @@ impl Provider {
             Provider::OpenAI => OPENAI_DEFAULT_MODEL,
         }
     }
+
+    // Wire-style name (`:anthropic` / `:openai`) -> Provider. Used by `ai.config`
+    // / per-call opts `style` and `$AI_STYLE`. This selects the REQUEST/RESPONSE
+    // FORMAT, independent of which key/model is used: a GLM endpoint speaks the
+    // OpenAI wire format, so `style::openai` + a custom `url` is enough.
+    fn from_style(s: &str) -> Option<Provider> {
+        match s.to_lowercase().as_str() {
+            "anthropic" | "claude" => Some(Provider::Anthropic),
+            "openai" | "gpt" => Some(Provider::OpenAI),
+            _ => None,
+        }
+    }
 }
 
-// Detected provider + key + model (the auto-detect result).
+// Overrides for the request shape (issue #199). Every field is optional; the
+// default (all None / empty) leaves the battery byte-for-byte unchanged. Set
+// globally by `ai.config {...}` (stored on Interp) and/or per-call via the
+// trailing opts map. A per-call opts value wins over the global one, which in
+// turn wins over the env/auto-detect default.
+//
+// `headers` / `extra` MERGE key-by-key onto the defaults (so you can add the
+// single header a gateway needs without restating the auth header); `url` /
+// `style` / `model` / `key` REPLACE the corresponding default.
+#[derive(Clone, Default)]
+pub struct AiOverride {
+    // Full endpoint URL (replaces ANTHROPIC_URL / OPENAI_URL). For GLM/Z.AI,
+    // OpenRouter, Ollama, vLLM, Azure, ...
+    url: Option<String>,
+    // Wire format / provider style. Decouples "which format" from "which key".
+    style: Option<Provider>,
+    // API key override (same role as $AI_KEY, but inline).
+    key: Option<String>,
+    // Model override (same role as $AI_MODEL, but inline).
+    model: Option<String>,
+    // Extra HTTP headers, merged onto the provider's fixed set (a value here
+    // overrides a default header of the same name).
+    headers: BTreeMap<String, String>,
+    // Extra request-body fields, merged into the request JSON (e.g. OpenRouter's
+    // `provider`/`route`/`transforms`). A key here overrides a default body field.
+    extra: BTreeMap<String, Value>,
+}
+
+impl AiOverride {
+    // Layers `other` ON TOP of `self`: scalar fields from `other` (when set)
+    // replace; `headers`/`extra` merge key-by-key with `other` winning. Used to
+    // fold the per-call opts over the global `ai.config`.
+    fn merge(&self, other: &AiOverride) -> AiOverride {
+        let mut out = self.clone();
+        if other.url.is_some() {
+            out.url = other.url.clone();
+        }
+        if other.style.is_some() {
+            out.style = other.style;
+        }
+        if other.key.is_some() {
+            out.key = other.key.clone();
+        }
+        if other.model.is_some() {
+            out.model = other.model.clone();
+        }
+        for (k, v) in &other.headers {
+            out.headers.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &other.extra {
+            out.extra.insert(k.clone(), v.clone());
+        }
+        out
+    }
+}
+
+// Parses an opts map ({url style key model headers extra}) into an AiOverride.
+// Unknown keys are an explicit error — a typo like `{ur:...}` should fail loudly
+// rather than be silently ignored. Shared by `ai.config` and per-call opts.
+fn parse_override(opts: &BTreeMap<String, Value>) -> Result<AiOverride, Flow> {
+    let mut ov = AiOverride::default();
+    for (k, v) in opts {
+        // A `nil` value means "not set" — skip it, so `key: env.MAYBE_UNSET`
+        // falls through to the env/default instead of erroring. This keeps the
+        // common `{key: env.X}` pattern ergonomic when X is absent.
+        if matches!(v, Value::Nil) {
+            continue;
+        }
+        match k.as_str() {
+            "url" => ov.url = Some(require_str(v, "url")?),
+            "style" => {
+                let s = match v {
+                    Value::Str(s) | Value::Sym(s) => s.clone(),
+                    _ => return Err(Flow::err("ai: opts.style must be :anthropic|:openai")),
+                };
+                ov.style = Some(Provider::from_style(&s).ok_or_else(|| {
+                    Flow::err(format!("ai: unknown style '{}' (anthropic|openai)", s))
+                })?);
+            }
+            "key" => ov.key = Some(require_str(v, "key")?),
+            "model" => ov.model = Some(require_str(v, "model")?),
+            "headers" => match v {
+                Value::Map(m) => {
+                    for (hk, hv) in m {
+                        // Header NAMES are normalized to lowercase: HTTP header
+                        // names are case-insensitive, so without this a global
+                        // `Authorization` and a per-call `authorization` would be
+                        // two distinct BTreeMap keys — the merge would keep both
+                        // and `add_extra_headers` would send DUPLICATE headers
+                        // (the override would not actually win). Lowercase on the
+                        // wire is always valid (and required by HTTP/2).
+                        // Header VALUES are strings; other scalars are coerced to
+                        // their text form (`to_text`, so a symbol value does NOT
+                        // keep its `:` prefix — `X-Title::app` sends `app`).
+                        ov.headers.insert(hk.to_lowercase(), hv.to_text());
+                    }
+                }
+                _ => return Err(Flow::err("ai: opts.headers must be a map")),
+            },
+            "extra" => match v {
+                Value::Map(m) => {
+                    for (ek, ev) in m {
+                        ov.extra.insert(ek.clone(), ev.clone());
+                    }
+                }
+                _ => return Err(Flow::err("ai: opts.extra must be a map")),
+            },
+            other => {
+                return Err(Flow::err(format!(
+                    "ai: unknown opts key '{}' (url/style/key/model/headers/extra)",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(ov)
+}
+
+// Reads a Value expected to be a string (for url/key/model opts).
+fn require_str(v: &Value, field: &str) -> Result<String, Flow> {
+    match v {
+        Value::Str(s) => Ok(s.clone()),
+        _ => Err(Flow::err(format!("ai: opts.{} must be a string", field))),
+    }
+}
+
+// Merges the `extra` body fields into the request body. A key present in both
+// is OVERRIDDEN by the user's value — this is the escape hatch for providers
+// that need vendor-specific fields (and lets a user tune even `max_tokens`).
+fn merge_extra(body: &mut BTreeMap<String, Value>, extra: &BTreeMap<String, Value>) {
+    for (k, v) in extra {
+        body.insert(k.clone(), v.clone());
+    }
+}
+
+// Finalizes the request headers: the default `content-type: application/json`
+// (unless the user overrode it) followed by the extra/override headers. The
+// caller has already emitted the provider's auth/version headers (guarded the
+// same way). hyper APPENDS duplicate headers rather than replacing, so every
+// default we emit must first be checked against `headers` — otherwise an
+// override would send two values. Skips empty names defensively.
+fn add_extra_headers(
+    mut b: hyper::http::request::Builder,
+    headers: &BTreeMap<String, String>,
+) -> hyper::http::request::Builder {
+    if !header_overridden(headers, "content-type") {
+        b = b.header("content-type", "application/json");
+    }
+    for (k, v) in headers {
+        if !k.is_empty() {
+            b = b.header(k.as_str(), v.as_str());
+        }
+    }
+    b
+}
+
+// True if `headers` contains `name`. Override header names are stored lowercased
+// (see `parse_override`), and every `name` passed here is already lowercase, so a
+// case-insensitive compare is belt-and-suspenders — it keeps the guard correct
+// even if a header reaches the map by another path.
+fn header_overridden(headers: &BTreeMap<String, String>, name: &str) -> bool {
+    headers.keys().any(|k| k.eq_ignore_ascii_case(name))
+}
+
+// Detected provider + key + model (the auto-detect result), already folded with
+// the overrides — `url`/`headers`/`extra` are the EFFECTIVE request pieces.
 struct AiConfig {
     provider: Provider,
     key: String,
     model: String,
+    // Effective endpoint URL (override ?? env ?? provider default).
+    url: String,
+    // Extra headers to merge onto the provider's fixed set.
+    headers: BTreeMap<String, String>,
+    // Extra body fields to merge into the request JSON.
+    extra: BTreeMap<String, Value>,
 }
 
 impl Interp {
@@ -93,8 +276,27 @@ impl Interp {
             "ask" => self.ai_ask(args),
             "json" => self.ai_json(args),
             "run" => self.ai_run(args),
-            _ => Err(Flow::err(format!("ai.{} not found (ask/json/run)", func))),
+            "config" => self.ai_config_set(args),
+            _ => Err(Flow::err(format!(
+                "ai.{} not found (ask/json/run/config)",
+                func
+            ))),
         }
+    }
+
+    // ai.config {url:.. style:.. key:.. model:.. headers:{..} extra:{..}}
+    // Sets the GLOBAL request overrides for every following `ai.*` call (issue
+    // #199). A top-level setup call (like `http.cors`): call it once, before
+    // `http.serve`. Calling it again REPLACES the stored config. Returns nil.
+    // With no/empty opts it clears any previous override.
+    fn ai_config_set(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        let ov = match args.first() {
+            Some(Value::Map(m)) => parse_override(m)?,
+            None | Some(Value::Nil) => AiOverride::default(),
+            _ => return Err(Flow::err("ai.config: opts (map) required".to_string())),
+        };
+        *self.ai_override.lock().unwrap() = ov;
+        Ok(Value::Nil)
     }
 
     // Fetches a value from env (OS env > .env), Some if non-empty.
@@ -111,83 +313,137 @@ impl Interp {
         resolve_ai_timeout(self.ai_env("AI_TIMEOUT").as_deref())
     }
 
-    // AUTO-detects provider + key + model. Nothing is mandatory — the order:
-    //   1) if $AI_PROVIDER (anthropic|openai) overrides, that provider's key.
-    //   2) otherwise the provider is detected from the available standard key:
-    //        ANTHROPIC_API_KEY -> Anthropic,  OPENAI_API_KEY -> OpenAI.
-    //   3) $AI_KEY — a generic override key regardless of provider.
-    // Model: $AI_MODEL ?? provider default.
-    fn ai_config(&self) -> Result<AiConfig, Flow> {
+    // Folds the global `ai.config` override with the per-call opts: per-call
+    // wins. Either may be empty (the default), in which case this is a no-op and
+    // the request shape stays byte-for-byte unchanged.
+    fn effective_override(&self, per_call: &AiOverride) -> AiOverride {
+        let global = self.ai_override.lock().unwrap().clone();
+        global.merge(per_call)
+    }
+
+    // AUTO-detects provider + key + model, then folds in the overrides (env +
+    // global `ai.config` + per-call opts). Nothing is mandatory — the order:
+    //   1) the wire style: opts/config `style` ?? $AI_STYLE ?? $AI_PROVIDER ??
+    //      auto-detect from the available standard key.
+    //   2) the URL: opts/config `url` ?? $AI_BASE_URL ?? provider default.
+    //   3) the key: opts/config `key` ?? $AI_KEY ?? (ONLY on the default URL)
+    //      the provider's standard key.
+    //   4) the model: opts/config `model` ?? $AI_MODEL ?? provider default.
+    // `style` only selects the request/response FORMAT (so a GLM endpoint can use
+    // the OpenAI format with a custom URL) — it does NOT force a particular key.
+    //
+    // SECURITY: the standard provider keys ($OPENAI_API_KEY / $ANTHROPIC_API_KEY)
+    // that we read from the environment are sent ONLY to that provider's OWN
+    // default endpoint. A CUSTOM url (override or $AI_BASE_URL) requires an
+    // EXPLICIT key (inline `key` / $AI_KEY) — we never fall back to a provider
+    // key for a custom host, so the auto-detected env key can't leak to e.g.
+    // Z.AI/OpenRouter. Custom url + no explicit key => clear error.
+    // NOTE: this guards the AUTO-DETECTED key only. `headers`/`extra` are an
+    // explicit, unguarded escape hatch — whatever a user puts there (including an
+    // auth header) is sent as-is to whatever url they chose; that's on them.
+    fn ai_config(&self, ov: &AiOverride) -> Result<AiConfig, Flow> {
         let anthropic = self.ai_env("ANTHROPIC_API_KEY");
         let openai = self.ai_env("OPENAI_API_KEY");
-        let generic = self.ai_env("AI_KEY");
-        let forced = self.ai_env("AI_PROVIDER").map(|p| p.to_lowercase());
+        // Explicit, provider-agnostic key (the GLM/OpenRouter case: only `key` +
+        // `url`). The INLINE override wins over $AI_KEY — consistent with
+        // url/style/model, and required so a per-call/config `{key:...}` can
+        // actually retarget a deployment that already has $AI_KEY set (otherwise
+        // it would keep authenticating against the env key / wrong provider).
+        let explicit_key = ov.key.clone().or_else(|| self.ai_env("AI_KEY"));
+        // Wire style: the inline `style` override wins, then $AI_STYLE, then the
+        // legacy $AI_PROVIDER (kept for backward compatibility).
+        let forced_style = self
+            .ai_env("AI_STYLE")
+            .or_else(|| self.ai_env("AI_PROVIDER"));
 
-        // Determine the provider.
-        let provider = match forced.as_deref() {
-            Some("anthropic") | Some("claude") => Provider::Anthropic,
-            Some("openai") | Some("gpt") => Provider::OpenAI,
-            Some(other) => {
-                return Err(Flow::err(format!(
-                    "ai: unknown $AI_PROVIDER '{}' (anthropic|openai)",
-                    other
-                )));
-            }
-            // No override -> detect from the available standard key. Anthropic
-            // wins (the project is oriented toward Claude), then OpenAI.
-            None => {
-                if anthropic.is_some() {
-                    Provider::Anthropic
-                } else if openai.is_some() {
-                    Provider::OpenAI
-                } else if generic.is_some() {
-                    // If only $AI_KEY is set and no provider is given, we assume
-                    // Anthropic (the project default).
-                    Provider::Anthropic
-                } else {
-                    return Err(Flow::err(
-                        "ai: API key not found — set ANTHROPIC_API_KEY or \
-                         OPENAI_API_KEY in .env or the environment"
-                            .to_string(),
-                    ));
+        // Determine the provider (= wire style).
+        let provider = if let Some(p) = ov.style {
+            p
+        } else {
+            match forced_style.as_deref() {
+                Some(s) => Provider::from_style(s).ok_or_else(|| {
+                    Flow::err(format!("ai: unknown style '{}' (anthropic|openai)", s))
+                })?,
+                // No style given -> detect from the available standard key.
+                // Anthropic wins (the project is oriented toward Claude), then
+                // OpenAI. If only $AI_KEY/inline key is set, assume Anthropic.
+                None => {
+                    if anthropic.is_some() {
+                        Provider::Anthropic
+                    } else if openai.is_some() {
+                        Provider::OpenAI
+                    } else if explicit_key.is_some() {
+                        Provider::Anthropic
+                    } else {
+                        return Err(Flow::err(
+                            "ai: API key not found — set ANTHROPIC_API_KEY or \
+                             OPENAI_API_KEY in .env or the environment"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         };
 
-        // Pick the key matching the provider. $AI_KEY is always the top override.
+        // URL: inline override ?? $AI_BASE_URL ?? provider default. Resolved
+        // BEFORE the key, because a custom URL changes how the key is resolved.
+        let default_url = match provider {
+            Provider::Anthropic => ANTHROPIC_URL,
+            Provider::OpenAI => OPENAI_URL,
+        };
+        let custom_url = ov.url.clone().or_else(|| self.ai_env("AI_BASE_URL"));
+        let is_custom = custom_url.is_some();
+        let url = custom_url.unwrap_or_else(|| default_url.to_string());
+
+        // Key resolution (security-critical) is a pure function so it can be
+        // tested without touching the environment.
         let provider_key = match provider {
             Provider::Anthropic => anthropic,
             Provider::OpenAI => openai,
         };
-        let key = generic.or(provider_key).ok_or_else(|| {
-            Flow::err(format!(
-                "ai: {} key not found (set ${} or $AI_KEY)",
-                provider_name(provider),
-                provider_key_name(provider),
-            ))
-        })?;
+        let key = resolve_key(is_custom, explicit_key, provider_key, provider)?;
 
-        let model = self
-            .ai_env("AI_MODEL")
+        // Model: inline override ?? $AI_MODEL ?? provider default.
+        let model = ov
+            .model
+            .clone()
+            .or_else(|| self.ai_env("AI_MODEL"))
             .unwrap_or_else(|| provider.default_model().to_string());
 
         Ok(AiConfig {
             provider,
             key,
             model,
+            url,
+            headers: ov.headers.clone(),
+            extra: ov.extra.clone(),
         })
     }
 
-    // ai.ask "savol" -> response text (str).
-    // Sends a single user message, returns the first text block.
+    // ai.ask "savol" [opts] -> response text (str).
+    // Sends a single user message, returns the first text block. The optional
+    // trailing opts map ({url style key model headers extra}) overrides the
+    // global `ai.config` for this one call (issue #199).
     fn ai_ask(&self, args: Vec<Value>) -> Result<Value, Flow> {
         let prompt = match args.first() {
             Some(Value::Str(s)) => s.clone(),
             _ => return Err(Flow::err("ai.ask: question (str) required".to_string())),
         };
+        let ov = self.per_call_override(args.get(1))?;
         let messages = vec![user_msg(&prompt)];
-        let resp = self.call_api(&messages, None, None)?;
+        let resp = self.call_api(&messages, None, None, &ov)?;
         Ok(Value::Str(resp.text))
+    }
+
+    // Parses an OPTIONAL trailing opts argument into a per-call override. Absent
+    // / nil -> the default (no override), so the request shape is unchanged for
+    // the common case where no opts are passed.
+    fn per_call_override(&self, opts: Option<&Value>) -> Result<AiOverride, Flow> {
+        match opts {
+            None | Some(Value::Nil) => Ok(AiOverride::default()),
+            Some(Value::Map(m)) => parse_override(m),
+            Some(_) => Err(Flow::err("ai: opts must be a map".to_string())),
+        }
     }
 
     // ai.json "prompt" {schema} -> map (+ `_` metadata).
@@ -202,6 +458,8 @@ impl Interp {
             Some(v @ (Value::Map(_) | Value::List(_))) => v.clone(),
             _ => return Err(Flow::err("ai.json: schema (map/list) required".to_string())),
         };
+        // Optional trailing opts (after the schema) — per-call override.
+        let ov = self.per_call_override(args.get(2))?;
 
         // Explicit instruction to the model: return only JSON MATCHING the given
         // shape. The system prompt forces pure JSON (prefill gives a 400 on 4.6+).
@@ -210,7 +468,7 @@ impl Interp {
             json_encode(&schema)
         );
         let messages = vec![user_msg(&prompt)];
-        let resp = self.call_api(&messages, Some(&system), None)?;
+        let resp = self.call_api(&messages, Some(&system), None, &ov)?;
 
         // Parse the response text into a map. The model sometimes wraps it in
         // ```json ... ``` — we strip the code fence.
@@ -254,6 +512,9 @@ impl Interp {
             None | Some(Value::Nil) => None,
             _ => return Err(Flow::err("ai.run: tools (list) must be a list".to_string())),
         };
+        // Optional trailing opts (after tools) — per-call override. To pass opts
+        // without tools, use `ai.run msgs nil opts`.
+        let ov = self.per_call_override(args.get(2))?;
 
         // msgs from the Fluxon shape to the Anthropic shape: {role content} -> {role, content}.
         // role may be a sym (:user) or str ("user"). The tool-result message
@@ -263,7 +524,7 @@ impl Interp {
         let api_tools = tools
             .as_ref()
             .map(|t| t.iter().map(normalize_tool).collect());
-        let resp = self.call_api(&api_msgs, None, api_tools.as_ref())?;
+        let resp = self.call_api(&api_msgs, None, api_tools.as_ref(), &ov)?;
 
         let mut out = BTreeMap::new();
         if !resp.tool_calls.is_empty() {
@@ -301,8 +562,9 @@ impl Interp {
         messages: &[Value],
         system: Option<&str>,
         tools: Option<&Vec<Value>>,
+        per_call: &AiOverride,
     ) -> Result<AiResp, Flow> {
-        let cfg = self.ai_config()?;
+        let cfg = self.ai_config(&self.effective_override(per_call))?;
         match cfg.provider {
             Provider::Anthropic => self.call_anthropic(&cfg, messages, system, tools),
             Provider::OpenAI => self.call_openai(&cfg, messages, system, tools),
@@ -328,12 +590,23 @@ impl Interp {
         if let Some(t) = tools {
             body.insert("tools".to_string(), Value::List(t.clone()));
         }
+        // Merge extra body params LAST so a user-supplied field overrides ours.
+        merge_extra(&mut body, &cfg.extra);
         let body_str = json_encode(&Value::Map(body));
         let key = cfg.key.clone();
+        let extra_headers = cfg.headers.clone();
 
-        let (text, ms) = post_json(ANTHROPIC_URL, body_str, self.ai_timeout(), move |b| {
-            b.header("x-api-key", key.as_str())
-                .header("anthropic-version", ANTHROPIC_VERSION)
+        let (text, ms) = post_json(&cfg.url, body_str, self.ai_timeout(), move |b| {
+            // Default auth/version headers, unless the user overrode them by
+            // name (hyper appends duplicates, so we must not emit both).
+            let mut b = b;
+            if !header_overridden(&extra_headers, "x-api-key") {
+                b = b.header("x-api-key", key.as_str());
+            }
+            if !header_overridden(&extra_headers, "anthropic-version") {
+                b = b.header("anthropic-version", ANTHROPIC_VERSION);
+            }
+            add_extra_headers(b, &extra_headers)
         })?;
         parse_anthropic(&text, &cfg.model, ms)
     }
@@ -368,11 +641,21 @@ impl Interp {
             let oa_tools: Vec<Value> = t.iter().map(anthropic_tool_to_openai).collect();
             body.insert("tools".to_string(), Value::List(oa_tools));
         }
+        // Merge extra body params LAST so a user-supplied field overrides ours
+        // (e.g. OpenRouter's `provider`/`route`/`transforms`).
+        merge_extra(&mut body, &cfg.extra);
         let body_str = json_encode(&Value::Map(body));
         let key = cfg.key.clone();
+        let extra_headers = cfg.headers.clone();
 
-        let (text, ms) = post_json(OPENAI_URL, body_str, self.ai_timeout(), move |b| {
-            b.header("authorization", format!("Bearer {}", key))
+        let (text, ms) = post_json(&cfg.url, body_str, self.ai_timeout(), move |b| {
+            // Default Bearer auth, unless the user overrode `authorization` (some
+            // gateways want a different scheme / a custom auth header).
+            let mut b = b;
+            if !header_overridden(&extra_headers, "authorization") {
+                b = b.header("authorization", format!("Bearer {}", key));
+            }
+            add_extra_headers(b, &extra_headers)
         })?;
         parse_openai(&text, &cfg.model, ms)
     }
@@ -404,10 +687,11 @@ where
         loop {
             // A single attempt (send + read response) — the timeout covers this block.
             let work = async {
-                let builder = Request::builder()
-                    .method("POST")
-                    .uri(url.clone())
-                    .header("content-type", "application/json");
+                // The default content-type/auth/version headers are emitted by
+                // `add_headers` itself (each provider closure decides), so that a
+                // user header of the same name can REPLACE rather than duplicate
+                // (hyper appends duplicates). post_json stays header-agnostic.
+                let builder = Request::builder().method("POST").uri(url.clone());
                 let builder = add_headers(builder);
                 let req = builder
                     .body(Full::new(Bytes::from(body.clone())))
@@ -923,6 +1207,40 @@ fn provider_key_name(p: Provider) -> &'static str {
     }
 }
 
+// Resolves the API key — security-critical, so it is a pure function (tested
+// without env). `explicit` is an inline `key` or $AI_KEY (provider-agnostic);
+// `provider_key` is the standard $OPENAI_API_KEY/$ANTHROPIC_API_KEY.
+//
+// On a CUSTOM url, ONLY the explicit key is allowed: we MUST NOT fall back to a
+// provider key, or we would send e.g. $OPENAI_API_KEY to a third-party host
+// (Z.AI/OpenRouter) — a credential leak. On the DEFAULT (official) url, the
+// provider key is the normal zero-config fallback.
+fn resolve_key(
+    is_custom: bool,
+    explicit: Option<String>,
+    provider_key: Option<String>,
+    provider: Provider,
+) -> Result<String, Flow> {
+    if is_custom {
+        explicit.ok_or_else(|| {
+            Flow::err(
+                "ai: a custom url needs an explicit key — set `key` in ai.config \
+                 / the call opts, or $AI_KEY (a provider key like $OPENAI_API_KEY \
+                 is never sent to a custom host)"
+                    .to_string(),
+            )
+        })
+    } else {
+        explicit.or(provider_key).ok_or_else(|| {
+            Flow::err(format!(
+                "ai: {} key not found (set ${}, $AI_KEY, or ai.config key)",
+                provider_name(provider),
+                provider_key_name(provider),
+            ))
+        })
+    }
+}
+
 // Converts an Anthropic-shaped message into the OpenAI shape.
 //   {role:"user" content:"..."}                       -> unchanged
 //   {role:"user" content:[{type:tool_result tool_use_id content}]}
@@ -1067,6 +1385,223 @@ fn resolve_ai_timeout(env: Option<&str>) -> Option<Duration> {
 mod tests {
     use super::*;
 
+    // --- issue #199: ai.config / per-call override ---
+
+    // Builds an opts map (str/sym values) for parse_override tests.
+    fn opts(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_override_fields() {
+        // url/style/key/model + headers + extra all parse into the override.
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Title".to_string(), Value::Str("App".to_string()));
+        // A symbol header value must NOT keep its `:` prefix (to_text coercion).
+        headers.insert("X-Mode".to_string(), Value::Sym("fast".to_string()));
+        let mut extra = BTreeMap::new();
+        extra.insert("route".to_string(), Value::Str("fallback".to_string()));
+        let m = opts(&[
+            ("url", Value::Str("https://api.z.ai/v4/chat".to_string())),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-x".to_string())),
+            ("model", Value::Str("glm-4.6".to_string())),
+            ("headers", Value::Map(headers)),
+            ("extra", Value::Map(extra)),
+        ]);
+        let ov = match parse_override(&m) {
+            Ok(o) => o,
+            Err(_) => panic!("parse failed"),
+        };
+        assert_eq!(ov.url.as_deref(), Some("https://api.z.ai/v4/chat"));
+        assert_eq!(ov.style, Some(Provider::OpenAI));
+        assert_eq!(ov.key.as_deref(), Some("sk-x"));
+        assert_eq!(ov.model.as_deref(), Some("glm-4.6"));
+        // Header names are normalized to lowercase (case-insensitive on the wire).
+        assert_eq!(ov.headers.get("x-title").map(|s| s.as_str()), Some("App"));
+        assert_eq!(ov.headers.get("x-mode").map(|s| s.as_str()), Some("fast"));
+        assert!(!ov.headers.contains_key("X-Title"), "name not lowercased");
+        // extra (body) keys keep their case — JSON fields are case-sensitive.
+        assert!(ov.extra.contains_key("route"));
+    }
+
+    #[test]
+    fn parse_override_unknown_key_errors() {
+        // A typo must fail loudly, not be silently ignored.
+        let m = opts(&[("ur", Value::Str("x".to_string()))]);
+        match parse_override(&m) {
+            Err(Flow::Error(e)) => assert!(e.contains("unknown opts key"), "{}", e),
+            _ => panic!("expected error for unknown key"),
+        }
+    }
+
+    #[test]
+    fn parse_override_skips_nil() {
+        // `{key: env.UNSET}` -> nil is treated as "not set", not an error, so the
+        // value falls through to the env/default.
+        let m = opts(&[
+            ("key", Value::Nil),
+            ("model", Value::Str("glm-4.6".to_string())),
+        ]);
+        let ov = match parse_override(&m) {
+            Ok(o) => o,
+            Err(_) => panic!("nil should be skipped, not error"),
+        };
+        assert!(ov.key.is_none());
+        assert_eq!(ov.model.as_deref(), Some("glm-4.6"));
+    }
+
+    #[test]
+    fn parse_override_bad_style_errors() {
+        let m = opts(&[("style", Value::Sym("grok".to_string()))]);
+        match parse_override(&m) {
+            Err(Flow::Error(e)) => assert!(e.contains("unknown style"), "{}", e),
+            _ => panic!("expected error for bad style"),
+        }
+    }
+
+    #[test]
+    fn merge_per_call_wins() {
+        // Global config: openai style + url + a header. Per-call overrides the
+        // url and adds another header; the global header survives (merge).
+        let global = AiOverride {
+            url: Some("https://global".to_string()),
+            style: Some(Provider::OpenAI),
+            headers: [("A".to_string(), "1".to_string())].into(),
+            extra: [("x".to_string(), Value::Int(1))].into(),
+            ..AiOverride::default()
+        };
+        let per_call = AiOverride {
+            url: Some("https://percall".to_string()),
+            headers: [("B".to_string(), "2".to_string())].into(),
+            extra: [("y".to_string(), Value::Int(2))].into(),
+            ..AiOverride::default()
+        };
+
+        let merged = global.merge(&per_call);
+        // scalar: per-call replaces.
+        assert_eq!(merged.url.as_deref(), Some("https://percall"));
+        // style only set globally — survives.
+        assert_eq!(merged.style, Some(Provider::OpenAI));
+        // headers + extra: both keys present (key-by-key merge).
+        assert_eq!(merged.headers.get("A").map(|s| s.as_str()), Some("1"));
+        assert_eq!(merged.headers.get("B").map(|s| s.as_str()), Some("2"));
+        assert!(merged.extra.contains_key("x") && merged.extra.contains_key("y"));
+    }
+
+    #[test]
+    fn merge_same_key_per_call_overrides() {
+        // Same header/extra key: per-call value wins.
+        let global = AiOverride {
+            headers: [("A".to_string(), "old".to_string())].into(),
+            extra: [("k".to_string(), Value::Str("old".to_string()))].into(),
+            ..AiOverride::default()
+        };
+        let per_call = AiOverride {
+            headers: [("A".to_string(), "new".to_string())].into(),
+            extra: [("k".to_string(), Value::Str("new".to_string()))].into(),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&per_call);
+        assert_eq!(merged.headers.get("A").map(|s| s.as_str()), Some("new"));
+        match merged.extra.get("k") {
+            Some(Value::Str(s)) => assert_eq!(s, "new"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn merge_extra_into_body_overrides() {
+        // merge_extra lets a user field override a default body field (max_tokens).
+        let mut body = BTreeMap::new();
+        body.insert("model".to_string(), Value::Str("m".to_string()));
+        body.insert("max_tokens".to_string(), Value::Int(4096));
+        let mut extra = BTreeMap::new();
+        extra.insert("max_tokens".to_string(), Value::Int(100));
+        extra.insert("provider".to_string(), Value::Str("zai".to_string()));
+        merge_extra(&mut body, &extra);
+        assert_eq!(as_int(body.get("max_tokens").unwrap()), Some(100));
+        assert_eq!(
+            as_str(body.get("provider").unwrap()).as_deref(),
+            Some("zai")
+        );
+        // untouched default stays.
+        assert_eq!(as_str(body.get("model").unwrap()).as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn header_overridden_is_case_insensitive() {
+        let mut h = BTreeMap::new();
+        h.insert("Authorization".to_string(), "Basic x".to_string());
+        assert!(header_overridden(&h, "authorization"));
+        assert!(!header_overridden(&h, "x-api-key"));
+    }
+
+    #[test]
+    fn style_from_str() {
+        assert_eq!(Provider::from_style("openai"), Some(Provider::OpenAI));
+        assert_eq!(Provider::from_style("GPT"), Some(Provider::OpenAI));
+        assert_eq!(Provider::from_style("anthropic"), Some(Provider::Anthropic));
+        assert_eq!(Provider::from_style("claude"), Some(Provider::Anthropic));
+        assert_eq!(Provider::from_style("grok"), None);
+    }
+
+    #[test]
+    fn resolve_key_custom_url_requires_explicit() {
+        // SECURITY (PR #205 P1): on a custom url, a provider key must NOT be used
+        // as a fallback — only an explicit key. Otherwise $OPENAI_API_KEY would
+        // leak to a third-party host (Z.AI/OpenRouter).
+        let s = |x: &str| Some(x.to_string());
+
+        // custom url + explicit key -> the explicit key is used.
+        match resolve_key(true, s("sk-explicit"), s("sk-provider"), Provider::OpenAI) {
+            Ok(k) => assert_eq!(k, "sk-explicit"),
+            Err(_) => panic!("explicit key should be accepted"),
+        }
+        // custom url + NO explicit key, but a provider key IS present -> ERROR,
+        // and the provider key is NOT leaked.
+        match resolve_key(true, None, s("sk-provider-leak"), Provider::OpenAI) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("custom url"), "{}", e);
+                assert!(!e.contains("sk-provider-leak"), "key must not leak: {}", e);
+            }
+            Ok(k) => panic!(
+                "must not fall back to provider key on custom url: got {}",
+                k
+            ),
+            Err(_) => panic!("expected Flow::Error"),
+        }
+        // custom url + nothing at all -> error.
+        match resolve_key(true, None, None, Provider::Anthropic) {
+            Err(Flow::Error(_)) => {}
+            _ => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn resolve_key_default_url_falls_back_to_provider() {
+        // On the DEFAULT url the provider key is the normal zero-config fallback.
+        let s = |x: &str| Some(x.to_string());
+        // explicit wins when present.
+        match resolve_key(false, s("sk-explicit"), s("sk-provider"), Provider::OpenAI) {
+            Ok(k) => assert_eq!(k, "sk-explicit"),
+            Err(_) => panic!("explicit should win"),
+        }
+        // no explicit -> provider key.
+        match resolve_key(false, None, s("sk-provider"), Provider::OpenAI) {
+            Ok(k) => assert_eq!(k, "sk-provider"),
+            Err(_) => panic!("provider key should be used on default url"),
+        }
+        // nothing -> error.
+        match resolve_key(false, None, None, Provider::OpenAI) {
+            Err(Flow::Error(e)) => assert!(e.contains("key not found"), "{}", e),
+            _ => panic!("expected error"),
+        }
+    }
+
     #[test]
     fn ai_timeout_resolve() {
         // issue #92: default 120s, configured with $AI_TIMEOUT, 0/negative — no timeout.
@@ -1152,6 +1687,304 @@ mod tests {
             served
         });
         (addr, handle)
+    }
+
+    // Like serve_responses but for ONE request — returns the captured raw request
+    // text (head + body) so a test can assert on the URL path, headers, and the
+    // JSON body the battery sent. Used by the issue #199 override e2e tests.
+    fn serve_capture(response: String) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut data = Vec::new();
+            let mut buf = [0u8; 4096];
+            let total = loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break None;
+                }
+                data.extend_from_slice(&buf[..n]);
+                if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&data[..pos]).to_lowercase();
+                    let cl = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    break Some(pos + 4 + cl);
+                }
+            };
+            if let Some(total) = total {
+                while data.len() < total {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                }
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&data).to_string()
+        });
+        (addr, handle)
+    }
+
+    // A minimal OpenAI-style 200 response with the given text.
+    fn openai_200(text: &str) -> String {
+        let body = format!(
+            "{{\"choices\":[{{\"finish_reason\":\"stop\",\"message\":{{\"role\":\"assistant\",\"content\":\"{}\"}}}}],\"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1}}}}",
+            text
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    #[test]
+    fn config_override_url_style_extra_headers() {
+        // issue #199 e2e: ai.config selects the OpenAI wire format, swaps the URL
+        // to a local server, adds a header + an extra body field. ai.ask must hit
+        // THAT url and the request must carry the override. Key is given inline
+        // (no env) so this is independent of the environment.
+        let (addr, handle) = serve_capture(openai_200("hi from glm"));
+        let url = format!("http://{}/api/paas/v4/chat/completions", addr);
+
+        let interp = Interp::new();
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Title".to_string(), Value::Str("Fluxon".to_string()));
+        let mut extra = BTreeMap::new();
+        extra.insert("provider".to_string(), Value::Str("zai".to_string()));
+        let cfg = opts(&[
+            ("url", Value::Str(url.clone())),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-test".to_string())),
+            ("model", Value::Str("glm-4.6".to_string())),
+            ("headers", Value::Map(headers)),
+            ("extra", Value::Map(extra)),
+        ]);
+        // ai.config {...}  (Flow has no Debug -> match, not .expect)
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        // ai.ask "hi"
+        let out = match interp.ai_dispatch("ask", vec![Value::Str("hi".to_string())]) {
+            Ok(v) => v,
+            Err(_) => panic!("ai.ask failed"),
+        };
+        match out {
+            Value::Str(s) => assert_eq!(s, "hi from glm"),
+            _ => panic!("expected str"),
+        }
+
+        let req = handle.join().unwrap();
+        let lower = req.to_lowercase();
+        // hit the custom path.
+        assert!(
+            req.contains("POST /api/paas/v4/chat/completions"),
+            "request line: {}",
+            req.lines().next().unwrap_or("")
+        );
+        // OpenAI wire format: Bearer auth, model + the extra body field present.
+        assert!(lower.contains("authorization: bearer sk-test"), "{}", req);
+        assert!(lower.contains("x-title: fluxon"), "{}", req);
+        assert!(req.contains("\"model\":\"glm-4.6\""), "{}", req);
+        assert!(req.contains("\"provider\":\"zai\""), "{}", req);
+        // content-type emitted exactly once (not duplicated by the extra-header
+        // path) when the user did NOT override it.
+        assert_eq!(
+            lower.matches("content-type:").count(),
+            1,
+            "exactly one content-type header: {}",
+            req
+        );
+    }
+
+    #[test]
+    fn content_type_override_not_duplicated() {
+        // A user-supplied content-type REPLACES the default (no duplicate header).
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "Content-Type".to_string(),
+            Value::Str("application/json; charset=utf-8".to_string()),
+        );
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk".to_string())),
+            ("headers", Value::Map(headers)),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string())])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+        let req = handle.join().unwrap().to_lowercase();
+        // exactly one content-type, and it is the user's value.
+        assert_eq!(
+            req.matches("content-type:").count(),
+            1,
+            "no duplicate content-type: {}",
+            req
+        );
+        assert!(req.contains("content-type: application/json; charset=utf-8"));
+    }
+
+    #[test]
+    fn inline_key_wins_over_env() {
+        // Regression for PR #205 review (P2): an inline `key` must win over a key
+        // present in the environment, otherwise a per-call/config override on a
+        // deployment that already has $AI_KEY/$OPENAI_API_KEY set would keep
+        // sending the env key (wrong provider). We don't touch the env here: the
+        // test machine may have a standard key set, but the inline `key` must be
+        // the one on the wire regardless. (generic = ov.key.or(env), so a Some
+        // inline key short-circuits before the env is read.)
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-inline-wins".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string())])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+        let req = handle.join().unwrap().to_lowercase();
+        assert!(
+            req.contains("authorization: bearer sk-inline-wins"),
+            "inline key must be on the wire: {}",
+            req
+        );
+    }
+
+    #[test]
+    fn header_keys_case_insensitive_across_merge() {
+        // Regression for PR #205 review (P2): a global `ai.config` header and a
+        // per-call header that differ ONLY in case must NOT both reach the wire
+        // (HTTP names are case-insensitive; duplicates confuse gateways). The
+        // per-call value must win, as a single header.
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        // Global config sets `Authorization` (capitalized) to a stale value.
+        let mut g_headers = BTreeMap::new();
+        g_headers.insert(
+            "Authorization".to_string(),
+            Value::Str("Bearer stale".to_string()),
+        );
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk".to_string())),
+            ("headers", Value::Map(g_headers)),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        // Per-call overrides the SAME header with different casing.
+        let mut p_headers = BTreeMap::new();
+        p_headers.insert(
+            "authorization".to_string(),
+            Value::Str("Bearer fresh".to_string()),
+        );
+        let per = opts(&[("headers", Value::Map(p_headers))]);
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string()), Value::Map(per)])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+        let req = handle.join().unwrap().to_lowercase();
+        // Exactly one authorization header, and it is the per-call value. (The
+        // default Bearer is also skipped because authorization is overridden.)
+        assert_eq!(
+            req.matches("authorization:").count(),
+            1,
+            "exactly one authorization header: {}",
+            req
+        );
+        assert!(req.contains("authorization: bearer fresh"), "{}", req);
+        assert!(!req.contains("bearer stale"), "{}", req);
+    }
+
+    #[test]
+    fn per_call_opts_override_global_config() {
+        // Per-call opts win over ai.config: config points at one model, the call
+        // overrides it (and the URL to the live test server).
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+
+        let interp = Interp::new();
+        // Global config: openai style + key, but a stale model + a dummy url.
+        let global = opts(&[
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-global".to_string())),
+            ("model", Value::Str("stale".to_string())),
+            ("url", Value::Str("http://127.0.0.1:1/dead".to_string())),
+        ]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(global)])
+            .is_err()
+        {
+            panic!("ai.config failed");
+        }
+        // Per-call: override url + model.
+        let per = opts(&[
+            ("url", Value::Str(url)),
+            ("model", Value::Str("glm-4.6".to_string())),
+        ]);
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string()), Value::Map(per)])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+
+        let req = handle.join().unwrap();
+        // The per-call model won; the global key survived (merge).
+        assert!(req.contains("\"model\":\"glm-4.6\""), "{}", req);
+        assert!(
+            req.to_lowercase()
+                .contains("authorization: bearer sk-global"),
+            "{}",
+            req
+        );
+    }
+
+    #[test]
+    fn default_override_is_empty() {
+        // issue #199 acceptance (byte-for-byte unchanged): with no ai.config and
+        // no per-call opts, the effective override is fully empty — every field
+        // None / no headers / no extra. So `ai_config` falls through to exactly
+        // the same env+default path as before this feature: same URL, same
+        // headers, no extra body. (Env-independent: we assert the override, not a
+        // resolved URL, to avoid depending on the test machine's env.)
+        let interp = Interp::new();
+        let eff = interp.effective_override(&AiOverride::default());
+        assert!(eff.url.is_none());
+        assert!(eff.style.is_none());
+        assert!(eff.key.is_none());
+        assert!(eff.model.is_none());
+        assert!(eff.headers.is_empty());
+        assert!(eff.extra.is_empty());
     }
 
     #[test]
