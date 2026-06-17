@@ -950,6 +950,12 @@ only the wire format — a GLM endpoint speaks OpenAI, so `style::openai` + a cu
 the scalars: `$AI_STYLE`, `$AI_BASE_URL` (alongside the existing `$AI_KEY` /
 `$AI_MODEL` / `$AI_PROVIDER`).
 
+> **A custom `url` requires an explicit `key`.** When you point at a custom host,
+> you must supply the key inline (`key:` / opts) or via `$AI_KEY`. A standard
+> provider key (`$OPENAI_API_KEY` / `$ANTHROPIC_API_KEY`) is **never** sent to a
+> custom URL — so an OpenAI key in your environment can't leak to Z.AI/OpenRouter.
+> Custom URL with no explicit key is a clear error before any network call.
+
 ### 9.4 `reg` — function registry (dynamic dispatch)
 
 Storing and calling a function **by its string name**. Essential for agent tools:

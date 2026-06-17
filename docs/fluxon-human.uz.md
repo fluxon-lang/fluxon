@@ -889,6 +889,81 @@ each i in 1..10                          # maksimum 10 qadam
 > nazoratsiz bajartirsa, logging/narx/tasdiq qila olmas edingiz. Loop sizniki —
 > shuning uchun har tool chaqiruvini ko'rasiz va boshqarasiz.
 
+**Boshqa provayderlarga ulanish (ilg'or).** Yuqoridagilarning hammasi **hech
+qanday sozlamasiz** ishlaydi — `.env`'dagi standart kalit yetarli, va ko'pchilik
+dasturlar bundan nariga o'tmaydi. Lekin `ai` battery istalgan **OpenAI-mos** API
+bilan ham gaplashadi (Z.AI / GLM, OpenRouter, Ollama, vLLM, LM Studio, Azure,
+Groq, …). So'rovning farq qiladigan qismlarini override qilasiz, **qolgani
+o'zgarmaydi** — override bermaganda default xulq byte-ma-byte aynan oldingidek.
+
+Ikki yo'l bor, ular birga ishlaydi (per-call global'dan ustun):
+
+`ai.config {…}` — global default'larni dasturning boshida bir marta o'rnatadi
+(`http.cors` kabi; `http.serve`'dan oldin chaqiring). Kalitlar, hammasi ixtiyoriy:
+
+| kalit     | ma'nosi                                                        |
+|-----------|----------------------------------------------------------------|
+| `url`     | to'liq endpoint URL (provayder default'ini almashtiradi)       |
+| `style`   | wire format: `:openai` yoki `:anthropic` (so'rov/javob shakli) |
+| `key`     | API kalit (`$AI_KEY` roli, inline)                            |
+| `model`   | model nomi (`$AI_MODEL` roli, inline)                         |
+| `headers` | qo'shimcha HTTP header'lar, default'larga **merge** bo'ladi (hyphenli nomlar — `HTTP-Referer` kabi — **string kalit** bo'lishi shart) |
+| `extra`   | qo'shimcha so'rov-body maydonlari, JSON'ga **merge** bo'ladi   |
+
+> Map kaliti yalang'och identifikator, `-` bo'la olmaydi. Hyphenli HTTP header
+> nomlari shu sababli **string kalit** bo'lishi shart:
+> `{"HTTP-Referer": "…" "X-Title": "…"}`. Header nomlari katta-kichik harfga
+> bog'liqsiz solishtiriladi (va kichik harfda yuboriladi), shuning uchun per-call
+> header global'ni harf registridan qat'i nazar almashtiradi.
+
+```fluxon
+# GLM (Z.AI): OpenAI wire format boshqa URL'da — butun o'zgarish shu.
+ai.config {
+  style: :openai
+  url:   "https://api.z.ai/api/paas/v4/chat/completions"
+  key:   env.ZAI_KEY
+  model: "glm-4.6"
+}
+javob = ai.ask "Salom, dunyo"          # endi Z.AI'ga ketadi
+
+# OpenRouter: qo'shimcha body param'lar + tavsiya etilgan header'lar.
+ai.config {
+  style:   :openai
+  url:     "https://openrouter.ai/api/v1/chat/completions"
+  key:     env.OPENROUTER_KEY
+  model:   "anthropic/claude-3.5-sonnet"
+  headers: {"HTTP-Referer": "https://myapp.dev" "X-Title": "Mening App"}
+  extra:   {provider: {sort: "throughput"}}   # OpenRouter'ga xos sozlama
+}
+```
+
+Istalgan `ai.ask`/`ai.json`/`ai.run` oxiridagi **opts map** o'sha bitta chaqiruv
+uchun global config'ni override qiladi (xuddi shu kalitlar). Bermasangiz chaqiruv
+aynan oldingidek ishlaydi — bu sof qo'shimcha:
+
+```fluxon
+# O'sha global config, lekin bu bitta chaqiruv arzonroq/tezroq model ishlatadi.
+r = ai.ask "tez tekshiruv" {model: "glm-4.5-air"}
+r = ai.json prompt schema {model: "glm-4.6"}
+r = ai.run msgs tools {extra: {temperature: 0}}
+# ai.run'ga tools'siz opts berish uchun tools o'rniga nil:
+r = ai.run msgs nil {model: "glm-4.6"}
+```
+
+`headers` va `extra` kalit-ma-kalit **merge** bo'ladi (siz bergan kalit ustun,
+qolган default'lar saqlanadi), `url`/`style`/`key`/`model` esa **almashtiradi**.
+`style` faqat wire format'ni tanlaydi — GLM endpoint OpenAI'da gaplashadi,
+shuning uchun `style::openai` + custom `url` yetarli; rasmiy OpenAI kaliti kerak
+emas. Skalyarlar uchun env ekvivalentlari bor: `$AI_STYLE`, `$AI_BASE_URL`
+(mavjud `$AI_KEY` / `$AI_MODEL` / `$AI_PROVIDER` yonida).
+
+> **Custom `url` aniq `key` talab qiladi.** Custom host'ga yo'naltirganda kalitni
+> inline (`key:` / opts) yoki `$AI_KEY` orqali berishingiz shart. Standart
+> provayder kaliti (`$OPENAI_API_KEY` / `$ANTHROPIC_API_KEY`) custom URL'ga
+> **hech qachon** yuborilmaydi — shuning uchun muhitingizdagi OpenAI kaliti
+> Z.AI/OpenRouter'ga sizib chiqmaydi. Custom URL + aniq kalitsiz holat — har
+> qanaqa network chaqiruvidan oldin aniq xato.
+
 ### 9.4 `reg` — funksiya registri (dinamik dispatch)
 
 Funksiyani **string nomi bilan** saqlash va chaqirish. Agent tool'lari uchun

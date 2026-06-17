@@ -8,8 +8,10 @@
 # Pick ONE provider below and set its key, e.g.:
 #   export ZAI_KEY=...        # then: fluxon run examples/ai_providers.fx
 #
-# NOTE: this calls the real API (spends tokens). Without a key it errors clearly
-# and never reaches the network.
+# NOTE: this calls the real API (spends tokens). A custom `url` REQUIRES an
+# explicit `key` — a standard provider key ($OPENAI_API_KEY/$ANTHROPIC_API_KEY)
+# is never sent to a custom host. Without a key it errors clearly and never
+# reaches the network.
 
 use ai
 

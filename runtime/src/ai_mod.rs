@@ -325,20 +325,31 @@ impl Interp {
     // global `ai.config` + per-call opts). Nothing is mandatory — the order:
     //   1) the wire style: opts/config `style` ?? $AI_STYLE ?? $AI_PROVIDER ??
     //      auto-detect from the available standard key.
-    //   2) the key: opts/config `key` ?? $AI_KEY ?? the provider's standard key.
-    //   3) the model: opts/config `model` ?? $AI_MODEL ?? provider default.
-    //   4) the URL: opts/config `url` ?? $AI_BASE_URL ?? provider default.
+    //   2) the URL: opts/config `url` ?? $AI_BASE_URL ?? provider default.
+    //   3) the key: opts/config `key` ?? $AI_KEY ?? (ONLY on the default URL)
+    //      the provider's standard key.
+    //   4) the model: opts/config `model` ?? $AI_MODEL ?? provider default.
     // `style` only selects the request/response FORMAT (so a GLM endpoint can use
     // the OpenAI format with a custom URL) — it does NOT force a particular key.
+    //
+    // SECURITY: the standard provider keys ($OPENAI_API_KEY / $ANTHROPIC_API_KEY)
+    // that we read from the environment are sent ONLY to that provider's OWN
+    // default endpoint. A CUSTOM url (override or $AI_BASE_URL) requires an
+    // EXPLICIT key (inline `key` / $AI_KEY) — we never fall back to a provider
+    // key for a custom host, so the auto-detected env key can't leak to e.g.
+    // Z.AI/OpenRouter. Custom url + no explicit key => clear error.
+    // NOTE: this guards the AUTO-DETECTED key only. `headers`/`extra` are an
+    // explicit, unguarded escape hatch — whatever a user puts there (including an
+    // auth header) is sent as-is to whatever url they chose; that's on them.
     fn ai_config(&self, ov: &AiOverride) -> Result<AiConfig, Flow> {
         let anthropic = self.ai_env("ANTHROPIC_API_KEY");
         let openai = self.ai_env("OPENAI_API_KEY");
-        // Generic provider-agnostic key (the GLM/OpenRouter case: only `key` +
+        // Explicit, provider-agnostic key (the GLM/OpenRouter case: only `key` +
         // `url`). The INLINE override wins over $AI_KEY — consistent with
         // url/style/model, and required so a per-call/config `{key:...}` can
         // actually retarget a deployment that already has $AI_KEY set (otherwise
         // it would keep authenticating against the env key / wrong provider).
-        let generic = ov.key.clone().or_else(|| self.ai_env("AI_KEY"));
+        let explicit_key = ov.key.clone().or_else(|| self.ai_env("AI_KEY"));
         // Wire style: the inline `style` override wins, then $AI_STYLE, then the
         // legacy $AI_PROVIDER (kept for backward compatibility).
         let forced_style = self
@@ -361,7 +372,7 @@ impl Interp {
                         Provider::Anthropic
                     } else if openai.is_some() {
                         Provider::OpenAI
-                    } else if generic.is_some() {
+                    } else if explicit_key.is_some() {
                         Provider::Anthropic
                     } else {
                         return Err(Flow::err(
@@ -374,20 +385,23 @@ impl Interp {
             }
         };
 
-        // Pick the key matching the provider. The generic key (inline `key` or
-        // $AI_KEY) is always the top override — needed for GLM/OpenRouter, where
-        // the standard provider key is absent.
+        // URL: inline override ?? $AI_BASE_URL ?? provider default. Resolved
+        // BEFORE the key, because a custom URL changes how the key is resolved.
+        let default_url = match provider {
+            Provider::Anthropic => ANTHROPIC_URL,
+            Provider::OpenAI => OPENAI_URL,
+        };
+        let custom_url = ov.url.clone().or_else(|| self.ai_env("AI_BASE_URL"));
+        let is_custom = custom_url.is_some();
+        let url = custom_url.unwrap_or_else(|| default_url.to_string());
+
+        // Key resolution (security-critical) is a pure function so it can be
+        // tested without touching the environment.
         let provider_key = match provider {
             Provider::Anthropic => anthropic,
             Provider::OpenAI => openai,
         };
-        let key = generic.or(provider_key).ok_or_else(|| {
-            Flow::err(format!(
-                "ai: {} key not found (set ${}, $AI_KEY, or ai.config key)",
-                provider_name(provider),
-                provider_key_name(provider),
-            ))
-        })?;
+        let key = resolve_key(is_custom, explicit_key, provider_key, provider)?;
 
         // Model: inline override ?? $AI_MODEL ?? provider default.
         let model = ov
@@ -395,16 +409,6 @@ impl Interp {
             .clone()
             .or_else(|| self.ai_env("AI_MODEL"))
             .unwrap_or_else(|| provider.default_model().to_string());
-
-        // URL: inline override ?? $AI_BASE_URL ?? provider default.
-        let url = ov
-            .url
-            .clone()
-            .or_else(|| self.ai_env("AI_BASE_URL"))
-            .unwrap_or_else(|| match provider {
-                Provider::Anthropic => ANTHROPIC_URL.to_string(),
-                Provider::OpenAI => OPENAI_URL.to_string(),
-            });
 
         Ok(AiConfig {
             provider,
@@ -1203,6 +1207,40 @@ fn provider_key_name(p: Provider) -> &'static str {
     }
 }
 
+// Resolves the API key — security-critical, so it is a pure function (tested
+// without env). `explicit` is an inline `key` or $AI_KEY (provider-agnostic);
+// `provider_key` is the standard $OPENAI_API_KEY/$ANTHROPIC_API_KEY.
+//
+// On a CUSTOM url, ONLY the explicit key is allowed: we MUST NOT fall back to a
+// provider key, or we would send e.g. $OPENAI_API_KEY to a third-party host
+// (Z.AI/OpenRouter) — a credential leak. On the DEFAULT (official) url, the
+// provider key is the normal zero-config fallback.
+fn resolve_key(
+    is_custom: bool,
+    explicit: Option<String>,
+    provider_key: Option<String>,
+    provider: Provider,
+) -> Result<String, Flow> {
+    if is_custom {
+        explicit.ok_or_else(|| {
+            Flow::err(
+                "ai: a custom url needs an explicit key — set `key` in ai.config \
+                 / the call opts, or $AI_KEY (a provider key like $OPENAI_API_KEY \
+                 is never sent to a custom host)"
+                    .to_string(),
+            )
+        })
+    } else {
+        explicit.or(provider_key).ok_or_else(|| {
+            Flow::err(format!(
+                "ai: {} key not found (set ${}, $AI_KEY, or ai.config key)",
+                provider_name(provider),
+                provider_key_name(provider),
+            ))
+        })
+    }
+}
+
 // Converts an Anthropic-shaped message into the OpenAI shape.
 //   {role:"user" content:"..."}                       -> unchanged
 //   {role:"user" content:[{type:tool_result tool_use_id content}]}
@@ -1509,6 +1547,59 @@ mod tests {
         assert_eq!(Provider::from_style("anthropic"), Some(Provider::Anthropic));
         assert_eq!(Provider::from_style("claude"), Some(Provider::Anthropic));
         assert_eq!(Provider::from_style("grok"), None);
+    }
+
+    #[test]
+    fn resolve_key_custom_url_requires_explicit() {
+        // SECURITY (PR #205 P1): on a custom url, a provider key must NOT be used
+        // as a fallback — only an explicit key. Otherwise $OPENAI_API_KEY would
+        // leak to a third-party host (Z.AI/OpenRouter).
+        let s = |x: &str| Some(x.to_string());
+
+        // custom url + explicit key -> the explicit key is used.
+        match resolve_key(true, s("sk-explicit"), s("sk-provider"), Provider::OpenAI) {
+            Ok(k) => assert_eq!(k, "sk-explicit"),
+            Err(_) => panic!("explicit key should be accepted"),
+        }
+        // custom url + NO explicit key, but a provider key IS present -> ERROR,
+        // and the provider key is NOT leaked.
+        match resolve_key(true, None, s("sk-provider-leak"), Provider::OpenAI) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("custom url"), "{}", e);
+                assert!(!e.contains("sk-provider-leak"), "key must not leak: {}", e);
+            }
+            Ok(k) => panic!(
+                "must not fall back to provider key on custom url: got {}",
+                k
+            ),
+            Err(_) => panic!("expected Flow::Error"),
+        }
+        // custom url + nothing at all -> error.
+        match resolve_key(true, None, None, Provider::Anthropic) {
+            Err(Flow::Error(_)) => {}
+            _ => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn resolve_key_default_url_falls_back_to_provider() {
+        // On the DEFAULT url the provider key is the normal zero-config fallback.
+        let s = |x: &str| Some(x.to_string());
+        // explicit wins when present.
+        match resolve_key(false, s("sk-explicit"), s("sk-provider"), Provider::OpenAI) {
+            Ok(k) => assert_eq!(k, "sk-explicit"),
+            Err(_) => panic!("explicit should win"),
+        }
+        // no explicit -> provider key.
+        match resolve_key(false, None, s("sk-provider"), Provider::OpenAI) {
+            Ok(k) => assert_eq!(k, "sk-provider"),
+            Err(_) => panic!("provider key should be used on default url"),
+        }
+        // nothing -> error.
+        match resolve_key(false, None, None, Provider::OpenAI) {
+            Err(Flow::Error(e)) => assert!(e.contains("key not found"), "{}", e),
+            _ => panic!("expected error"),
+        }
     }
 
     #[test]
