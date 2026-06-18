@@ -407,6 +407,7 @@ verify in `http.before`, put claims in `req.ctx`, read in the handler.
 ```fluxon
 crypto.sha256 s        # → SHA-256 hex (lowercase)
 crypto.hmac key msg    # → HMAC-SHA256 hex — verify webhook signatures (Stripe/GitHub/Telegram)
+crypto.hmac key msg {raw:true}  # → HMAC-SHA256 bytes — binary key chaining (AWS SigV4 signing key)
 crypto.b64 s           # → base64 (standard alphabet, padded)
 crypto.b64d s          # → decode base64 (padding optional, url-safe accepted), or err
 crypto.b64db s         # → decode base64 to bytes (binary-safe: images/files)
@@ -417,6 +418,9 @@ crypto.uuid            # → UUID v4 (crypto-secure source)
 signature header a webhook sends. `crypto.b64d` errs on invalid base64 or
 non-UTF-8 output (no silent corruption) — for binary payloads use `crypto.b64db`.
 Inputs (`sha256`/`hmac`/`b64`/`hex`) take str OR bytes — hash a file the same way.
+`crypto.hmac … {raw:true}` returns the 32 raw bytes (not hex) AND `key` accepts
+bytes — so you can chain `HMAC(HMAC(…))` where each result keys the next, as AWS
+SigV4 signing-key derivation requires. Default (no `{raw}`) stays hex.
 
 ### reg (function registry — dynamic dispatch)
 Store/call a function by STRING name (for agent tools — NOT a `match`-switch,
@@ -452,6 +456,7 @@ str.len s · str.slice s a b · str.up s · str.low s · str.split s sep → lis
 str.has s sub → bool · str.int s · str.str x
 str.trim s · str.replace s old new · str.starts s pre → bool · str.ends s suf → bool
 str.pad s n ch → pads LEFT to n chars ("7"→"007") · str.repeat s n
+str.url_enc s → RFC 3986 percent-encode ("a/b c"→"a%2Fb%20c"; / and space too)
 str.cmp a b → -1|0|1 (lexicographic). `<` `>` `<=` `>=` also compare strings.
 math.floor x · math.ceil x · math.abs x · math.round x
 math.min a b · math.max a b · math.pow a b · math.sqrt x → flt
