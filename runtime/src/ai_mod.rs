@@ -887,35 +887,65 @@ async fn read_sse_stream(
             )));
         }
 
-        // Frame-by-frame read; accumulate raw bytes into a UTF-8 line buffer and
-        // pull out complete SSE events (separated by a blank line). A single
-        // `SseAccumulator` holds the parse state across frames.
+        // Frame-by-frame read. Accumulate raw BYTES (not text) into a line buffer
+        // and split on `\n` at the byte level — only decode a COMPLETE line as
+        // UTF-8. Decoding each frame separately (`from_utf8_lossy` per frame)
+        // would corrupt a multibyte char (emoji / CJK / Cyrillic) split across a
+        // frame boundary into U+FFFD (Codex P2 #210, same class as the json
+        // decoder fix). `\n` (0x0A) is ASCII and never appears inside a multibyte
+        // UTF-8 sequence, so splitting on the byte is safe, and each full line is
+        // a complete UTF-8 string (a char never crosses a line boundary in SSE).
+        // Cap a single un-terminated line. A real SSE line is well under this; an
+        // endless stream with NO `\n` would otherwise grow `buf` without bound
+        // (OOM/DoS on the request thread — the timeout does not fire while bytes
+        // keep arriving). 8 MiB is generous for any legitimate event.
+        const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut acc = SseAccumulator::new(provider);
-        let mut buf = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         while let Some(frame) = bodyr.frame().await {
             let frame = frame.map_err(|e| Flow::err(format!("ai: reading stream: {}", e)))?;
             let Ok(data) = frame.into_data() else {
                 continue; // trailers etc. — no body data
             };
-            buf.push_str(&String::from_utf8_lossy(&data));
-            // Emit every complete line; a trailing partial line stays in `buf`.
-            while let Some(nl) = buf.find('\n') {
-                let line: String = buf.drain(..=nl).collect();
+            buf.extend_from_slice(&data);
+            if buf.len() > MAX_SSE_LINE && !buf.contains(&b'\n') {
+                return Err(Flow::err(format!(
+                    "ai: stream line exceeded {} bytes without a newline",
+                    MAX_SSE_LINE
+                )));
+            }
+            // Emit every complete line; a trailing partial line stays in `buf`
+            // (it may end mid-char — we wait for the rest in the next frame).
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
                 let line = line.trim_end_matches(['\r', '\n']);
-                if let Some(delta) = acc.feed_line(line) {
-                    // A best-effort send: if the receiver hung up (callback
-                    // raised, the drain loop returned), stop reading.
-                    if tx.send(delta).is_err() {
-                        return acc.finish(model, 0);
+                match acc.feed_line(line) {
+                    Ok(Some(delta)) => {
+                        // A best-effort send: if the receiver hung up (callback
+                        // raised, the drain loop returned), stop reading.
+                        if tx.send(delta).is_err() {
+                            return acc.finish(model, 0);
+                        }
                     }
+                    Ok(None) => {}
+                    // A provider error event (e.g. Anthropic `type:"error"`,
+                    // overload mid-stream) — surface it instead of finishing with
+                    // a partial/empty success.
+                    Err(flow) => return Err(flow),
                 }
             }
         }
         // Flush any final buffered line (some servers omit a trailing newline).
-        if !buf.is_empty()
-            && let Some(delta) = acc.feed_line(buf.trim_end_matches(['\r', '\n']))
-        {
-            let _ = tx.send(delta);
+        if !buf.is_empty() {
+            let line = String::from_utf8_lossy(&buf);
+            match acc.feed_line(line.trim_end_matches(['\r', '\n'])) {
+                Ok(Some(delta)) => {
+                    let _ = tx.send(delta);
+                }
+                Ok(None) => {}
+                Err(flow) => return Err(flow),
+            }
         }
         acc.finish(model, started.elapsed().as_millis() as i64)
     };
@@ -958,18 +988,38 @@ impl SseAccumulator {
         }
     }
 
-    // Feeds one SSE line. Returns the new text delta, if any.
-    fn feed_line(&mut self, line: &str) -> Option<String> {
-        let data = line.strip_prefix("data:")?.trim();
+    // Feeds one SSE line. Returns Ok(Some(delta)) for new text, Ok(None) for a
+    // non-text event, or Err for a provider error event (must abort the stream).
+    fn feed_line(&mut self, line: &str) -> Result<Option<String>, Flow> {
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            return Ok(None);
+        };
         if data.is_empty() || data == "[DONE]" {
-            return None;
+            return Ok(None);
         }
         let Ok(Value::Map(ev)) = json_decode(data) else {
-            return None;
+            return Ok(None);
         };
+        // A provider error event mid-stream (a 200 response can still fail for
+        // overload/rate-limit). Surface it as an error so a failed generation does
+        // NOT look like a partial success. Detection is provider-agnostic:
+        //   - Anthropic: a top-level `{"type":"error", "error":{...}}`.
+        //   - OpenAI family (OpenAI / OpenRouter / GLM / Ollama / gateways): a
+        //     top-level `{"error":{...}}` with NO `type:"error"` — so checking the
+        //     Anthropic shape alone would silently drop it (the original fix
+        //     covered only Anthropic; this also covers the OpenAI-style providers
+        //     `ai.config` targets).
+        let is_error = ev.get("type").and_then(as_str).as_deref() == Some("error")
+            || matches!(ev.get("error"), Some(Value::Map(_)));
+        if is_error {
+            return Err(Flow::err(format!(
+                "ai: stream error event: {}",
+                truncate(&sse_error_message(&ev), 300)
+            )));
+        }
         match self.provider {
-            Provider::Anthropic => self.feed_anthropic(&ev),
-            Provider::OpenAI => self.feed_openai(&ev),
+            Provider::Anthropic => Ok(self.feed_anthropic(&ev)),
+            Provider::OpenAI => Ok(self.feed_openai(&ev)),
         }
     }
 
@@ -1070,6 +1120,18 @@ impl SseAccumulator {
             conf,
         })
     }
+}
+
+// Extracts a human-readable message from an SSE error event. Anthropic shape:
+// `{"type":"error","error":{"type":"overloaded_error","message":"..."}}`. Falls
+// back to the whole event JSON if no nested message is present.
+fn sse_error_message(ev: &BTreeMap<String, Value>) -> String {
+    if let Some(Value::Map(err)) = ev.get("error")
+        && let Some(msg) = err.get("message").and_then(as_str)
+    {
+        return msg;
+    }
+    json_encode(&Value::Map(ev.clone()))
 }
 
 // Generic https POST (content-type: json). `add_headers` adds the
@@ -2617,37 +2679,52 @@ mod tests {
 
     // --- issue #201: streaming (SSE) ---
 
+    // feed_line returns Result<Option<String>, Flow> (Flow has no Debug -> no
+    // assert_eq on the Result). These helpers assert the Ok cases concisely.
+    fn fed_delta(acc: &mut SseAccumulator, line: &str) -> String {
+        match acc.feed_line(line) {
+            Ok(Some(d)) => d,
+            Ok(None) => panic!("expected a delta for: {}", line),
+            Err(_) => panic!("unexpected stream error for: {}", line),
+        }
+    }
+    fn fed_none(acc: &mut SseAccumulator, line: &str) {
+        match acc.feed_line(line) {
+            Ok(None) => {}
+            Ok(Some(d)) => panic!("expected no delta, got {:?} for: {}", d, line),
+            Err(_) => panic!("unexpected stream error for: {}", line),
+        }
+    }
+
     #[test]
     fn sse_anthropic_accumulates_text_and_usage() {
         // Anthropic SSE: message_start (input usage) -> content_block_delta(s) ->
         // message_delta (stop_reason + output usage). feed_line yields each text
         // delta; finish builds the full AiResp.
         let mut acc = SseAccumulator::new(Provider::Anthropic);
-        assert_eq!(
-            acc.feed_line(
-                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12}}}"#
-            ),
-            None
+        fed_none(
+            &mut acc,
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12}}}"#,
         );
         assert_eq!(
-            acc.feed_line(
+            fed_delta(
+                &mut acc,
                 r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}"#
             ),
-            Some("Hel".to_string())
+            "Hel"
         );
         assert_eq!(
-            acc.feed_line(
+            fed_delta(
+                &mut acc,
                 r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}"#
             ),
-            Some("lo".to_string())
+            "lo"
         );
         // ping / unrelated events yield nothing.
-        assert_eq!(acc.feed_line(r#"data: {"type":"ping"}"#), None);
-        assert_eq!(
-            acc.feed_line(
-                r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#
-            ),
-            None
+        fed_none(&mut acc, r#"data: {"type":"ping"}"#);
+        fed_none(
+            &mut acc,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
         );
         let r = match acc.finish("claude-opus-4-8", 5) {
             Ok(r) => r,
@@ -2665,23 +2742,25 @@ mod tests {
         // chunk (empty choices) + [DONE].
         let mut acc = SseAccumulator::new(Provider::OpenAI);
         assert_eq!(
-            acc.feed_line(r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#),
-            Some("Hi".to_string())
+            fed_delta(
+                &mut acc,
+                r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#
+            ),
+            "Hi"
         );
         assert_eq!(
-            acc.feed_line(
+            fed_delta(
+                &mut acc,
                 r#"data: {"choices":[{"delta":{"content":" there"},"finish_reason":"stop"}]}"#
             ),
-            Some(" there".to_string())
+            " there"
         );
         // Final usage chunk — empty choices, carries token counts.
-        assert_eq!(
-            acc.feed_line(
-                r#"data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}"#
-            ),
-            None
+        fed_none(
+            &mut acc,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}"#,
         );
-        assert_eq!(acc.feed_line("data: [DONE]"), None);
+        fed_none(&mut acc, "data: [DONE]");
         let r = match acc.finish("gpt-4o", 9) {
             Ok(r) => r,
             Err(_) => panic!("finish failed"),
@@ -2695,10 +2774,64 @@ mod tests {
     fn sse_ignores_non_data_and_blank_lines() {
         // `event:` lines, comments, and blanks are not `data:` -> no delta.
         let mut acc = SseAccumulator::new(Provider::Anthropic);
-        assert_eq!(acc.feed_line("event: content_block_delta"), None);
-        assert_eq!(acc.feed_line(""), None);
-        assert_eq!(acc.feed_line(": this is a comment"), None);
-        assert_eq!(acc.feed_line("data:"), None); // empty data
+        fed_none(&mut acc, "event: content_block_delta");
+        fed_none(&mut acc, "");
+        fed_none(&mut acc, ": this is a comment");
+        fed_none(&mut acc, "data:"); // empty data
+    }
+
+    #[test]
+    fn sse_error_event_is_surfaced() {
+        // issue #201 (Codex P2): a 200 stream can still emit `type:"error"`
+        // mid-stream (overload/rate-limit). It must abort with the provider's
+        // message, not finish as a partial success.
+        let mut acc = SseAccumulator::new(Provider::Anthropic);
+        // some text arrived first...
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"par"}}"#
+            ),
+            "par"
+        );
+        // ...then the provider errors.
+        match acc.feed_line(
+            r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("stream error event"), "{}", e);
+                assert!(e.contains("Overloaded"), "message must surface: {}", e);
+            }
+            _ => panic!("a type:error event must be surfaced as an error"),
+        }
+    }
+
+    #[test]
+    fn sse_openai_error_chunk_is_surfaced() {
+        // issue #201 (review P1): OpenAI-family providers signal a mid-stream
+        // error as {"error":{...}} with NO top-level type:"error" — it must STILL
+        // be surfaced, not silently dropped into a partial success.
+        let mut acc = SseAccumulator::new(Provider::OpenAI);
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"choices":[{"delta":{"content":"par"}}]}"#
+            ),
+            "par"
+        );
+        match acc.feed_line(
+            r#"data: {"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+        ) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("stream error event"), "{}", e);
+                assert!(
+                    e.contains("rate limit exceeded"),
+                    "message must surface: {}",
+                    e
+                );
+            }
+            _ => panic!("an OpenAI error chunk must be surfaced as an error"),
+        }
     }
 
     // Builds a raw SSE HTTP response (200, text/event-stream) from a list of
@@ -2783,6 +2916,96 @@ mod tests {
             "{}",
             req
         );
+    }
+
+    // An SSE server that writes the response in raw byte SLICES, flushing +
+    // sleeping between them so the client receives them as SEPARATE frames. The
+    // split offsets are chosen to cut a multibyte UTF-8 char in half across a
+    // frame boundary (the Codex P2 regression scenario).
+    fn serve_chunked_bytes(
+        head_and_body: Vec<u8>,
+        splits: Vec<usize>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Drain the request (we don't assert on it here).
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let mut prev = 0;
+            for &at in &splits {
+                stream.write_all(&head_and_body[prev..at]).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(15));
+                prev = at;
+            }
+            stream.write_all(&head_and_body[prev..]).unwrap();
+            stream.flush().unwrap();
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn stream_preserves_utf8_across_frame_boundary() {
+        // issue #201 (Codex P2): a multibyte char split across two HTTP frames
+        // must NOT be corrupted to U+FFFD. We stream "héllo — салом 🚀" as OpenAI
+        // SSE and cut the body in the MIDDLE of multibyte chars at the byte level.
+        let text = "héllo — салом 🚀"; // é=2B, —=3B, Cyrillic=2B each, 🚀=4B
+        // Build the SSE body: one content delta with the text, then [DONE].
+        let mut body = String::new();
+        body.push_str("data: ");
+        body.push_str(&format!(
+            "{{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":\"stop\"}}]}}",
+            text
+        ));
+        body.push_str("\n\n");
+        body.push_str("data: [DONE]\n\n");
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let full: Vec<u8> = head.bytes().chain(body.bytes()).collect();
+
+        // Pick split offsets INSIDE the body that land mid-char. The 🚀 (4 bytes)
+        // is near the end; split one byte into it, and also split inside the first
+        // multibyte run. We find byte offsets of the rocket and a Cyrillic char.
+        let head_len = head.len();
+        let rocket_byte = head_len + body.find('🚀').unwrap() + 1; // 1 byte into 🚀
+        let cyr_byte = head_len + body.find('с').unwrap() + 1; // 1 byte into с
+        let mut splits = vec![cyr_byte, rocket_byte];
+        splits.sort();
+
+        let (addr, handle) = serve_chunked_bytes(full, splits);
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-test".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        let cb = Value::Native(std::sync::Arc::new(crate::value::NativeFn {
+            name: "noop".to_string(),
+            func: Box::new(|_args: Vec<Value>| Ok(Value::Nil)),
+        }));
+        let out = match interp.ai_dispatch("stream", vec![Value::Str("hi".to_string()), cb]) {
+            Ok(v) => v,
+            Err(_) => panic!("ai.stream failed"),
+        };
+        handle.join().unwrap();
+        // The full text round-trips intact — NO U+FFFD replacement characters.
+        match out {
+            Value::Str(s) => {
+                assert_eq!(s, text, "multibyte text must survive frame splitting");
+                assert!(!s.contains('\u{FFFD}'), "no replacement char: {:?}", s);
+            }
+            _ => panic!("expected str"),
+        }
     }
 
     #[test]

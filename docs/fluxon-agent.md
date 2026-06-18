@@ -377,6 +377,9 @@ thread, so `io.print`/`ws.send` inside it are normal.
 text = ai.stream "Explain async" \chunk -> io.print chunk        # terminal
 text = ai.stream q \chunk -> ws.send conn (json.enc {chunk:chunk})  # ws relay
 ```
+A mid-stream provider error (overload/rate-limit) raises — note some chunks may
+already have been delivered to the callback before it. Wrap in `try`/`catch` if
+you need to recover.
 
 `ai.run` — ONE step of a tool-loop (doesn't execute; returns what it wants to do;
 the loop is yours → logging/cost/approval control). Returns one of:
