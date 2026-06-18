@@ -46,7 +46,7 @@ http.on :get "/hello" \req ->
 http.serve 8080
 ```
 
-Mana ishlaydigan server — paket o'rnatish yo'q, ulanish kodi yo'q, boilerplate
+Mana ishlaydigan server — o'rnatish yo'q, ulanish kodi yo'q, boilerplate
 yo'q. LLM ham xuddi shunday yaqin: `ai.ask` / `ai.json` / `ai.run` — kalit
 so'zlar, SDK emas, provayderlar esa muhitdan avtomatik aniqlanadi.
 
