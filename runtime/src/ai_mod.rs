@@ -285,17 +285,35 @@ impl Interp {
     }
 
     // ai.config {url:.. style:.. key:.. model:.. headers:{..} extra:{..}}
-    // Sets the GLOBAL request overrides for every following `ai.*` call (issue
-    // #199). A top-level setup call (like `http.cors`): call it once, before
-    // `http.serve`. Calling it again REPLACES the stored config. Returns nil.
-    // With no/empty opts it clears any previous override.
+    // Sets the GLOBAL request overrides for every following `ai.*` call (issues
+    // #199, #200). A top-level setup call (like `http.cors`), but ALSO the
+    // runtime primitive a `/model` command is built on (issue #200): it can be
+    // called again at any point to switch provider/model/key on the fly — the
+    // next `ai.ask`/`ai.json`/`ai.run` uses the new configuration.
+    //
+    // SEMANTICS (issue #200): a non-empty `ai.config {..}` is a PARTIAL update —
+    // the given fields are merged ON TOP of the stored config, so
+    // `ai.config {model: pick}` switches only the model and keeps the key/url/
+    // style/headers/extra already set. (`headers`/`extra` merge key-by-key, like
+    // the per-call merge.) This is exactly what `/model` needs: list choices,
+    // the user picks one, apply just that field. To REPLACE/clear everything and
+    // fall back to the env defaults, call `ai.config {}` (or `ai.config nil`)
+    // with no fields. Returns nil.
     fn ai_config_set(&self, args: Vec<Value>) -> Result<Value, Flow> {
-        let ov = match args.first() {
-            Some(Value::Map(m)) => parse_override(m)?,
-            None | Some(Value::Nil) => AiOverride::default(),
+        let mut cur = self.ai_override.lock().unwrap();
+        match args.first() {
+            // A map with at least one field -> PARTIAL merge over the current
+            // config (model/key/... switch). An EMPTY map -> reset (clear).
+            Some(Value::Map(m)) if !m.is_empty() => {
+                let ov = parse_override(m)?;
+                *cur = cur.merge(&ov);
+            }
+            // No opts / nil / empty map -> clear back to the env/auto defaults.
+            None | Some(Value::Nil) | Some(Value::Map(_)) => {
+                *cur = AiOverride::default();
+            }
             _ => return Err(Flow::err("ai.config: opts (map) required".to_string())),
-        };
-        *self.ai_override.lock().unwrap() = ov;
+        }
         Ok(Value::Nil)
     }
 
@@ -1967,6 +1985,106 @@ mod tests {
             "{}",
             req
         );
+    }
+
+    #[test]
+    fn config_partial_merge_switches_one_field() {
+        // issue #200: ai.config is a PARTIAL update — calling it again with only
+        // `model` switches the model and KEEPS the key/url/style already set.
+        // This is the `/model` command primitive. We point both calls at two
+        // separate local servers (one per ai.ask) and assert each saw the right
+        // model + the SAME (carried-over) key.
+        let (addr1, h1) = serve_capture(openai_200("first"));
+        let (addr2, h2) = serve_capture(openai_200("second"));
+
+        let interp = Interp::new();
+        // Initial config: openai style + key + first url + model.
+        let initial = opts(&[
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-carry".to_string())),
+            ("url", Value::Str(format!("http://{}/v1/chat", addr1))),
+            ("model", Value::Str("model-a".to_string())),
+        ]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(initial)])
+            .is_err()
+        {
+            panic!("ai.config (initial) failed");
+        }
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string())])
+            .is_err()
+        {
+            panic!("ai.ask (1) failed");
+        }
+
+        // /model command: switch ONLY the model (and url, to reach server 2).
+        // key/style are NOT restated — the merge must carry them over.
+        let switch = opts(&[
+            ("model", Value::Str("model-b".to_string())),
+            ("url", Value::Str(format!("http://{}/v1/chat", addr2))),
+        ]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(switch)])
+            .is_err()
+        {
+            panic!("ai.config (switch) failed");
+        }
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi again".to_string())])
+            .is_err()
+        {
+            panic!("ai.ask (2) failed");
+        }
+
+        let req1 = h1.join().unwrap();
+        let req2 = h2.join().unwrap();
+        // First call: model-a, the key.
+        assert!(req1.contains("\"model\":\"model-a\""), "{}", req1);
+        assert!(
+            req1.to_lowercase()
+                .contains("authorization: bearer sk-carry"),
+            "{}",
+            req1
+        );
+        // Second call: model-b, but the SAME key carried over by the merge.
+        assert!(req2.contains("\"model\":\"model-b\""), "{}", req2);
+        assert!(
+            req2.to_lowercase()
+                .contains("authorization: bearer sk-carry"),
+            "key must carry over the partial config: {}",
+            req2
+        );
+    }
+
+    #[test]
+    fn config_empty_map_clears() {
+        // issue #200: ai.config {} (empty) RESETS to the env/auto defaults — the
+        // escape hatch from a partial-merge config. After a config with a custom
+        // key, an empty call must leave a fully empty override.
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-x".to_string())),
+            ("model", Value::Str("m".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        // Sanity: the override is set.
+        {
+            let ov = interp.ai_override.lock().unwrap();
+            assert!(ov.key.is_some(), "config should be set before clear");
+        }
+        // Empty map -> clear.
+        if interp
+            .ai_dispatch("config", vec![Value::Map(BTreeMap::new())])
+            .is_err()
+        {
+            panic!("ai.config {{}} failed");
+        }
+        let ov = interp.ai_override.lock().unwrap();
+        assert!(ov.key.is_none() && ov.model.is_none() && ov.style.is_none());
     }
 
     #[test]
