@@ -19,6 +19,11 @@ use super::values::Db;
 pub(crate) struct Pool {
     spec: String,               // the open specification passed to rusqlite
     flags: rusqlite::OpenFlags, // URI mode (shared-cache) when needed
+    // Optional `synchronous` override (e.g. "NORMAL"). Default (None) leaves
+    // SQLite at its safe default (FULL under WAL) — durability over speed.
+    // Opt in to NORMAL/OFF only when you knowingly trade durability for write
+    // throughput (e.g. caches, benchmarks). Parsed once from DATABASE_URL.
+    synchronous: Option<String>,
     idle: Mutex<Vec<Connection>>,
     // Keeps the :memory: shared-cache DB alive. Mutex — Connection is not Sync,
     // but Pool (inside Arc<dyn Db>) must be Sync.
@@ -44,6 +49,12 @@ impl Pool {
         let _ = conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         );
+        // Optional durability override. Default leaves SQLite at FULL (safe).
+        // The value is already validated in `parse_synchronous`, so this PRAGMA
+        // cannot carry arbitrary user input (no injection).
+        if let Some(sync) = &self.synchronous {
+            let _ = conn.execute_batch(&format!("PRAGMA synchronous={sync};"));
+        }
         Ok(conn)
     }
 }
@@ -57,6 +68,13 @@ pub struct SqliteDb {
 impl SqliteDb {
     // `rest` — the part of DATABASE_URL after `sqlite:`: a file path or `:memory:`.
     pub fn open(rest: &str) -> Result<Self, String> {
+        // Pull off a Fluxon-level `?synchronous=...` knob before handing the rest
+        // to rusqlite. We strip it ourselves (rather than relying on SQLite URI
+        // parsing) so it works for both plain paths and `file:` URIs, and so the
+        // value can be validated against SQL injection.
+        let (rest, synchronous) = parse_synchronous(rest)?;
+        let rest = rest.as_str();
+
         let is_mem = rest.is_empty() || rest == ":memory:" || rest == "memory:";
         // :memory: -> shared-cache URI (all connections see one DB).
         let (spec, flags) = if is_mem {
@@ -76,6 +94,7 @@ impl SqliteDb {
         let pool = Pool {
             spec,
             flags,
+            synchronous,
             idle: Mutex::new(Vec::new()),
             _keepalive: Mutex::new(None),
         };
@@ -95,6 +114,46 @@ impl SqliteDb {
     }
 }
 
+// Strips a `synchronous=<level>` query parameter out of the sqlite `rest` string
+// and validates it. Returns (rest_without_that_param, Option<level>).
+//
+// Accepts it as the sole `?synchronous=...` or as one of several `?a=b&...`
+// params; any OTHER params are preserved on the returned `rest` (so `file:` URI
+// options still reach rusqlite). Default — no param — yields None, leaving SQLite
+// at its safe FULL default.
+//
+// The level is validated against the fixed SQLite set, so the value spliced into
+// the `PRAGMA synchronous=...` batch can never be arbitrary input.
+fn parse_synchronous(rest: &str) -> Result<(String, Option<String>), String> {
+    let Some((base, query)) = rest.split_once('?') else {
+        return Ok((rest.to_string(), None));
+    };
+    let mut sync = None;
+    let mut kept = Vec::new();
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some((k, v)) if k.eq_ignore_ascii_case("synchronous") => {
+                let level = v.to_ascii_uppercase();
+                // SQLite's full set. OFF/NORMAL trade durability for write speed.
+                if !matches!(level.as_str(), "OFF" | "NORMAL" | "FULL" | "EXTRA") {
+                    return Err(format!(
+                        "invalid synchronous={v}: expected OFF, NORMAL, FULL, or EXTRA"
+                    ));
+                }
+                sync = Some(level);
+            }
+            _ => kept.push(pair),
+        }
+    }
+    // Rebuild `rest` without the synchronous param (keep other query options).
+    let rebuilt = if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    };
+    Ok((rebuilt, sync))
+}
+
 // ==================== backend selection (single config point) ====================
 
 pub fn open_from_env() -> Result<Arc<dyn Db>, String> {
@@ -108,5 +167,39 @@ pub fn open_from_env() -> Result<Arc<dyn Db>, String> {
             Err("mysql backend not connected yet (use DATABASE_URL=sqlite:...)".to_string())
         }
         _ => Err(format!("unknown DATABASE_URL scheme: {url}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_synchronous;
+
+    #[test]
+    fn no_param_keeps_path_and_defaults_to_none() {
+        let (rest, sync) = parse_synchronous("bench.db").unwrap();
+        assert_eq!(rest, "bench.db");
+        assert_eq!(sync, None);
+    }
+
+    #[test]
+    fn synchronous_is_stripped_and_uppercased() {
+        let (rest, sync) = parse_synchronous("bench.db?synchronous=normal").unwrap();
+        assert_eq!(rest, "bench.db");
+        assert_eq!(sync.as_deref(), Some("NORMAL"));
+    }
+
+    #[test]
+    fn other_query_params_are_preserved() {
+        // synchronous removed, cache=shared kept (so `file:` URI options survive).
+        let (rest, sync) = parse_synchronous("file:bench.db?cache=shared&synchronous=OFF").unwrap();
+        assert_eq!(rest, "file:bench.db?cache=shared");
+        assert_eq!(sync.as_deref(), Some("OFF"));
+    }
+
+    #[test]
+    fn invalid_level_is_rejected() {
+        // Guards the PRAGMA splice against arbitrary input.
+        let err = parse_synchronous("bench.db?synchronous=DROP TABLE").unwrap_err();
+        assert!(err.contains("invalid synchronous"), "got: {err}");
     }
 }

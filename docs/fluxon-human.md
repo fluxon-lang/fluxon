@@ -635,6 +635,14 @@ variable (default `sqlite:fluxon.db`). You write no connection code.
 > `postgres://`/`mysql://` URL currently errors out. The `db` API is written to be
 > backend-agnostic, so your code will not change when they land.
 
+> **Durability knob (SQLite).** Every connection runs in WAL mode with
+> `busy_timeout=5000`. The default `synchronous` is SQLite's safe `FULL` — each
+> commit is flushed to disk. For write-heavy workloads where durability can be
+> traded for throughput, opt in via the URL:
+> `DATABASE_URL=sqlite:app.db?synchronous=NORMAL` (accepts `OFF`, `NORMAL`,
+> `FULL`, `EXTRA`; any other value is rejected). `NORMAL` under WAL is a common,
+> well-understood trade-off; the safe default stays `FULL` unless you ask.
+
 ```fluxon
 use db
 

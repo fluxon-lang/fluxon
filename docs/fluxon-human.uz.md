@@ -646,6 +646,15 @@ Ulanish **avtomat**: `$DATABASE_URL` muhit o'zgaruvchisidan o'qiladi (default
 > qaytaradi. `db` API backend'dan mustaqil yozilgan, shuning uchun ular
 > qo'shilganda kodingiz o'zgarmaydi.
 
+> **Durability sozlamasi (SQLite).** Har connection WAL rejimida va
+> `busy_timeout=5000` bilan ishlaydi. `synchronous` default'i SQLite'ning
+> xavfsiz `FULL`'i — har commit diskka yoziladi (flush). Write'ga og'ir
+> yuklarda, durability'ni throughput'ga almashtirish kerak bo'lsa, URL orqali
+> tanlang: `DATABASE_URL=sqlite:app.db?synchronous=NORMAL` (qabul qiladi: `OFF`,
+> `NORMAL`, `FULL`, `EXTRA`; boshqa qiymat rad etiladi). WAL ostida `NORMAL` —
+> keng tarqalgan, yaxshi o'rganilgan murosa; siz so'ramaguncha default `FULL`
+> (xavfsiz) bo'lib qoladi.
+
 ```fluxon
 use db
 
