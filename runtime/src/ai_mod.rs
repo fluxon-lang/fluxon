@@ -128,14 +128,24 @@ impl AiOverride {
         let mut out = self.clone();
         // SECURITY (issue #200, Codex P1 + review): an inherited auth header is
         // only valid for the host/credential it was set for. If THIS merge
-        // retargets the request — a new `key`, `url`, or `style` — any auth
+        // CHANGES the target — a different `key`, `url`, or `style` — any auth
         // header carried over from `self` is STALE and must be dropped, or it
         // would be sent to the new host (a cross-host credential leak) and, via
         // `header_overridden`, suppress the auth header the new target should
-        // generate. The fix is not tied to `key` alone: the leak is reachable by
-        // a url- or style-only switch too. Explicit auth headers RESTATED by this
-        // switch survive — the re-insert loop below runs AFTER the drop.
-        let retargets = other.key.is_some() || other.url.is_some() || other.style.is_some();
+        // generate. The leak is reachable by a url- or style-only switch too, not
+        // just `key`.
+        //
+        // We compare the NEW value against `self` (not mere presence): restating
+        // the SAME url/style/key while changing only e.g. `model` is NOT a
+        // retarget, so it must keep the inherited auth header — otherwise a
+        // reusable profile map `{url style key model}` would lose its
+        // `headers.authorization` on every `/model` switch (Codex P2). Explicit
+        // auth headers RESTATED by this switch survive — the re-insert loop below
+        // runs AFTER the drop.
+        let changed = |new: &Option<String>, cur: &Option<String>| new.is_some() && new != cur;
+        let retargets = changed(&other.key, &self.key)
+            || changed(&other.url, &self.url)
+            || (other.style.is_some() && other.style != self.style);
         if retargets {
             out.headers.retain(|k, _| !is_auth_header(k));
         }
@@ -2699,6 +2709,37 @@ mod tests {
             Some("Bearer A"),
             "a model-only switch must keep the auth header"
         );
+    }
+
+    #[test]
+    fn config_restate_same_target_keeps_auth_header() {
+        // issue #200 (Codex P2): retarget is decided by VALUE change, not mere
+        // presence. A reusable profile map restates the SAME url/style/key while
+        // changing only `model` — that is NOT a retarget, so the inherited auth
+        // header must survive. (Mere-presence logic would wrongly strip it.)
+        let global = AiOverride {
+            style: Some(Provider::OpenAI),
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-1".to_string()),
+            model: Some("model-a".to_string()),
+            headers: [("authorization".to_string(), "Bearer GATEWAY".to_string())].into(),
+            ..AiOverride::default()
+        };
+        // Same url/style/key restated, only the model differs.
+        let switch = AiOverride {
+            style: Some(Provider::OpenAI),
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-1".to_string()),
+            model: Some("model-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(
+            merged.headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer GATEWAY"),
+            "restating the same target must keep the auth header"
+        );
+        assert_eq!(merged.model.as_deref(), Some("model-b"));
     }
 
     #[test]
