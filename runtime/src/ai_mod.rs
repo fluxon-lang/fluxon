@@ -148,6 +148,16 @@ impl AiOverride {
             || (other.style.is_some() && other.style != self.style);
         if retargets {
             out.headers.retain(|k, _| !is_auth_header(k));
+            // Also invalidate the inherited `key` field. SECURITY (Codex P1
+            // round 3): a switch like `ai.config {url:new key:env.NEW_KEY}` where
+            // NEW_KEY is unset parses `key` to nil -> `other.key` is None (nil is
+            // skipped for ergonomics). Without this, the partial merge would keep
+            // the PREVIOUS host's key and `ai_config` would send it to the new
+            // host. On a retarget the credential is host-scoped, so a missing new
+            // key must NOT silently reuse the old one — it falls through to the
+            // env / errors (same as the old replace semantics). If `other.key` IS
+            // set, the line below restores it (the explicit new key wins).
+            out.key = None;
         }
         if other.url.is_some() {
             out.url = other.url.clone();
@@ -2457,18 +2467,19 @@ mod tests {
 
     #[test]
     fn per_call_opts_override_global_config() {
-        // Per-call opts win over ai.config: config points at one model, the call
-        // overrides it (and the URL to the live test server).
+        // Per-call opts win over ai.config: config points at one model + the live
+        // url; the call overrides ONLY the model (same host, so the global key is
+        // correctly reused — a model change is not a retarget).
         let (addr, handle) = serve_capture(openai_200("ok"));
         let url = format!("http://{}/v1/chat/completions", addr);
 
         let interp = Interp::new();
-        // Global config: openai style + key, but a stale model + a dummy url.
+        // Global config: openai style + key + the live url + a stale model.
         let global = opts(&[
             ("style", Value::Sym("openai".to_string())),
             ("key", Value::Str("sk-global".to_string())),
             ("model", Value::Str("stale".to_string())),
-            ("url", Value::Str("http://127.0.0.1:1/dead".to_string())),
+            ("url", Value::Str(url)),
         ]);
         if interp
             .ai_dispatch("config", vec![Value::Map(global)])
@@ -2476,11 +2487,8 @@ mod tests {
         {
             panic!("ai.config failed");
         }
-        // Per-call: override url + model.
-        let per = opts(&[
-            ("url", Value::Str(url)),
-            ("model", Value::Str("glm-4.6".to_string())),
-        ]);
+        // Per-call: override only the model.
+        let per = opts(&[("model", Value::Str("glm-4.6".to_string()))]);
         if interp
             .ai_dispatch("ask", vec![Value::Str("hi".to_string()), Value::Map(per)])
             .is_err()
@@ -2489,7 +2497,7 @@ mod tests {
         }
 
         let req = handle.join().unwrap();
-        // The per-call model won; the global key survived (merge).
+        // The per-call model won; the global key survived (merge, same host).
         assert!(req.contains("\"model\":\"glm-4.6\""), "{}", req);
         assert!(
             req.to_lowercase()
@@ -2501,20 +2509,19 @@ mod tests {
 
     #[test]
     fn config_partial_merge_switches_one_field() {
-        // issue #200: ai.config is a PARTIAL update — calling it again with only
-        // `model` switches the model and KEEPS the key/url/style already set.
-        // This is the `/model` command primitive. We point both calls at two
-        // separate local servers (one per ai.ask) and assert each saw the right
-        // model + the SAME (carried-over) key.
-        let (addr1, h1) = serve_capture(openai_200("first"));
-        let (addr2, h2) = serve_capture(openai_200("second"));
+        // issue #200: ai.config is a PARTIAL update — a `/model` switch changes
+        // ONLY the model and KEEPS the key/url/style already set (the same host,
+        // so the inherited key is correctly reused — not a retarget). Both calls
+        // hit the SAME local server; only the model differs between them.
+        let (addr, h) = serve_responses(vec![openai_200("first"), openai_200("second")]);
+        let url = format!("http://{}/v1/chat", addr);
 
         let interp = Interp::new();
-        // Initial config: openai style + key + first url + model.
+        // Initial config: openai style + key + url + model.
         let initial = opts(&[
             ("style", Value::Sym("openai".to_string())),
             ("key", Value::Str("sk-carry".to_string())),
-            ("url", Value::Str(format!("http://{}/v1/chat", addr1))),
+            ("url", Value::Str(url)),
             ("model", Value::Str("model-a".to_string())),
         ]);
         if interp
@@ -2523,50 +2530,33 @@ mod tests {
         {
             panic!("ai.config (initial) failed");
         }
-        if interp
-            .ai_dispatch("ask", vec![Value::Str("hi".to_string())])
-            .is_err()
-        {
-            panic!("ai.ask (1) failed");
+        // ai.ask -> model-a on the carried key.
+        match interp.ai_dispatch("ask", vec![Value::Str("hi".to_string())]) {
+            Ok(Value::Str(s)) => assert_eq!(s, "first"),
+            _ => panic!("ai.ask (1) failed"),
         }
 
-        // /model command: switch ONLY the model (and url, to reach server 2).
-        // key/style are NOT restated — the merge must carry them over.
-        let switch = opts(&[
-            ("model", Value::Str("model-b".to_string())),
-            ("url", Value::Str(format!("http://{}/v1/chat", addr2))),
-        ]);
+        // /model command: switch ONLY the model — same host, so key/url/style
+        // carry over (a model change is not a retarget).
+        let switch = opts(&[("model", Value::Str("model-b".to_string()))]);
         if interp
             .ai_dispatch("config", vec![Value::Map(switch)])
             .is_err()
         {
             panic!("ai.config (switch) failed");
         }
-        if interp
-            .ai_dispatch("ask", vec![Value::Str("hi again".to_string())])
-            .is_err()
-        {
-            panic!("ai.ask (2) failed");
+        // The carried key/url still reach the server, now with model-b.
+        match interp.ai_dispatch("ask", vec![Value::Str("hi again".to_string())]) {
+            Ok(Value::Str(s)) => assert_eq!(s, "second"),
+            _ => panic!("ai.ask (2) failed"),
         }
+        // Two requests reached the same server (the merge kept the url + key).
+        assert_eq!(h.join().unwrap(), 2, "both calls must hit the carried url");
 
-        let req1 = h1.join().unwrap();
-        let req2 = h2.join().unwrap();
-        // First call: model-a, the key.
-        assert!(req1.contains("\"model\":\"model-a\""), "{}", req1);
-        assert!(
-            req1.to_lowercase()
-                .contains("authorization: bearer sk-carry"),
-            "{}",
-            req1
-        );
-        // Second call: model-b, but the SAME key carried over by the merge.
-        assert!(req2.contains("\"model\":\"model-b\""), "{}", req2);
-        assert!(
-            req2.to_lowercase()
-                .contains("authorization: bearer sk-carry"),
-            "key must carry over the partial config: {}",
-            req2
-        );
+        // And the stored override now carries model-b with the original key/url.
+        let ov = interp.ai_override.lock().unwrap();
+        assert_eq!(ov.model.as_deref(), Some("model-b"));
+        assert_eq!(ov.key.as_deref(), Some("sk-carry"), "key carried over");
     }
 
     #[test]
@@ -2708,6 +2698,72 @@ mod tests {
             merged.headers.get("authorization").map(|s| s.as_str()),
             Some("Bearer A"),
             "a model-only switch must keep the auth header"
+        );
+    }
+
+    #[test]
+    fn config_url_switch_drops_inherited_key_when_new_key_nil() {
+        // issue #200 (Codex P1 round 3): switching to a new url where the new key
+        // resolves to nil (env unset -> parse_override skips it) must NOT keep the
+        // PREVIOUS host's key — the merge would otherwise reuse the old credential
+        // for the new host. On a retarget a missing new key drops the inherited
+        // one (falls through to env / errors, like the old replace semantics).
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-old".to_string()),
+            ..AiOverride::default()
+        };
+        // {url:new} with key nil -> parsed override has url set, key None.
+        let switch = AiOverride {
+            url: Some("https://host-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert!(
+            merged.key.is_none(),
+            "the old key must not carry over to a new host"
+        );
+        assert_eq!(merged.url.as_deref(), Some("https://host-b"));
+    }
+
+    #[test]
+    fn config_url_switch_with_explicit_new_key_uses_it() {
+        // The drop must not lose a key the switch DOES provide: a retarget with a
+        // fresh key keeps that fresh key.
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-old".to_string()),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            url: Some("https://host-b".to_string()),
+            key: Some("sk-new".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(merged.key.as_deref(), Some("sk-new"));
+    }
+
+    #[test]
+    fn config_restate_same_target_keeps_key() {
+        // The dual of the drop: restating the SAME url while changing only model
+        // is not a retarget, so the inherited key survives.
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-keep".to_string()),
+            model: Some("model-a".to_string()),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            url: Some("https://host-a".to_string()),
+            model: Some("model-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(
+            merged.key.as_deref(),
+            Some("sk-keep"),
+            "restating the same target keeps the inherited key"
         );
     }
 
