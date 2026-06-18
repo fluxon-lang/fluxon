@@ -276,9 +276,10 @@ impl Interp {
             "ask" => self.ai_ask(args),
             "json" => self.ai_json(args),
             "run" => self.ai_run(args),
+            "stream" => self.ai_stream(args),
             "config" => self.ai_config_set(args),
             _ => Err(Flow::err(format!(
-                "ai.{} not found (ask/json/run/config)",
+                "ai.{} not found (ask/json/run/stream/config)",
                 func
             ))),
         }
@@ -433,6 +434,166 @@ impl Interp {
         let messages = vec![user_msg(&prompt)];
         let resp = self.call_api(&messages, None, None, &ov)?;
         Ok(Value::Str(resp.text))
+    }
+
+    // ai.stream "prompt" \chunk -> ... [opts] -> the full response text (str).
+    // The token-by-token variant of `ai.ask` (issue #201): the callback is
+    // invoked with each text chunk as it streams in (print it, `ws.send` it,
+    // accumulate it), and the accumulated full text is returned at the end — so a
+    // caller can append it to the conversation history just like `ai.ask`.
+    //
+    // The callback runs on the CALLING (Fluxon) thread, NOT inside the async
+    // task: the SSE reader streams chunks over a std mpsc channel and this thread
+    // drains it, calling `apply` per chunk. That keeps `Value: Send + Sync`
+    // intact (no Fluxon value crosses into the async runtime) and means a
+    // callback that does `ws.send`/`io.print` runs in the normal sync context.
+    fn ai_stream(&self, args: Vec<Value>) -> Result<Value, Flow> {
+        let prompt = match args.first() {
+            Some(Value::Str(s)) => s.clone(),
+            _ => return Err(Flow::err("ai.stream: question (str) required".to_string())),
+        };
+        // The 2nd arg is the per-chunk callback (a fn/lambda). It is required —
+        // without it `ai.stream` would be just a slower `ai.ask`.
+        let cb = match args.get(1) {
+            Some(v @ (Value::Fn(_) | Value::Native(_))) => v.clone(),
+            _ => {
+                return Err(Flow::err(
+                    "ai.stream: a callback `\\chunk -> ...` is required (arg 2)".to_string(),
+                ));
+            }
+        };
+        let ov = self.per_call_override(args.get(2))?;
+        let messages = vec![user_msg(&prompt)];
+        let resp = self.call_api_stream(&messages, None, &ov, &cb)?;
+        Ok(Value::Str(resp.text))
+    }
+
+    // Like `call_api`, but streams the response. Resolves the provider/config the
+    // same way, then dispatches to the provider's SSE reader. `on_chunk` is
+    // called (on this thread) for each text delta.
+    fn call_api_stream(
+        &self,
+        messages: &[Value],
+        system: Option<&str>,
+        per_call: &AiOverride,
+        on_chunk: &Value,
+    ) -> Result<AiResp, Flow> {
+        let cfg = self.ai_config(&self.effective_override(per_call))?;
+        let (body, headers) = match cfg.provider {
+            Provider::Anthropic => self.build_anthropic_stream_req(&cfg, messages, system),
+            Provider::OpenAI => self.build_openai_stream_req(&cfg, messages, system),
+        };
+        self.run_stream(&cfg, body, headers, on_chunk)
+    }
+
+    // Builds the Anthropic streaming request body + the auth/version headers.
+    // Same shape as `call_anthropic`, plus `stream: true`.
+    fn build_anthropic_stream_req(
+        &self,
+        cfg: &AiConfig,
+        messages: &[Value],
+        system: Option<&str>,
+    ) -> (String, BTreeMap<String, String>) {
+        let mut body = BTreeMap::new();
+        body.insert("model".to_string(), Value::Str(cfg.model.clone()));
+        body.insert("max_tokens".to_string(), Value::Int(MAX_TOKENS));
+        body.insert("messages".to_string(), Value::List(messages.to_vec()));
+        body.insert("stream".to_string(), Value::Bool(true));
+        if let Some(sys) = system {
+            body.insert("system".to_string(), Value::Str(sys.to_string()));
+        }
+        merge_extra(&mut body, &cfg.extra);
+        // Resolve the default auth/version headers UNLESS the user overrode them,
+        // so the streaming path uses the same precedence as `call_anthropic`. We
+        // fold them into one header map here (the reader is provider-agnostic).
+        let mut headers = cfg.headers.clone();
+        if !header_overridden(&headers, "x-api-key") {
+            headers.insert("x-api-key".to_string(), cfg.key.clone());
+        }
+        if !header_overridden(&headers, "anthropic-version") {
+            headers.insert(
+                "anthropic-version".to_string(),
+                ANTHROPIC_VERSION.to_string(),
+            );
+        }
+        (json_encode(&Value::Map(body)), headers)
+    }
+
+    // Builds the OpenAI streaming request body + the Bearer auth header.
+    // `stream_options.include_usage` asks OpenAI to emit a final usage chunk
+    // (otherwise streamed responses carry no token counts).
+    fn build_openai_stream_req(
+        &self,
+        cfg: &AiConfig,
+        messages: &[Value],
+        system: Option<&str>,
+    ) -> (String, BTreeMap<String, String>) {
+        let mut oa_msgs: Vec<Value> = Vec::new();
+        if let Some(sys) = system {
+            let mut m = BTreeMap::new();
+            m.insert("role".to_string(), Value::Str("system".to_string()));
+            m.insert("content".to_string(), Value::Str(sys.to_string()));
+            oa_msgs.push(Value::Map(m));
+        }
+        oa_msgs.extend(messages.iter().map(anthropic_msg_to_openai));
+
+        let mut body = BTreeMap::new();
+        body.insert("model".to_string(), Value::Str(cfg.model.clone()));
+        body.insert("max_tokens".to_string(), Value::Int(MAX_TOKENS));
+        body.insert("messages".to_string(), Value::List(oa_msgs));
+        body.insert("stream".to_string(), Value::Bool(true));
+        let mut so = BTreeMap::new();
+        so.insert("include_usage".to_string(), Value::Bool(true));
+        body.insert("stream_options".to_string(), Value::Map(so));
+        merge_extra(&mut body, &cfg.extra);
+
+        let mut headers = cfg.headers.clone();
+        if !header_overridden(&headers, "authorization") {
+            headers.insert("authorization".to_string(), format!("Bearer {}", cfg.key));
+        }
+        (json_encode(&Value::Map(body)), headers)
+    }
+
+    // Drives the actual streaming request: spawns the SSE reader on the shared
+    // client runtime, drains text chunks over a channel (calling `on_chunk` on
+    // this thread per chunk), then joins the task for the final AiResp.
+    fn run_stream(
+        &self,
+        cfg: &AiConfig,
+        body: String,
+        headers: BTreeMap<String, String>,
+        on_chunk: &Value,
+    ) -> Result<AiResp, Flow> {
+        use std::sync::mpsc::channel;
+        let (tx, rx) = channel::<String>();
+        let url = cfg.url.clone();
+        let model = cfg.model.clone();
+        let provider = cfg.provider;
+        let timeout = self.ai_timeout();
+
+        // Spawn the reader on the shared client runtime. It owns the channel
+        // sender; when it finishes (or errors) the sender drops and `rx` closes.
+        let handle = client_runtime().spawn(async move {
+            read_sse_stream(&url, body, headers, timeout, provider, &model, tx).await
+        });
+
+        // Drain on THIS thread, calling the Fluxon callback per chunk. If the
+        // callback raises (fail/error), we stop draining and propagate — the task
+        // is aborted so a half-read body does not linger.
+        for chunk in &rx {
+            if let Err(flow) = self.apply(on_chunk.clone(), vec![Value::Str(chunk)]) {
+                handle.abort();
+                return Err(flow);
+            }
+        }
+
+        // The channel closed — the reader is done. Join it for the final result
+        // (full text + usage). block_on is safe here: we are on the sync thread,
+        // and the task has already finished (or is finishing).
+        match client_runtime().block_on(handle) {
+            Ok(r) => r,
+            Err(e) => Err(Flow::err(format!("ai: stream task failed: {}", e))),
+        }
     }
 
     // Parses an OPTIONAL trailing opts argument into a per-call override. Absent
@@ -659,6 +820,318 @@ impl Interp {
         })?;
         parse_openai(&text, &cfg.model, ms)
     }
+}
+
+// --- Streaming (SSE) — issue #201 ---
+
+// Reads a streamed (SSE) LLM response. Sends each text delta over `tx` as it
+// arrives, accumulates the full text + usage, and returns the final AiResp.
+//
+// Runs on the client tokio runtime (NOT the Fluxon thread): it does no Fluxon
+// `apply` itself — `tx` carries plain Strings, so no Fluxon value crosses into
+// async land and `Value: Send + Sync` is preserved.
+//
+// Unlike `post_json`, this does NOT retry: a stream is a long-lived connection,
+// and once bytes have been delivered to the callback a retry would duplicate
+// them. A non-2xx status is read as a (small) error body and returned as an error.
+#[allow(clippy::too_many_arguments)]
+async fn read_sse_stream(
+    url: &str,
+    body: String,
+    headers: BTreeMap<String, String>,
+    timeout: Option<Duration>,
+    provider: Provider,
+    model: &str,
+    tx: std::sync::mpsc::Sender<String>,
+) -> Result<AiResp, Flow> {
+    let started = std::time::Instant::now();
+    let work = async {
+        let mut builder = Request::builder().method("POST").uri(url);
+        // content-type default unless overridden, then every header (auth/version
+        // for Anthropic, Bearer for OpenAI, plus user headers) — same dedup rule
+        // as the non-stream path. SSE responses prefer `accept: text/event-stream`.
+        if !header_overridden(&headers, "content-type") {
+            builder = builder.header("content-type", "application/json");
+        }
+        if !header_overridden(&headers, "accept") {
+            builder = builder.header("accept", "text/event-stream");
+        }
+        for (k, v) in &headers {
+            if !k.is_empty() {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+        }
+        let req = builder
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| Flow::err(format!("ai: building request: {}", e)))?;
+
+        let resp = pooled_http_client()
+            .request(req)
+            .await
+            .map_err(|e| Flow::err(format!("ai: network error: {}", e)))?;
+        let status = resp.status().as_u16();
+        let mut bodyr = resp.into_body();
+
+        // Non-2xx: read the (usually small) error body and surface it — a stream
+        // is not started, so there is nothing partial to undo.
+        if !(200..300).contains(&status) {
+            let bytes = bodyr
+                .collect()
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
+            return Err(Flow::err(format!(
+                "ai: API error (status {}): {}",
+                status,
+                truncate(&String::from_utf8_lossy(&bytes), 300)
+            )));
+        }
+
+        // Frame-by-frame read. Accumulate raw BYTES (not text) into a line buffer
+        // and split on `\n` at the byte level — only decode a COMPLETE line as
+        // UTF-8. Decoding each frame separately (`from_utf8_lossy` per frame)
+        // would corrupt a multibyte char (emoji / CJK / Cyrillic) split across a
+        // frame boundary into U+FFFD (Codex P2 #210, same class as the json
+        // decoder fix). `\n` (0x0A) is ASCII and never appears inside a multibyte
+        // UTF-8 sequence, so splitting on the byte is safe, and each full line is
+        // a complete UTF-8 string (a char never crosses a line boundary in SSE).
+        // Cap a single un-terminated line. A real SSE line is well under this; an
+        // endless stream with NO `\n` would otherwise grow `buf` without bound
+        // (OOM/DoS on the request thread — the timeout does not fire while bytes
+        // keep arriving). 8 MiB is generous for any legitimate event.
+        const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
+        let mut acc = SseAccumulator::new(provider);
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(frame) = bodyr.frame().await {
+            let frame = frame.map_err(|e| Flow::err(format!("ai: reading stream: {}", e)))?;
+            let Ok(data) = frame.into_data() else {
+                continue; // trailers etc. — no body data
+            };
+            buf.extend_from_slice(&data);
+            if buf.len() > MAX_SSE_LINE && !buf.contains(&b'\n') {
+                return Err(Flow::err(format!(
+                    "ai: stream line exceeded {} bytes without a newline",
+                    MAX_SSE_LINE
+                )));
+            }
+            // Emit every complete line; a trailing partial line stays in `buf`
+            // (it may end mid-char — we wait for the rest in the next frame).
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim_end_matches(['\r', '\n']);
+                match acc.feed_line(line) {
+                    Ok(Some(delta)) => {
+                        // A best-effort send: if the receiver hung up (callback
+                        // raised, the drain loop returned), stop reading.
+                        if tx.send(delta).is_err() {
+                            return acc.finish(model, 0);
+                        }
+                    }
+                    Ok(None) => {}
+                    // A provider error event (e.g. Anthropic `type:"error"`,
+                    // overload mid-stream) — surface it instead of finishing with
+                    // a partial/empty success.
+                    Err(flow) => return Err(flow),
+                }
+            }
+        }
+        // Flush any final buffered line (some servers omit a trailing newline).
+        if !buf.is_empty() {
+            let line = String::from_utf8_lossy(&buf);
+            match acc.feed_line(line.trim_end_matches(['\r', '\n'])) {
+                Ok(Some(delta)) => {
+                    let _ = tx.send(delta);
+                }
+                Ok(None) => {}
+                Err(flow) => return Err(flow),
+            }
+        }
+        acc.finish(model, started.elapsed().as_millis() as i64)
+    };
+
+    match timeout {
+        Some(dur) => match tokio::time::timeout(dur, work).await {
+            Ok(r) => r,
+            Err(_) => Err(Flow::err(format!(
+                "ai: stream timeout (no completion within {} sec)",
+                dur.as_secs()
+            ))),
+        },
+        None => work.await,
+    }
+}
+
+// Incremental SSE parser. Accumulates the full text and the usage/stop info as
+// events arrive; `feed_line` returns Some(delta) when a line yields new text.
+//
+// Both providers send `data: {json}` lines (Anthropic also sends `event:` lines,
+// which we ignore — the JSON `type` field is enough to dispatch). OpenAI ends
+// with `data: [DONE]`. We read text deltas and the usage chunk; everything else
+// (ping, message_start, ...) is skipped.
+struct SseAccumulator {
+    provider: Provider,
+    text: String,
+    in_tokens: i64,
+    out_tokens: i64,
+    stop: String,
+}
+
+impl SseAccumulator {
+    fn new(provider: Provider) -> Self {
+        SseAccumulator {
+            provider,
+            text: String::new(),
+            in_tokens: 0,
+            out_tokens: 0,
+            stop: String::new(),
+        }
+    }
+
+    // Feeds one SSE line. Returns Ok(Some(delta)) for new text, Ok(None) for a
+    // non-text event, or Err for a provider error event (must abort the stream).
+    fn feed_line(&mut self, line: &str) -> Result<Option<String>, Flow> {
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            return Ok(None);
+        };
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(None);
+        }
+        let Ok(Value::Map(ev)) = json_decode(data) else {
+            return Ok(None);
+        };
+        // A provider error event mid-stream (a 200 response can still fail for
+        // overload/rate-limit). Surface it as an error so a failed generation does
+        // NOT look like a partial success. Detection is provider-agnostic:
+        //   - Anthropic: a top-level `{"type":"error", "error":{...}}`.
+        //   - OpenAI family (OpenAI / OpenRouter / GLM / Ollama / gateways): a
+        //     top-level `{"error":{...}}` with NO `type:"error"` — so checking the
+        //     Anthropic shape alone would silently drop it (the original fix
+        //     covered only Anthropic; this also covers the OpenAI-style providers
+        //     `ai.config` targets).
+        let is_error = ev.get("type").and_then(as_str).as_deref() == Some("error")
+            || matches!(ev.get("error"), Some(Value::Map(_)));
+        if is_error {
+            return Err(Flow::err(format!(
+                "ai: stream error event: {}",
+                truncate(&sse_error_message(&ev), 300)
+            )));
+        }
+        match self.provider {
+            Provider::Anthropic => Ok(self.feed_anthropic(&ev)),
+            Provider::OpenAI => Ok(self.feed_openai(&ev)),
+        }
+    }
+
+    // Anthropic SSE: content_block_delta -> delta.text_delta; message_delta ->
+    // stop_reason + usage.output_tokens; message_start -> usage.input_tokens.
+    fn feed_anthropic(&mut self, ev: &BTreeMap<String, Value>) -> Option<String> {
+        match ev.get("type").and_then(as_str).as_deref() {
+            Some("content_block_delta") => {
+                let delta = match ev.get("delta") {
+                    Some(Value::Map(d)) => d,
+                    _ => return None,
+                };
+                // text_delta -> text. (input_json_delta for tool args is ignored:
+                // text streaming is the priority; tool-use streaming is a follow-up.)
+                let t = delta.get("text").and_then(as_str)?;
+                if t.is_empty() {
+                    return None;
+                }
+                self.text.push_str(&t);
+                Some(t)
+            }
+            Some("message_start") => {
+                if let Some(Value::Map(m)) = ev.get("message")
+                    && let Some(Value::Map(u)) = m.get("usage")
+                {
+                    self.in_tokens = u.get("input_tokens").and_then(as_int).unwrap_or(0);
+                }
+                None
+            }
+            Some("message_delta") => {
+                if let Some(Value::Map(d)) = ev.get("delta")
+                    && let Some(s) = d.get("stop_reason").and_then(as_str)
+                {
+                    self.stop = s;
+                }
+                if let Some(Value::Map(u)) = ev.get("usage") {
+                    self.out_tokens = u.get("output_tokens").and_then(as_int).unwrap_or(0);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    // OpenAI SSE: choices[0].delta.content -> text; finish_reason on the last
+    // content chunk; usage on the final chunk (requires include_usage).
+    fn feed_openai(&mut self, ev: &BTreeMap<String, Value>) -> Option<String> {
+        // The usage-only final chunk has an empty choices list.
+        if let Some(Value::Map(u)) = ev.get("usage") {
+            self.in_tokens = u
+                .get("prompt_tokens")
+                .and_then(as_int)
+                .unwrap_or(self.in_tokens);
+            self.out_tokens = u
+                .get("completion_tokens")
+                .and_then(as_int)
+                .unwrap_or(self.out_tokens);
+        }
+        let choice = match ev.get("choices") {
+            Some(Value::List(cs)) if !cs.is_empty() => match &cs[0] {
+                Value::Map(c) => c,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if let Some(s) = choice.get("finish_reason").and_then(as_str) {
+            self.stop = s;
+        }
+        let delta = match choice.get("delta") {
+            Some(Value::Map(d)) => d,
+            _ => return None,
+        };
+        let t = delta.get("content").and_then(as_str)?;
+        if t.is_empty() {
+            return None;
+        }
+        self.text.push_str(&t);
+        Some(t)
+    }
+
+    // Builds the final AiResp from the accumulated state — same confidence
+    // heuristic as the non-stream parsers.
+    fn finish(self, model: &str, ms: i64) -> Result<AiResp, Flow> {
+        let conf = match self.stop.as_str() {
+            "end_turn" | "tool_use" | "stop_sequence" | "stop" | "tool_calls" => 0.9,
+            "max_tokens" | "length" => 0.5,
+            "refusal" | "content_filter" => 0.0,
+            "" => 0.8, // stream ended without an explicit stop reason
+            _ => 0.7,
+        };
+        Ok(AiResp {
+            text: self.text,
+            tool_calls: Vec::new(),
+            in_tokens: self.in_tokens,
+            out_tokens: self.out_tokens,
+            model: model.to_string(),
+            ms,
+            conf,
+        })
+    }
+}
+
+// Extracts a human-readable message from an SSE error event. Anthropic shape:
+// `{"type":"error","error":{"type":"overloaded_error","message":"..."}}`. Falls
+// back to the whole event JSON if no nested message is present.
+fn sse_error_message(ev: &BTreeMap<String, Value>) -> String {
+    if let Some(Value::Map(err)) = ev.get("error")
+        && let Some(msg) = err.get("message").and_then(as_str)
+    {
+        return msg;
+    }
+    json_encode(&Value::Map(ev.clone()))
 }
 
 // Generic https POST (content-type: json). `add_headers` adds the
@@ -2202,6 +2675,347 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(as_str(out.get("role").unwrap()).as_deref(), Some("user"));
+    }
+
+    // --- issue #201: streaming (SSE) ---
+
+    // feed_line returns Result<Option<String>, Flow> (Flow has no Debug -> no
+    // assert_eq on the Result). These helpers assert the Ok cases concisely.
+    fn fed_delta(acc: &mut SseAccumulator, line: &str) -> String {
+        match acc.feed_line(line) {
+            Ok(Some(d)) => d,
+            Ok(None) => panic!("expected a delta for: {}", line),
+            Err(_) => panic!("unexpected stream error for: {}", line),
+        }
+    }
+    fn fed_none(acc: &mut SseAccumulator, line: &str) {
+        match acc.feed_line(line) {
+            Ok(None) => {}
+            Ok(Some(d)) => panic!("expected no delta, got {:?} for: {}", d, line),
+            Err(_) => panic!("unexpected stream error for: {}", line),
+        }
+    }
+
+    #[test]
+    fn sse_anthropic_accumulates_text_and_usage() {
+        // Anthropic SSE: message_start (input usage) -> content_block_delta(s) ->
+        // message_delta (stop_reason + output usage). feed_line yields each text
+        // delta; finish builds the full AiResp.
+        let mut acc = SseAccumulator::new(Provider::Anthropic);
+        fed_none(
+            &mut acc,
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12}}}"#,
+        );
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}"#
+            ),
+            "Hel"
+        );
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}"#
+            ),
+            "lo"
+        );
+        // ping / unrelated events yield nothing.
+        fed_none(&mut acc, r#"data: {"type":"ping"}"#);
+        fed_none(
+            &mut acc,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+        );
+        let r = match acc.finish("claude-opus-4-8", 5) {
+            Ok(r) => r,
+            Err(_) => panic!("finish failed"),
+        };
+        assert_eq!(r.text, "Hello");
+        assert_eq!(r.in_tokens, 12);
+        assert_eq!(r.out_tokens, 7);
+        assert!((r.conf - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sse_openai_accumulates_text_and_usage() {
+        // OpenAI SSE: choices[0].delta.content chunks, then a final usage-only
+        // chunk (empty choices) + [DONE].
+        let mut acc = SseAccumulator::new(Provider::OpenAI);
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#
+            ),
+            "Hi"
+        );
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"choices":[{"delta":{"content":" there"},"finish_reason":"stop"}]}"#
+            ),
+            " there"
+        );
+        // Final usage chunk — empty choices, carries token counts.
+        fed_none(
+            &mut acc,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}"#,
+        );
+        fed_none(&mut acc, "data: [DONE]");
+        let r = match acc.finish("gpt-4o", 9) {
+            Ok(r) => r,
+            Err(_) => panic!("finish failed"),
+        };
+        assert_eq!(r.text, "Hi there");
+        assert_eq!(r.in_tokens, 3);
+        assert_eq!(r.out_tokens, 4);
+    }
+
+    #[test]
+    fn sse_ignores_non_data_and_blank_lines() {
+        // `event:` lines, comments, and blanks are not `data:` -> no delta.
+        let mut acc = SseAccumulator::new(Provider::Anthropic);
+        fed_none(&mut acc, "event: content_block_delta");
+        fed_none(&mut acc, "");
+        fed_none(&mut acc, ": this is a comment");
+        fed_none(&mut acc, "data:"); // empty data
+    }
+
+    #[test]
+    fn sse_error_event_is_surfaced() {
+        // issue #201 (Codex P2): a 200 stream can still emit `type:"error"`
+        // mid-stream (overload/rate-limit). It must abort with the provider's
+        // message, not finish as a partial success.
+        let mut acc = SseAccumulator::new(Provider::Anthropic);
+        // some text arrived first...
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"par"}}"#
+            ),
+            "par"
+        );
+        // ...then the provider errors.
+        match acc.feed_line(
+            r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("stream error event"), "{}", e);
+                assert!(e.contains("Overloaded"), "message must surface: {}", e);
+            }
+            _ => panic!("a type:error event must be surfaced as an error"),
+        }
+    }
+
+    #[test]
+    fn sse_openai_error_chunk_is_surfaced() {
+        // issue #201 (review P1): OpenAI-family providers signal a mid-stream
+        // error as {"error":{...}} with NO top-level type:"error" — it must STILL
+        // be surfaced, not silently dropped into a partial success.
+        let mut acc = SseAccumulator::new(Provider::OpenAI);
+        assert_eq!(
+            fed_delta(
+                &mut acc,
+                r#"data: {"choices":[{"delta":{"content":"par"}}]}"#
+            ),
+            "par"
+        );
+        match acc.feed_line(
+            r#"data: {"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+        ) {
+            Err(Flow::Error(e)) => {
+                assert!(e.contains("stream error event"), "{}", e);
+                assert!(
+                    e.contains("rate limit exceeded"),
+                    "message must surface: {}",
+                    e
+                );
+            }
+            _ => panic!("an OpenAI error chunk must be surfaced as an error"),
+        }
+    }
+
+    // Builds a raw SSE HTTP response (200, text/event-stream) from a list of
+    // `data:` JSON event payloads.
+    fn sse_response(events: &[&str]) -> String {
+        let mut body = String::new();
+        for e in events {
+            body.push_str("data: ");
+            body.push_str(e);
+            body.push_str("\n\n");
+        }
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    #[test]
+    fn stream_e2e_callback_per_chunk_and_full_text() {
+        // issue #201 e2e: ai.stream hits a local SSE server, the callback fires
+        // per text chunk (we collect them via a reg-free Native fn), and the
+        // returned value is the full accumulated text. OpenAI wire format + a
+        // local url, key inline (env-independent).
+        let events = [
+            r#"{"choices":[{"delta":{"role":"assistant"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
+            r#"{"choices":[{"delta":{"content":", "}}]}"#,
+            r#"{"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#,
+            "[DONE]",
+        ];
+        let (addr, handle) = serve_capture(sse_response(&events));
+        let url = format!("http://{}/v1/chat/completions", addr);
+
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-test".to_string())),
+            ("model", Value::Str("gpt-4o".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+
+        // The callback appends each chunk to a shared buffer (Native fn captures
+        // an Arc<Mutex<Vec>>). This mirrors what a Fluxon `\chunk -> io.print`
+        // does, but lets the test assert the chunk sequence.
+        let chunks: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let chunks_cb = chunks.clone();
+        let cb = Value::Native(std::sync::Arc::new(crate::value::NativeFn {
+            name: "on_chunk".to_string(),
+            func: Box::new(move |args: Vec<Value>| {
+                if let Some(Value::Str(s)) = args.first() {
+                    chunks_cb.lock().unwrap().push(s.clone());
+                }
+                Ok(Value::Nil)
+            }),
+        }));
+
+        let out = match interp.ai_dispatch("stream", vec![Value::Str("hi".to_string()), cb]) {
+            Ok(v) => v,
+            Err(_) => panic!("ai.stream failed"),
+        };
+        // The returned value is the full text.
+        match out {
+            Value::Str(s) => assert_eq!(s, "Hello, world"),
+            _ => panic!("expected str"),
+        }
+        // The callback saw exactly the three text deltas, in order (no empty
+        // role-only / usage / [DONE] chunks).
+        let got = chunks.lock().unwrap().clone();
+        assert_eq!(got, vec!["Hello", ", ", "world"]);
+
+        // The request actually asked for a stream.
+        let req = handle.join().unwrap();
+        assert!(req.contains("\"stream\":true"), "{}", req);
+        assert!(
+            req.to_lowercase().contains("authorization: bearer sk-test"),
+            "{}",
+            req
+        );
+    }
+
+    // An SSE server that writes the response in raw byte SLICES, flushing +
+    // sleeping between them so the client receives them as SEPARATE frames. The
+    // split offsets are chosen to cut a multibyte UTF-8 char in half across a
+    // frame boundary (the Codex P2 regression scenario).
+    fn serve_chunked_bytes(
+        head_and_body: Vec<u8>,
+        splits: Vec<usize>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Drain the request (we don't assert on it here).
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let mut prev = 0;
+            for &at in &splits {
+                stream.write_all(&head_and_body[prev..at]).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(15));
+                prev = at;
+            }
+            stream.write_all(&head_and_body[prev..]).unwrap();
+            stream.flush().unwrap();
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn stream_preserves_utf8_across_frame_boundary() {
+        // issue #201 (Codex P2): a multibyte char split across two HTTP frames
+        // must NOT be corrupted to U+FFFD. We stream "héllo — салом 🚀" as OpenAI
+        // SSE and cut the body in the MIDDLE of multibyte chars at the byte level.
+        let text = "héllo — салом 🚀"; // é=2B, —=3B, Cyrillic=2B each, 🚀=4B
+        // Build the SSE body: one content delta with the text, then [DONE].
+        let mut body = String::new();
+        body.push_str("data: ");
+        body.push_str(&format!(
+            "{{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":\"stop\"}}]}}",
+            text
+        ));
+        body.push_str("\n\n");
+        body.push_str("data: [DONE]\n\n");
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let full: Vec<u8> = head.bytes().chain(body.bytes()).collect();
+
+        // Pick split offsets INSIDE the body that land mid-char. The 🚀 (4 bytes)
+        // is near the end; split one byte into it, and also split inside the first
+        // multibyte run. We find byte offsets of the rocket and a Cyrillic char.
+        let head_len = head.len();
+        let rocket_byte = head_len + body.find('🚀').unwrap() + 1; // 1 byte into 🚀
+        let cyr_byte = head_len + body.find('с').unwrap() + 1; // 1 byte into с
+        let mut splits = vec![cyr_byte, rocket_byte];
+        splits.sort();
+
+        let (addr, handle) = serve_chunked_bytes(full, splits);
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("url", Value::Str(url)),
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-test".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        let cb = Value::Native(std::sync::Arc::new(crate::value::NativeFn {
+            name: "noop".to_string(),
+            func: Box::new(|_args: Vec<Value>| Ok(Value::Nil)),
+        }));
+        let out = match interp.ai_dispatch("stream", vec![Value::Str("hi".to_string()), cb]) {
+            Ok(v) => v,
+            Err(_) => panic!("ai.stream failed"),
+        };
+        handle.join().unwrap();
+        // The full text round-trips intact — NO U+FFFD replacement characters.
+        match out {
+            Value::Str(s) => {
+                assert_eq!(s, text, "multibyte text must survive frame splitting");
+                assert!(!s.contains('\u{FFFD}'), "no replacement char: {:?}", s);
+            }
+            _ => panic!("expected str"),
+        }
+    }
+
+    #[test]
+    fn stream_requires_callback() {
+        // Without a callback ai.stream is an error (it would be a slower ai.ask).
+        let interp = Interp::new();
+        match interp.ai_dispatch("stream", vec![Value::Str("hi".to_string())]) {
+            Err(Flow::Error(e)) => assert!(e.contains("callback"), "{}", e),
+            _ => panic!("expected a callback-required error"),
+        }
     }
 
     #[test]

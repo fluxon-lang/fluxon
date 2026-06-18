@@ -368,6 +368,19 @@ Provider auto-detected from env (OS env > .env), nothing to configure:
 (default `gpt-4o`). Both present → Anthropic wins. Override: `$AI_PROVIDER`
 (`anthropic|openai`), `$AI_KEY` (provider-agnostic), `$AI_MODEL`.
 
+`ai.stream "prompt" \chunk -> ...` — token-by-token streaming (the typing
+effect / a chat stream). The callback fires for each text chunk as it arrives;
+the FULL text is returned at the end (so you can push it to history like
+`ai.ask`). A trailing opts map works too. The callback runs on the calling
+thread, so `io.print`/`ws.send` inside it are normal.
+```fluxon
+text = ai.stream "Explain async" \chunk -> io.print chunk        # terminal
+text = ai.stream q \chunk -> ws.send conn (json.enc {chunk:chunk})  # ws relay
+```
+A mid-stream provider error (overload/rate-limit) raises — note some chunks may
+already have been delivered to the callback before it. Wrap in `try`/`catch` if
+you need to recover.
+
 `ai.run` — ONE step of a tool-loop (doesn't execute; returns what it wants to do;
 the loop is yours → logging/cost/approval control). Returns one of:
 `{kind::final text}` or `{kind::call tool args id calls:[{tool args id} ...]}`.
