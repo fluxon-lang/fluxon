@@ -1278,4 +1278,4 @@ http.serve 8080
 ```
 
 Mana butun til. `use` qiling, `tbl` bilan jadval, `http.on` bilan marshrut,
-`db` bilan saqlash — paket yo'q, ulanish kodi yo'q, boilerplate yo'q.
+`db` bilan saqlash — o'rnatish yo'q, ulanish kodi yo'q, boilerplate yo'q.

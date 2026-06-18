@@ -1277,4 +1277,4 @@ http.serve 8080
 ```
 
 Here is the whole language. `use` it, declare a table with `tbl`, a route with
-`http.on`, storage with `db` — no packages, no connection code, no boilerplate.
+`http.on`, storage with `db` — no installs, no connection code, no boilerplate.
