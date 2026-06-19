@@ -15,8 +15,14 @@ pub(crate) fn str_module(func: &str, args: Vec<Value>) -> R {
         "slice" => {
             let s = arg_str(&args, 0, "str.slice")?;
             let a = arg_int(&args, 1, "str.slice")? as usize;
-            let b = arg_int(&args, 2, "str.slice")? as usize;
             let chars: Vec<char> = s.chars().collect();
+            // The end index is OPTIONAL and defaults to end-of-string, matching the
+            // near-universal Python/JS prior (`s[a:]`). `str.slice s a` ≡
+            // `str.slice s a (str.len s)`. With it given, bounds clamp as before.
+            let b = match args.get(2) {
+                Some(_) => arg_int(&args, 2, "str.slice")? as usize,
+                None => chars.len(),
+            };
             let a = a.min(chars.len());
             let b = b.min(chars.len());
             if a >= b {

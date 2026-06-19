@@ -511,7 +511,7 @@ impl Parser {
     }
 
     fn parse_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
-        let mut lhs = self.parse_application()?;
+        let mut lhs = self.parse_unary()?;
         loop {
             // `..` is woven into the precedence ladder (Range is not a BinOp, hence
             // a separate branch). Arithmetic binds on the right side
@@ -544,6 +544,28 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    // A prefix `!`/`-` at the START of an expression (not in argument position)
+    // binds the WHOLE paren-free call that follows: `!str.starts a b` is
+    // `!(str.starts a b)`, `-math.max a b` is `-(math.max a b)`, and the same after
+    // `|`/`&` (each operand is parsed here). This sits ABOVE parse_application so it
+    // sees the full call; the in-argument unary (`check !ok "msg"`, `math.min -1 2`)
+    // is the postfix-operand case in parse_primary and is unaffected. A plain `!x` /
+    // `-x` just wraps the atom (no following atom → parse_application returns it).
+    fn parse_unary(&mut self) -> ParseResult<Expr> {
+        let op = match self.peek() {
+            Tok::Bang => UnOp::Not,
+            Tok::Minus => UnOp::Neg,
+            _ => return self.parse_application(),
+        };
+        self.advance();
+        // Recurse so `!!x` / `-!x` chain; the innermost reaches parse_application.
+        let expr = self.parse_unary()?;
+        Ok(Expr::Unary {
+            op,
+            expr: Box::new(expr),
+        })
     }
 
     // Parenless call: atom atom atom...
@@ -778,6 +800,13 @@ impl Parser {
                 self.advance();
                 self.build_string(parts)
             }
+            // A prefix `-`/`!` in ARGUMENT position binds only its atom: in
+            // `check !ok "message"` the `!` is `!(ok)`, and `"message"` is a separate
+            // argument; likewise `math.min -1 2` is two args. So here, where primaries
+            // are read as call arguments, the operand is a postfix (single atom), NOT a
+            // whole call. The whole-call case (`!str.starts a b` ≡ `!(str.starts a b)`)
+            // is handled one level up in parse_unary, which only fires at the START of
+            // an expression — never on an inner argument.
             Tok::Minus => {
                 self.advance();
                 let e = self.parse_postfix()?;

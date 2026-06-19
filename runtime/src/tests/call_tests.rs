@@ -40,6 +40,39 @@ fn tick
 "#);
 }
 
+// Issue #213: a prefix `!`/`-` binds the WHOLE paren-free call that follows, not
+// just its callee. `!str.starts a b` ≡ `!(str.starts a b)` and `-math.max a b` ≡
+// `-(math.max a b)`. Before the fix the operator grabbed only the callee, leaving
+// the args dangling and raising a misleading "argument 1 is missing". This is the
+// trap small models hit when writing a Bearer-token guard the natural way.
+#[test]
+fn prefix_op_binds_whole_parenless_call() {
+    run(r#"
+auth_h = "Bearer xyz"
+# the natural Bearer guard: `!` in front of a 2-arg call, behind a `|`
+if !auth_h | !str.starts auth_h "Bearer "
+  fail "should have a bearer"
+else
+  log "ok"
+# standalone, no operator: !str.starts a b
+(!str.starts "abc" "x") | (fail "!str.starts should be true")
+((!str.starts "abc" "ab") == false) | (fail "!str.starts should be false")
+# prefix `-` over a multi-arg call
+(-math.max 3 5 == -5) | (fail "-math.max should be -5")
+# plain unary still works (no following atom)
+b = true
+(!b == false) | (fail "plain !b")
+(-3 == 0 - 3) | (fail "plain -3")
+# CRITICAL: a unary in ARGUMENT position binds only its atom — it must NOT
+# swallow the following argument (regression caught in PR #214 review). Here
+# `!ok` is one arg and "msg" is a separate arg.
+fn two a b
+  ret "${a}|${b}"
+ok = false
+(two !ok "msg" == "true|msg") | (fail "unary arg must not swallow next arg")
+"#);
+}
+
 // `f(x)` (a parenthesized call with an argument) is REJECTED — the canonical form is `f x`.
 // Empty `()` is only for nullary; one task = one way.
 #[test]
