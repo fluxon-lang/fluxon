@@ -63,6 +63,13 @@ else
 b = true
 (!b == false) | (fail "plain !b")
 (-3 == 0 - 3) | (fail "plain -3")
+# CRITICAL: a unary in ARGUMENT position binds only its atom — it must NOT
+# swallow the following argument (regression caught in PR #214 review). Here
+# `!ok` is one arg and "msg" is a separate arg.
+fn two a b
+  ret "${a}|${b}"
+ok = false
+(two !ok "msg" == "true|msg") | (fail "unary arg must not swallow next arg")
 "#);
 }
 
