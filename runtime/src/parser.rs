@@ -778,9 +778,15 @@ impl Parser {
                 self.advance();
                 self.build_string(parts)
             }
+            // A prefix `-`/`!` binds the WHOLE parenless call that follows, not just
+            // its callee: `!str.starts a b` is `!(str.starts a b)` and `-math.max a b`
+            // is `-(math.max a b)`. Hence parse_application (which collects the args),
+            // not parse_postfix (which would stop at the callee and leave a b dangling,
+            // yielding the misleading "argument 1 is missing"). A plain `!x` / `-x`
+            // is unaffected: with no following atom, parse_application returns the atom.
             Tok::Minus => {
                 self.advance();
-                let e = self.parse_postfix()?;
+                let e = self.parse_application()?;
                 Ok(Expr::Unary {
                     op: UnOp::Neg,
                     expr: Box::new(e),
@@ -788,7 +794,7 @@ impl Parser {
             }
             Tok::Bang => {
                 self.advance();
-                let e = self.parse_postfix()?;
+                let e = self.parse_application()?;
                 Ok(Expr::Unary {
                     op: UnOp::Not,
                     expr: Box::new(e),

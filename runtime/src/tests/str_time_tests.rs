@@ -40,6 +40,24 @@ fn str_url_enc() {
 
 // str.repeat with a negative number and str.pad with an empty filler — a clear
 // error (not a silent wrong result).
+// Issue #213: str.slice's end index is OPTIONAL and defaults to end-of-string,
+// matching the Python/JS prior (`s[a:]`). Small models assume slice-to-end; the
+// mandatory 3rd arg was a needless trap.
+#[test]
+fn str_slice_to_end_default() {
+    run(r#"
+(str.slice "Bearer xyz" 7 == "xyz") | (fail "slice to end")
+(str.slice "hello" 0 == "hello") | (fail "slice from 0 to end")
+(str.slice "hello" 5 == "") | (fail "slice at len is empty")
+(str.slice "hello" 9 == "") | (fail "slice past len is empty")
+# explicit end still works exactly as before
+(str.slice "hello" 1 3 == "el") | (fail "slice with explicit end")
+(str.slice "hello" 1 (str.len "hello") == "ello") | (fail "the old to-end idiom")
+# unicode: indices are in chars, not bytes
+(str.slice "héllo" 1 == "éllo") | (fail "slice unicode to end")
+"#);
+}
+
 #[test]
 fn str_repeat_negative_and_pad_empty_fail() {
     assert!(run_source(r#"str.repeat "a" (0 - 1)"#).is_err());

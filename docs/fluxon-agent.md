@@ -84,7 +84,11 @@ else
   log "c"
 ```
 Inline `if` = expression (ternary): `pad = if h < 10 ("0" + str.str h) else (str.str h)`.
-`else` is required. Calls in the condition need parens: `if (str.len s) > 0 a else b`.
+`else` is required. A paren-free call whose RESULT feeds a binary operator needs
+parens, or the operator's right side is swallowed as an extra argument:
+`if (str.len s) > 0 a else b` (not `if str.len s > 0 ...`). A prefix `!`/`-` does
+NOT need this — it binds the whole call: `!str.starts h "Bearer "` ≡
+`!(str.starts h "Bearer ")`, and the same after `|`/`&`.
 Only loop = `each` (no while/for):
 ```fluxon
 each item in list   ·   each i in 1..5   ·   each k, v in map   ·   each i in inf
@@ -480,7 +484,8 @@ Write to a map: `m.set k v` (`m[k]` is READ only). Shared state via this.
 
 ### str / math / rand (core, no use needed)
 ```fluxon
-str.len s · str.slice s a b · str.up s · str.low s · str.split s sep → list
+str.len s · str.slice s a [b] (b optional, defaults to end: `str.slice s 7` = s[7:])
+str.up s · str.low s · str.split s sep → list
 str.has s sub → bool · str.int s · str.str x
 str.trim s · str.replace s old new · str.starts s pre → bool · str.ends s suf → bool
 str.pad s n ch → pads LEFT to n chars ("7"→"007") · str.repeat s n
