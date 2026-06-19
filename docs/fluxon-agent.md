@@ -368,6 +368,21 @@ Provider auto-detected from env (OS env > .env), nothing to configure:
 (default `gpt-4o`). Both present → Anthropic wins. Override: `$AI_PROVIDER`
 (`anthropic|openai`), `$AI_KEY` (provider-agnostic), `$AI_MODEL`.
 
+`ai.config {..}` — set the active config from code (any OpenAI-compatible API,
+and switch provider/model at runtime — the primitive a `/model` command is built
+on). Fields: `style` (`:anthropic|:openai` wire format), `url`, `key`, `model`,
+`headers:{..}`, `extra:{..}` (extra body params). Per-call opts (a trailing map
+on `ask`/`json`/`run`) override it for one call.
+```fluxon
+ai.config {style::openai url:"https://api.z.ai/api/paas/v4/chat/completions" key:env.ZAI_KEY model:"glm-4.6"}
+ai.config {model:"claude-haiku-4-5"}   # PARTIAL: switches only the model, keeps the rest
+quick = ai.ask "ping" {model:"glm-4.5-air"}   # per-call override (one call)
+ai.config {}                           # reset back to the env defaults
+```
+A non-empty `ai.config` is a **partial update** (merges over the current config);
+`ai.config {}` clears it. A custom `url` requires an explicit `key` (a provider
+key from env is never sent to a custom host).
+
 `ai.stream "prompt" \chunk -> ...` — token-by-token streaming (the typing
 effect / a chat stream). The callback fires for each text chunk as it arrives;
 the FULL text is returned at the end (so you can push it to history like

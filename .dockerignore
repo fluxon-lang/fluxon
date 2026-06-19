@@ -1,0 +1,9 @@
+# Docker build context'ga keraksiz/og'ir narsalarni kiritmaymiz.
+runtime/target/
+.git/
+*.db
+*.db-wal
+*.db-shm
+docs/
+research/
+examples/

@@ -122,9 +122,43 @@ pub struct AiOverride {
 impl AiOverride {
     // Layers `other` ON TOP of `self`: scalar fields from `other` (when set)
     // replace; `headers`/`extra` merge key-by-key with `other` winning. Used to
-    // fold the per-call opts over the global `ai.config`.
+    // fold the per-call opts over the global `ai.config`, AND (issue #200) to
+    // fold a partial `ai.config {..}` over the stored config.
     fn merge(&self, other: &AiOverride) -> AiOverride {
         let mut out = self.clone();
+        // SECURITY (issue #200, Codex P1 + review): an inherited auth header is
+        // only valid for the host/credential it was set for. If THIS merge
+        // CHANGES the target — a different `key`, `url`, or `style` — any auth
+        // header carried over from `self` is STALE and must be dropped, or it
+        // would be sent to the new host (a cross-host credential leak) and, via
+        // `header_overridden`, suppress the auth header the new target should
+        // generate. The leak is reachable by a url- or style-only switch too, not
+        // just `key`.
+        //
+        // We compare the NEW value against `self` (not mere presence): restating
+        // the SAME url/style/key while changing only e.g. `model` is NOT a
+        // retarget, so it must keep the inherited auth header — otherwise a
+        // reusable profile map `{url style key model}` would lose its
+        // `headers.authorization` on every `/model` switch (Codex P2). Explicit
+        // auth headers RESTATED by this switch survive — the re-insert loop below
+        // runs AFTER the drop.
+        let changed = |new: &Option<String>, cur: &Option<String>| new.is_some() && new != cur;
+        let retargets = changed(&other.key, &self.key)
+            || changed(&other.url, &self.url)
+            || (other.style.is_some() && other.style != self.style);
+        if retargets {
+            out.headers.retain(|k, _| !is_auth_header(k));
+            // Also invalidate the inherited `key` field. SECURITY (Codex P1
+            // round 3): a switch like `ai.config {url:new key:env.NEW_KEY}` where
+            // NEW_KEY is unset parses `key` to nil -> `other.key` is None (nil is
+            // skipped for ergonomics). Without this, the partial merge would keep
+            // the PREVIOUS host's key and `ai_config` would send it to the new
+            // host. On a retarget the credential is host-scoped, so a missing new
+            // key must NOT silently reuse the old one — it falls through to the
+            // env / errors (same as the old replace semantics). If `other.key` IS
+            // set, the line below restores it (the explicit new key wins).
+            out.key = None;
+        }
         if other.url.is_some() {
             out.url = other.url.clone();
         }
@@ -247,6 +281,21 @@ fn add_extra_headers(
     b
 }
 
+// True if `name` (a header key, stored lowercased) is an authentication-bearing
+// header — one whose value is a credential scoped to a specific host/key. Used by
+// `merge` to drop STALE inherited auth headers when a config switch retargets the
+// request (a non-auth header like `x-title`/`http-referer` is host-agnostic and
+// carries over). Covers the standard provider names plus the common gateway/cloud
+// schemes (Azure `api-key`, Google `x-goog-api-key`) — not every conceivable
+// custom name, but the realistic ones, so a `/model`/`/host` switch does not
+// silently forward the previous deployment's credential.
+fn is_auth_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization" | "x-api-key" | "api-key" | "x-goog-api-key"
+    )
+}
+
 // True if `headers` contains `name`. Override header names are stored lowercased
 // (see `parse_override`), and every `name` passed here is already lowercase, so a
 // case-insensitive compare is belt-and-suspenders — it keeps the guard correct
@@ -286,17 +335,35 @@ impl Interp {
     }
 
     // ai.config {url:.. style:.. key:.. model:.. headers:{..} extra:{..}}
-    // Sets the GLOBAL request overrides for every following `ai.*` call (issue
-    // #199). A top-level setup call (like `http.cors`): call it once, before
-    // `http.serve`. Calling it again REPLACES the stored config. Returns nil.
-    // With no/empty opts it clears any previous override.
+    // Sets the GLOBAL request overrides for every following `ai.*` call (issues
+    // #199, #200). A top-level setup call (like `http.cors`), but ALSO the
+    // runtime primitive a `/model` command is built on (issue #200): it can be
+    // called again at any point to switch provider/model/key on the fly — the
+    // next `ai.ask`/`ai.json`/`ai.run` uses the new configuration.
+    //
+    // SEMANTICS (issue #200): a non-empty `ai.config {..}` is a PARTIAL update —
+    // the given fields are merged ON TOP of the stored config, so
+    // `ai.config {model: pick}` switches only the model and keeps the key/url/
+    // style/headers/extra already set. (`headers`/`extra` merge key-by-key, like
+    // the per-call merge.) This is exactly what `/model` needs: list choices,
+    // the user picks one, apply just that field. To REPLACE/clear everything and
+    // fall back to the env defaults, call `ai.config {}` (or `ai.config nil`)
+    // with no fields. Returns nil.
     fn ai_config_set(&self, args: Vec<Value>) -> Result<Value, Flow> {
-        let ov = match args.first() {
-            Some(Value::Map(m)) => parse_override(m)?,
-            None | Some(Value::Nil) => AiOverride::default(),
+        let mut cur = self.ai_override.lock().unwrap();
+        match args.first() {
+            // A map with at least one field -> PARTIAL merge over the current
+            // config (model/key/... switch). An EMPTY map -> reset (clear).
+            Some(Value::Map(m)) if !m.is_empty() => {
+                let ov = parse_override(m)?;
+                *cur = cur.merge(&ov);
+            }
+            // No opts / nil / empty map -> clear back to the env/auto defaults.
+            None | Some(Value::Nil) | Some(Value::Map(_)) => {
+                *cur = AiOverride::default();
+            }
             _ => return Err(Flow::err("ai.config: opts (map) required".to_string())),
-        };
-        *self.ai_override.lock().unwrap() = ov;
+        }
         Ok(Value::Nil)
     }
 
@@ -2400,18 +2467,19 @@ mod tests {
 
     #[test]
     fn per_call_opts_override_global_config() {
-        // Per-call opts win over ai.config: config points at one model, the call
-        // overrides it (and the URL to the live test server).
+        // Per-call opts win over ai.config: config points at one model + the live
+        // url; the call overrides ONLY the model (same host, so the global key is
+        // correctly reused — a model change is not a retarget).
         let (addr, handle) = serve_capture(openai_200("ok"));
         let url = format!("http://{}/v1/chat/completions", addr);
 
         let interp = Interp::new();
-        // Global config: openai style + key, but a stale model + a dummy url.
+        // Global config: openai style + key + the live url + a stale model.
         let global = opts(&[
             ("style", Value::Sym("openai".to_string())),
             ("key", Value::Str("sk-global".to_string())),
             ("model", Value::Str("stale".to_string())),
-            ("url", Value::Str("http://127.0.0.1:1/dead".to_string())),
+            ("url", Value::Str(url)),
         ]);
         if interp
             .ai_dispatch("config", vec![Value::Map(global)])
@@ -2419,11 +2487,8 @@ mod tests {
         {
             panic!("ai.config failed");
         }
-        // Per-call: override url + model.
-        let per = opts(&[
-            ("url", Value::Str(url)),
-            ("model", Value::Str("glm-4.6".to_string())),
-        ]);
+        // Per-call: override only the model.
+        let per = opts(&[("model", Value::Str("glm-4.6".to_string()))]);
         if interp
             .ai_dispatch("ask", vec![Value::Str("hi".to_string()), Value::Map(per)])
             .is_err()
@@ -2432,7 +2497,7 @@ mod tests {
         }
 
         let req = handle.join().unwrap();
-        // The per-call model won; the global key survived (merge).
+        // The per-call model won; the global key survived (merge, same host).
         assert!(req.contains("\"model\":\"glm-4.6\""), "{}", req);
         assert!(
             req.to_lowercase()
@@ -2440,6 +2505,411 @@ mod tests {
             "{}",
             req
         );
+    }
+
+    #[test]
+    fn config_partial_merge_switches_one_field() {
+        // issue #200: ai.config is a PARTIAL update — a `/model` switch changes
+        // ONLY the model and KEEPS the key/url/style already set (the same host,
+        // so the inherited key is correctly reused — not a retarget). Both calls
+        // hit the SAME local server; only the model differs between them.
+        let (addr, h) = serve_responses(vec![openai_200("first"), openai_200("second")]);
+        let url = format!("http://{}/v1/chat", addr);
+
+        let interp = Interp::new();
+        // Initial config: openai style + key + url + model.
+        let initial = opts(&[
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-carry".to_string())),
+            ("url", Value::Str(url)),
+            ("model", Value::Str("model-a".to_string())),
+        ]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(initial)])
+            .is_err()
+        {
+            panic!("ai.config (initial) failed");
+        }
+        // ai.ask -> model-a on the carried key.
+        match interp.ai_dispatch("ask", vec![Value::Str("hi".to_string())]) {
+            Ok(Value::Str(s)) => assert_eq!(s, "first"),
+            _ => panic!("ai.ask (1) failed"),
+        }
+
+        // /model command: switch ONLY the model — same host, so key/url/style
+        // carry over (a model change is not a retarget).
+        let switch = opts(&[("model", Value::Str("model-b".to_string()))]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(switch)])
+            .is_err()
+        {
+            panic!("ai.config (switch) failed");
+        }
+        // The carried key/url still reach the server, now with model-b.
+        match interp.ai_dispatch("ask", vec![Value::Str("hi again".to_string())]) {
+            Ok(Value::Str(s)) => assert_eq!(s, "second"),
+            _ => panic!("ai.ask (2) failed"),
+        }
+        // Two requests reached the same server (the merge kept the url + key).
+        assert_eq!(h.join().unwrap(), 2, "both calls must hit the carried url");
+
+        // And the stored override now carries model-b with the original key/url.
+        let ov = interp.ai_override.lock().unwrap();
+        assert_eq!(ov.model.as_deref(), Some("model-b"));
+        assert_eq!(ov.key.as_deref(), Some("sk-carry"), "key carried over");
+    }
+
+    #[test]
+    fn config_key_switch_drops_stale_auth_header() {
+        // issue #200 (Codex P1): a previous config sets `authorization` via
+        // `headers` (a gateway scheme). A later /model-style switch supplies a new
+        // `key` (+url) WITHOUT restating headers. The merge must DROP the stale
+        // authorization header, so the new key is sent as Bearer to the new host —
+        // not the old token. (Pure merge test, no network.)
+        let global = AiOverride {
+            style: Some(Provider::OpenAI),
+            headers: [("authorization".to_string(), "Bearer OLD".to_string())].into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            key: Some("NEW".to_string()),
+            url: Some("https://new-host".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        // The stale header is gone — so the Bearer generated from `key` is what
+        // call_openai will emit (header_overridden returns false now).
+        assert!(
+            !header_overridden(&merged.headers, "authorization"),
+            "stale auth header must be dropped on a key switch"
+        );
+        assert_eq!(merged.key.as_deref(), Some("NEW"));
+    }
+
+    #[test]
+    fn config_url_switch_drops_stale_auth_header() {
+        // issue #200 (review P1): a URL-only switch (no key change) must ALSO drop
+        // a stale inherited auth header — otherwise the previous host's token is
+        // forwarded to the new host. This is the same leak as the key switch,
+        // reached via the host-switch path.
+        let global = AiOverride {
+            style: Some(Provider::OpenAI),
+            url: Some("https://host-a".to_string()),
+            headers: [("authorization".to_string(), "Bearer TOKEN_A".to_string())].into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            url: Some("https://host-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert!(
+            !header_overridden(&merged.headers, "authorization"),
+            "a url switch must drop the stale auth header too"
+        );
+    }
+
+    #[test]
+    fn config_style_switch_drops_stale_auth_header() {
+        // issue #200 (review P1/P2): a style switch retargets the wire format (and
+        // the auth header NAME differs per style) — drop the inherited auth header.
+        let global = AiOverride {
+            style: Some(Provider::Anthropic),
+            headers: [("x-api-key".to_string(), "KEY_A".to_string())].into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            style: Some(Provider::OpenAI),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert!(
+            !header_overridden(&merged.headers, "x-api-key"),
+            "a style switch must drop the stale x-api-key"
+        );
+    }
+
+    #[test]
+    fn config_switch_keeps_non_auth_headers() {
+        // The drop is SCOPED to auth headers — a host-agnostic header the user set
+        // globally (X-Title, HTTP-Referer) must carry over across a switch.
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            headers: [
+                ("authorization".to_string(), "Bearer A".to_string()),
+                ("x-title".to_string(), "MyApp".to_string()),
+            ]
+            .into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            url: Some("https://host-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert!(!header_overridden(&merged.headers, "authorization"));
+        assert_eq!(
+            merged.headers.get("x-title").map(|s| s.as_str()),
+            Some("MyApp"),
+            "non-auth headers must survive a switch"
+        );
+    }
+
+    #[test]
+    fn config_switch_drops_gateway_auth_header() {
+        // The drop covers common gateway/cloud auth schemes too (Azure api-key,
+        // Google x-goog-api-key), not just authorization/x-api-key.
+        let global = AiOverride {
+            headers: [
+                ("api-key".to_string(), "AZ_OLD".to_string()),
+                ("x-goog-api-key".to_string(), "G_OLD".to_string()),
+            ]
+            .into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            key: Some("NEW".to_string()),
+            url: Some("https://host-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert!(!merged.headers.contains_key("api-key"), "Azure api-key");
+        assert!(
+            !merged.headers.contains_key("x-goog-api-key"),
+            "Google x-goog-api-key"
+        );
+    }
+
+    #[test]
+    fn config_no_retarget_keeps_auth_header() {
+        // A switch that does NOT retarget (only `model` changes) must KEEP the
+        // inherited auth header — the model is a property of the same host/key.
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            headers: [("authorization".to_string(), "Bearer A".to_string())].into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            model: Some("gpt-4o".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(
+            merged.headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer A"),
+            "a model-only switch must keep the auth header"
+        );
+    }
+
+    #[test]
+    fn config_url_switch_drops_inherited_key_when_new_key_nil() {
+        // issue #200 (Codex P1 round 3): switching to a new url where the new key
+        // resolves to nil (env unset -> parse_override skips it) must NOT keep the
+        // PREVIOUS host's key — the merge would otherwise reuse the old credential
+        // for the new host. On a retarget a missing new key drops the inherited
+        // one (falls through to env / errors, like the old replace semantics).
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-old".to_string()),
+            ..AiOverride::default()
+        };
+        // {url:new} with key nil -> parsed override has url set, key None.
+        let switch = AiOverride {
+            url: Some("https://host-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert!(
+            merged.key.is_none(),
+            "the old key must not carry over to a new host"
+        );
+        assert_eq!(merged.url.as_deref(), Some("https://host-b"));
+    }
+
+    #[test]
+    fn config_url_switch_with_explicit_new_key_uses_it() {
+        // The drop must not lose a key the switch DOES provide: a retarget with a
+        // fresh key keeps that fresh key.
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-old".to_string()),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            url: Some("https://host-b".to_string()),
+            key: Some("sk-new".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(merged.key.as_deref(), Some("sk-new"));
+    }
+
+    #[test]
+    fn config_restate_same_target_keeps_key() {
+        // The dual of the drop: restating the SAME url while changing only model
+        // is not a retarget, so the inherited key survives.
+        let global = AiOverride {
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-keep".to_string()),
+            model: Some("model-a".to_string()),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            url: Some("https://host-a".to_string()),
+            model: Some("model-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(
+            merged.key.as_deref(),
+            Some("sk-keep"),
+            "restating the same target keeps the inherited key"
+        );
+    }
+
+    #[test]
+    fn config_restate_same_target_keeps_auth_header() {
+        // issue #200 (Codex P2): retarget is decided by VALUE change, not mere
+        // presence. A reusable profile map restates the SAME url/style/key while
+        // changing only `model` — that is NOT a retarget, so the inherited auth
+        // header must survive. (Mere-presence logic would wrongly strip it.)
+        let global = AiOverride {
+            style: Some(Provider::OpenAI),
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-1".to_string()),
+            model: Some("model-a".to_string()),
+            headers: [("authorization".to_string(), "Bearer GATEWAY".to_string())].into(),
+            ..AiOverride::default()
+        };
+        // Same url/style/key restated, only the model differs.
+        let switch = AiOverride {
+            style: Some(Provider::OpenAI),
+            url: Some("https://host-a".to_string()),
+            key: Some("sk-1".to_string()),
+            model: Some("model-b".to_string()),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(
+            merged.headers.get("authorization").map(|s| s.as_str()),
+            Some("Bearer GATEWAY"),
+            "restating the same target must keep the auth header"
+        );
+        assert_eq!(merged.model.as_deref(), Some("model-b"));
+    }
+
+    #[test]
+    fn config_key_switch_keeps_explicit_new_auth_header() {
+        // The drop must NOT clobber an auth header the SWITCH itself restates: if
+        // the new config gives both `key` and `headers.authorization`, the
+        // explicit header wins (a gateway with a custom scheme + a key elsewhere).
+        let global = AiOverride {
+            headers: [("authorization".to_string(), "Bearer OLD".to_string())].into(),
+            ..AiOverride::default()
+        };
+        let switch = AiOverride {
+            key: Some("NEW".to_string()),
+            headers: [("authorization".to_string(), "Custom FRESH".to_string())].into(),
+            ..AiOverride::default()
+        };
+        let merged = global.merge(&switch);
+        assert_eq!(
+            merged.headers.get("authorization").map(|s| s.as_str()),
+            Some("Custom FRESH"),
+            "an explicit auth header in the switch must survive"
+        );
+    }
+
+    #[test]
+    fn config_key_switch_drops_stale_auth_e2e() {
+        // e2e for the Codex P1: ai.config sets a stale authorization header, then
+        // ai.config {key url} switches without restating headers. The wire must
+        // carry the NEW key's Bearer, exactly once, and NOT the stale token.
+        let (addr, handle) = serve_capture(openai_200("ok"));
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let interp = Interp::new();
+        // Initial config: a gateway authorization header (and a dummy url/key).
+        let mut g_headers = BTreeMap::new();
+        g_headers.insert(
+            "Authorization".to_string(),
+            Value::Str("Bearer STALE".to_string()),
+        );
+        let initial = opts(&[
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-old".to_string())),
+            ("url", Value::Str("http://127.0.0.1:1/dead".to_string())),
+            ("headers", Value::Map(g_headers)),
+        ]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(initial)])
+            .is_err()
+        {
+            panic!("ai.config (initial) failed");
+        }
+        // /model-style switch: new key + url, no headers restated.
+        let switch = opts(&[
+            ("key", Value::Str("sk-new".to_string())),
+            ("url", Value::Str(url)),
+        ]);
+        if interp
+            .ai_dispatch("config", vec![Value::Map(switch)])
+            .is_err()
+        {
+            panic!("ai.config (switch) failed");
+        }
+        if interp
+            .ai_dispatch("ask", vec![Value::Str("hi".to_string())])
+            .is_err()
+        {
+            panic!("ai.ask failed");
+        }
+        let req = handle.join().unwrap().to_lowercase();
+        assert_eq!(
+            req.matches("authorization:").count(),
+            1,
+            "exactly one authorization header: {}",
+            req
+        );
+        assert!(
+            req.contains("authorization: bearer sk-new"),
+            "the new key must be sent: {}",
+            req
+        );
+        assert!(
+            !req.contains("bearer stale"),
+            "the stale token must NOT be sent: {}",
+            req
+        );
+    }
+
+    #[test]
+    fn config_empty_map_clears() {
+        // issue #200: ai.config {} (empty) RESETS to the env/auto defaults — the
+        // escape hatch from a partial-merge config. After a config with a custom
+        // key, an empty call must leave a fully empty override.
+        let interp = Interp::new();
+        let cfg = opts(&[
+            ("style", Value::Sym("openai".to_string())),
+            ("key", Value::Str("sk-x".to_string())),
+            ("model", Value::Str("m".to_string())),
+        ]);
+        if interp.ai_dispatch("config", vec![Value::Map(cfg)]).is_err() {
+            panic!("ai.config failed");
+        }
+        // Sanity: the override is set.
+        {
+            let ov = interp.ai_override.lock().unwrap();
+            assert!(ov.key.is_some(), "config should be set before clear");
+        }
+        // Empty map -> clear.
+        if interp
+            .ai_dispatch("config", vec![Value::Map(BTreeMap::new())])
+            .is_err()
+        {
+            panic!("ai.config {{}} failed");
+        }
+        let ov = interp.ai_override.lock().unwrap();
+        assert!(ov.key.is_none() && ov.model.is_none() && ov.style.is_none());
     }
 
     #[test]
