@@ -150,6 +150,23 @@ cfg["db"]["host"] = "localhost"
 "#);
 }
 
+// Computed keys in a chained write evaluate root→leaf (left→right), matching
+// normal `target`-before-`key` index reads. With a side-effecting key generator
+// `m[next()][next()] = 1` must build `m.k1.k2`, NOT `m.k2.k1`.
+#[test]
+fn map_index_assign_key_eval_order() {
+    run(r#"
+n <- 0
+fn next
+  n <- n + 1
+  ret "k${n}"
+m = {}
+m[next()][next()] = 1
+(m.k1.k2 == 1) | (fail "chained key eval order wrong: ${m}")
+((m.has "k2") == false) | (fail "outer key should be k1 not k2: ${m}")
+"#);
+}
+
 // Maps are value types throughout Fluxon (like `.set`/`.push` returning a new
 // value): mutating a map passed into a function does NOT affect the caller's map.
 #[test]

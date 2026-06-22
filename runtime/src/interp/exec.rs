@@ -362,7 +362,8 @@ impl Interp {
     // #220). `target` is an Index/Field chain whose innermost base must be a plain
     // variable (`cnt[w]`, `grid[r][c]`, `cfg.db.port`). We:
     //   1. flatten the chain into the root variable name + a path of accessors
-    //      (outermost→innermost), evaluating any computed keys up front, then
+    //      (root→leaf), evaluating computed keys in that order (matching normal
+    //      `target`-before-`key` index evaluation), then
     //   2. locate the variable's slot with BIND lookup (within the current fn,
     //      if/each/match transparent), and mutate the nested element in place.
     // If the root variable doesn't exist yet, we create it (matching `=` for a
@@ -370,29 +371,24 @@ impl Interp {
     // name should still build the map). Maps grow on a missing key; lists require
     // an in-range integer index (a list is fixed-length — extend with `l.push`).
     fn index_assign(&self, target: &Expr, v: Value, env: &Env) -> Result<(), Flow> {
-        // Flatten the accessor chain. We walk from the outer expression inward,
-        // pushing each accessor, until we hit the root Ident.
-        let mut path: Vec<Accessor> = Vec::new();
+        // Flatten the accessor chain WITHOUT evaluating yet. We walk from the outer
+        // expression inward, collecting each accessor's *source* (a computed-key
+        // expression or a literal field name), until we hit the root Ident. The
+        // collected steps are outer→inner.
+        enum Step<'a> {
+            Key(&'a Expr),  // m[expr]
+            Field(&'a str), // m.name
+        }
+        let mut steps: Vec<Step<'_>> = Vec::new();
         let mut node = target;
         let root_name = loop {
             match node {
                 Expr::Index { target, key } => {
-                    let k = self.eval(key, env)?;
-                    let acc = match k {
-                        Value::Str(s) | Value::Sym(s) => Accessor::Key(s),
-                        Value::Int(i) => Accessor::Idx(i),
-                        other => {
-                            return Err(Flow::err(format!(
-                                "index assignment key must be a string or int, got {}",
-                                other.type_name()
-                            )));
-                        }
-                    };
-                    path.push(acc);
+                    steps.push(Step::Key(key));
                     node = target;
                 }
                 Expr::Field { target, name } => {
-                    path.push(Accessor::Key(name.clone()));
+                    steps.push(Step::Field(name));
                     node = target;
                 }
                 Expr::Ident(name) => break name.clone(),
@@ -403,8 +399,28 @@ impl Interp {
                 }
             }
         };
-        // We collected outer→inner; reverse so the path reads root→leaf.
-        path.reverse();
+        // We collected outer→inner; reverse so the steps read root→leaf, then
+        // evaluate computed keys in that order — matching normal index evaluation
+        // (`target` before `key`), so side-effecting keys in `m[f()][g()] = v` run
+        // left to right.
+        steps.reverse();
+        let mut path: Vec<Accessor> = Vec::with_capacity(steps.len());
+        for step in steps {
+            let acc = match step {
+                Step::Field(name) => Accessor::Key(name.to_string()),
+                Step::Key(key) => match self.eval(key, env)? {
+                    Value::Str(s) | Value::Sym(s) => Accessor::Key(s),
+                    Value::Int(i) => Accessor::Idx(i),
+                    other => {
+                        return Err(Flow::err(format!(
+                            "index assignment key must be a string or int, got {}",
+                            other.type_name()
+                        )));
+                    }
+                },
+            };
+            path.push(acc);
+        }
 
         // Locate the variable slot with bind lookup and mutate in place under one
         // write lock. We mirror `bind`'s traversal (function-local, transparent
