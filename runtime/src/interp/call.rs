@@ -50,6 +50,9 @@ impl Interp {
                     Expr::Call { callee, args } => {
                         let mut argv = self.eval_args(args, env)?;
                         argv.push(l);
+                        // Same arg-position binding as a direct call (issue #222):
+                        // `5 |> log fac` must behave like `log (fac 5)`.
+                        let argv = self.fold_nested_calls(callee, argv, env)?;
                         return self.apply_callee(callee, argv, env);
                     }
                     // `x |> str.up` / `x |> db.all` => an argument-less
@@ -119,22 +122,54 @@ impl Interp {
         // program ran and printed the wrong thing (`<fn fac> 4`) with no error.
         // Now an argument that is a function value consumes the arguments that
         // follow it (innermost-first) and is applied, so `f g x` => `f (g x)`.
-        let argv = self.fold_nested_calls(argv)?;
+        let argv = self.fold_nested_calls(callee, argv, env)?;
         self.apply_callee(callee, argv, env)
+    }
+
+    // Is this callee a builtin that takes plain VALUES (so a function in
+    // argument position is a mistake to be folded), as opposed to one that takes
+    // a callback (where it must arrive uncalled)? Only the bare `log` logger and
+    // the pure value modules (`is_module`: str/math/json/...) qualify. User fns
+    // and callback dispatches (ai/http/db/reg/cron/queue, list HOF methods) do
+    // not. The `log`/module names defer to a user binding of the same name (the
+    // same precedence `apply_callee` uses for its own dispatch).
+    fn callee_takes_values(&self, callee: &Expr, env: &Env) -> bool {
+        match callee {
+            Expr::Ident(id) => id == "log" && self.lookup(id, env).is_err(),
+            Expr::Field { target, .. } => {
+                matches!(target.as_ref(), Expr::Ident(m)
+                    if crate::builtins::is_module(m) && self.lookup(m, env).is_err())
+            }
+            _ => false,
+        }
     }
 
     // Collapses bare function values in argument position into nested calls
     // (issue #219). Scans RIGHT-to-LEFT so inner calls resolve before the
-    // outer ones consume their result: in `log add inc 2 3`, `inc 2` is applied
-    // first, then `add (inc 2) 3`, leaving `log` a single argument.
+    // outer ones consume their result: in `log math.max fac 3 fac 4`, the inner
+    // `fac` calls resolve first, then `math.max ..`, leaving `log` one argument.
     //
-    // A function value is only folded when it is NOT the last argument — a
-    // trailing function is a genuine higher-order argument (`xs.reduce 0 add`,
-    // `http.get "/p" handler`), so it is passed through untouched. A user `fn`
-    // consumes exactly its own arity; a native fn's arity is unknown, so it
-    // greedily consumes the rest (an arity mismatch then fails loudly inside the
-    // native, never silently).
-    fn fold_nested_calls(&self, argv: Vec<Value>) -> Result<Vec<Value>, Flow> {
+    // Only applies when the CALLEE is a builtin that takes VALUES, never a
+    // callback: bare `log`, or a pure value module (`str`/`math`/`json`/... —
+    // exactly `is_module`). Everything else is left alone — in particular a user
+    // `fn` (which may legitimately take a callback followed by an options map,
+    // `run_with cb {opts}`) and the callback-taking dispatches (`ai.stream`,
+    // `http.on`, `xs.map`, `db.tx`, `reg.add`, ...), where folding would call the
+    // callback during argument evaluation and break the API (Codex review #222).
+    //
+    // A function value is also only folded when it is NOT the last argument. A
+    // user `fn` consumes exactly its own arity; a native fn's arity is unknown,
+    // so it greedily consumes the rest (an arity mismatch then fails loudly
+    // inside the native, never silently).
+    fn fold_nested_calls(
+        &self,
+        callee: &Expr,
+        argv: Vec<Value>,
+        env: &Env,
+    ) -> Result<Vec<Value>, Flow> {
+        if !self.callee_takes_values(callee, env) {
+            return Ok(argv);
+        }
         // Fast path: nothing to fold unless a non-last argument is callable.
         let needs_fold = argv
             .iter()

@@ -72,8 +72,8 @@ not `m.set` (which returns a new map and discards it if unbound).
 fn add a b
   ret a + b               # ret (early) or last expression (implicit)
 fn double x -> x * 2      # one-liner
-add 2 3                   # paren-free call. A fn in arg position runs first:
-log fac 5                 # == log (fac 5) (nested call binds tighter, not log(fac,5))
+add 2 3                   # paren-free call; parens group: f (g x)
+log fac 5                 # builtin arg: fn runs first == log (fac 5), not log(fac,5)
 fn new_id -> rand.str 8   # no params
 new_id()                  # nullary call (empty parens REQUIRED to call)
 new_id                    # NOT a call — the function VALUE (for callbacks/reg)
@@ -103,9 +103,11 @@ parens, or the operator's right side is swallowed as an extra argument:
 `if (str.len s) > 0 a else b` (not `if str.len s > 0 ...`). A prefix `!`/`-` does
 NOT need this — it binds the whole call: `!str.starts h "Bearer "` ≡
 `!(str.starts h "Bearer ")`, and the same after `|`/`&`.
-A fn value in argument position runs FIRST, consuming its own arguments:
-`log fac 5` ≡ `log (fac 5)` (it is NOT passed uncalled). A TRAILING fn is a real
-higher-order arg, left alone: `xs.reduce 0 add`, `http.on :get "/" handler`.
+A fn value in argument position of a VALUE builtin (`log`, `math.*`, `str.*`, ...)
+runs FIRST, consuming its own arguments: `log fac 5` ≡ `log (fac 5)` (it is NOT
+passed uncalled). This does NOT apply to your own fns or callback APIs
+(`xs.map f`, `ai.stream "p" cb {..}`, `http.on :get "/" handler`) — there a fn
+arg is a real higher-order argument; wrap a nested call yourself: `run f (g x)`.
 Only loop = `each` (no while/for):
 ```fluxon
 each item in list   ·   each i in 1..5   ·   each k, v in map   ·   each i in inf
