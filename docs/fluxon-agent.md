@@ -37,6 +37,7 @@ Truthy: only `nil`/`false` are false.
 ```
 x = 10              # bind a LOCAL (DEFAULT). Re-`=` updates it: x = 20.
 total <- 0          # reassign + reach OUT of the function (closure / outer var).
+m[k] = v            # write into a map IN PLACE (also m.key = v, l[i] = v).
 ```
 `=` binds in the current function (like Python assignment) — `if`/`each`/`match`
 are transparent, so `total = 0` then `each .. total = total + 1` accumulates.
@@ -44,6 +45,18 @@ Inside a function `=` makes a LOCAL (it never touches an outer/global of the sam
 name). To write to a variable from an ENCLOSING function or the top level, use
 `<-` (it crosses the function boundary — closure capture). No immutability: any
 name can be re-bound.
+
+Write into a collection with `m[k] = v` (canonical) — mutates the map element in
+place, so the counting accumulator works directly:
+```fluxon
+cnt = {}
+each w in words
+  cnt[w] = (cnt[w] ?? 0) + 1     # cnt[w] reads (nil→?? 0), = writes back
+```
+`m.key = v` (literal key) and `l[i] = v` (list, index must be in range — lists are
+fixed-length, grow with `l.push`) work the same way; a missing intermediate map
+level is auto-created (`cfg["db"]["port"] = 8080`). For a NEW map use this form,
+not `m.set` (which returns a new map and discards it if unbound).
 
 ## Operators
 ```

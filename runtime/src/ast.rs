@@ -172,6 +172,18 @@ pub enum Stmt {
         value: Expr,
     },
 
+    // target[key] = expr  /  target.field = expr  — in-place element mutation of a
+    // map or list (issue #220). Uses `=` and therefore BIND lookup semantics: the
+    // variable holding the collection is found within the current function
+    // (if/each/match transparent), and the element is updated in place. This makes
+    // the canonical accumulator work: `cnt = {}` then `each w .. cnt[w] = (cnt[w]
+    // ?? 0) + 1`. `target` is an Index or Field expression whose innermost base is
+    // an Ident (the variable to mutate).
+    IndexAssign {
+        target: Box<Expr>,
+        value: Expr,
+    },
+
     // fn name params... -> body
     FnDecl {
         name: String,

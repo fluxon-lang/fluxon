@@ -164,6 +164,11 @@ impl Interp {
                 }
                 Ok(Value::Nil)
             }
+            Stmt::IndexAssign { target, value } => {
+                let v = self.eval(value, env)?;
+                self.index_assign(target, v, env)?;
+                Ok(Value::Nil)
+            }
             Stmt::ExpBind { name, value } => {
                 let v = self.eval(value, env)?;
                 // exp bind — an exportable global. (The `false` is the legacy
@@ -353,6 +358,88 @@ impl Interp {
         )))
     }
 
+    // `m[k] = v` / `l[i] = v` / `m.field = v` — in-place element mutation (issue
+    // #220). `target` is an Index/Field chain whose innermost base must be a plain
+    // variable (`cnt[w]`, `grid[r][c]`, `cfg.db.port`). We:
+    //   1. flatten the chain into the root variable name + a path of accessors
+    //      (outermost→innermost), evaluating any computed keys up front, then
+    //   2. locate the variable's slot with BIND lookup (within the current fn,
+    //      if/each/match transparent), and mutate the nested element in place.
+    // If the root variable doesn't exist yet, we create it (matching `=` for a
+    // single key: `cnt = {}` is the normal precursor, but `cnt[w] = 1` on a fresh
+    // name should still build the map). Maps grow on a missing key; lists require
+    // an in-range integer index (a list is fixed-length — extend with `l.push`).
+    fn index_assign(&self, target: &Expr, v: Value, env: &Env) -> Result<(), Flow> {
+        // Flatten the accessor chain. We walk from the outer expression inward,
+        // pushing each accessor, until we hit the root Ident.
+        let mut path: Vec<Accessor> = Vec::new();
+        let mut node = target;
+        let root_name = loop {
+            match node {
+                Expr::Index { target, key } => {
+                    let k = self.eval(key, env)?;
+                    let acc = match k {
+                        Value::Str(s) | Value::Sym(s) => Accessor::Key(s),
+                        Value::Int(i) => Accessor::Idx(i),
+                        other => {
+                            return Err(Flow::err(format!(
+                                "index assignment key must be a string or int, got {}",
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    path.push(acc);
+                    node = target;
+                }
+                Expr::Field { target, name } => {
+                    path.push(Accessor::Key(name.clone()));
+                    node = target;
+                }
+                Expr::Ident(name) => break name.clone(),
+                _ => {
+                    return Err(Flow::err(
+                        "index assignment target must start at a variable (e.g. `m[k] = v`)",
+                    ));
+                }
+            }
+        };
+        // We collected outer→inner; reverse so the path reads root→leaf.
+        path.reverse();
+
+        // Locate the variable slot with bind lookup and mutate in place under one
+        // write lock. We mirror `bind`'s traversal (function-local, transparent
+        // blocks) so `cnt[w]=` inside an `each` updates the outer `cnt`.
+        let mut cur = env.clone();
+        loop {
+            let (parent, at_boundary) = {
+                let mut s = cur.write();
+                if let Some(slot) = s.get_mut_value(&root_name) {
+                    return apply_path(slot, &path, v, &root_name);
+                }
+                (s.parent.clone(), s.is_fn_boundary)
+            };
+            if at_boundary {
+                break;
+            }
+            match parent {
+                Parent::Scope(p) => cur = p,
+                Parent::Root => {
+                    if self.globals_frozen.get().is_some() {
+                        break;
+                    }
+                    cur = self.global.clone();
+                }
+                Parent::None => break,
+            }
+        }
+        // The variable does not exist yet — create it in the current scope as an
+        // empty map and write into it (so `cnt[w] = 1` works without `cnt = {}`).
+        let mut fresh = Value::Map(std::collections::BTreeMap::new());
+        apply_path(&mut fresh, &path, v, &root_name)?;
+        env.write().define(&root_name, fresh, true);
+        Ok(())
+    }
+
     // `=` bind: searches for the variable WITHIN THE CURRENT FUNCTION. if/each/
     // match blocks are lexically transparent — an `=` inside them updates an
     // outer variable in the same fn (Python: if/for open no scope), so an
@@ -480,5 +567,89 @@ impl Interp {
             }
         }
         Ok(Value::Nil)
+    }
+}
+
+// One step in an index-assignment path: a map key or a list index. Computed keys
+// are evaluated before the path is walked (see `index_assign`), so the path holds
+// already-resolved accessors and the slot mutation needs no `&self`/`env`.
+enum Accessor {
+    Key(String),
+    Idx(i64),
+}
+
+// Walks `path` into `slot` (a Map/List value held in a scope) and writes `v` at
+// the leaf, mutating in place. Intermediate map keys are auto-created (an empty
+// map) so a deep write like `cfg["db"]["port"] = 8080` works on a fresh `cfg`;
+// list indices must already be in range (lists are fixed-length — grow with
+// `l.push`). `root` is only used for error messages.
+fn apply_path(slot: &mut Value, path: &[Accessor], v: Value, root: &str) -> Result<(), Flow> {
+    let (last, parents) = match path.split_last() {
+        Some(p) => p,
+        // No accessors — this would be a plain `=`, never produced by the parser.
+        None => return Err(Flow::err("index assignment has no key")),
+    };
+    // Descend through the parent accessors, auto-creating missing map levels.
+    let mut cur = slot;
+    for acc in parents {
+        cur = step_into(cur, acc, root)?;
+    }
+    // Write the leaf.
+    match (cur, last) {
+        (Value::Map(m), Accessor::Key(k)) => {
+            m.insert(k.clone(), v);
+            Ok(())
+        }
+        (Value::List(xs), Accessor::Idx(i)) => {
+            let idx = *i;
+            if idx < 0 || idx as usize >= xs.len() {
+                return Err(Flow::err(format!(
+                    "list index {} out of range (len {}) — lists are fixed-length, use l.push to grow",
+                    idx,
+                    xs.len()
+                )));
+            }
+            xs[idx as usize] = v;
+            Ok(())
+        }
+        (other, Accessor::Key(_)) => Err(Flow::err(format!(
+            "cannot assign a string key into {} (only maps have string keys)",
+            other.type_name()
+        ))),
+        (other, Accessor::Idx(_)) => Err(Flow::err(format!(
+            "cannot assign an int index into {} (only lists are int-indexed)",
+            other.type_name()
+        ))),
+    }
+}
+
+// Returns a mutable reference to the child at `acc`, auto-creating a missing map
+// key as an empty map (so deep writes build the path). List indices must exist.
+fn step_into<'a>(cur: &'a mut Value, acc: &Accessor, root: &str) -> Result<&'a mut Value, Flow> {
+    match (cur, acc) {
+        (Value::Map(m), Accessor::Key(k)) => Ok(m
+            .entry(k.clone())
+            .or_insert_with(|| Value::Map(std::collections::BTreeMap::new()))),
+        (Value::List(xs), Accessor::Idx(i)) => {
+            let idx = *i;
+            if idx < 0 || idx as usize >= xs.len() {
+                return Err(Flow::err(format!(
+                    "list index {} out of range (len {})",
+                    idx,
+                    xs.len()
+                )));
+            }
+            Ok(&mut xs[idx as usize])
+        }
+        (other, Accessor::Key(_)) => Err(Flow::err(format!(
+            "cannot index into {} with a string key (in `{}[...]`)",
+            other.type_name(),
+            root
+        ))),
+        (other, Accessor::Idx(_)) => Err(Flow::err(format!(
+            "cannot index into {} with an int (in `{}[...]`)",
+            other.type_name(),
+            root
+        ))),
     }
 }

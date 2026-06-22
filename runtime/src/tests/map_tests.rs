@@ -73,6 +73,111 @@ up = str.up "hello"
 "#);
 }
 
+// Issue #220 — index assignment `m[k] = v` for maps. This is the canonical
+// map-write form (every small model reaches for it); it mutates the map held by
+// the variable in place, using `=` BIND lookup (function-local, transparent
+// through if/each/match) so the accumulator pattern works.
+#[test]
+fn map_index_assign() {
+    run(r#"
+cnt = {}
+cnt["a"] = 1
+cnt["b"] = 2
+cnt["a"] = (cnt["a"] ?? 0) + 10
+(cnt.a == 11) | (fail "index assign a: ${cnt.a}")
+(cnt.b == 2) | (fail "index assign b: ${cnt.b}")
+(cnt.len == 2) | (fail "index assign count: ${cnt.len}")
+"#);
+}
+
+// The canonical accumulator from the issue: counting words into a map inside an
+// `each` loop. The `each` block is transparent, so `cnt[w] =` updates the outer
+// `cnt` (not a fresh per-iteration local).
+#[test]
+fn map_index_assign_accumulator() {
+    run(r#"
+words = ["red" "blue" "red" "green" "blue" "red"]
+cnt = {}
+each w in words
+  cnt[w] = (cnt[w] ?? 0) + 1
+(cnt.red == 3) | (fail "red != 3: ${cnt.red}")
+(cnt.blue == 2) | (fail "blue != 2: ${cnt.blue}")
+(cnt.green == 1) | (fail "green != 1: ${cnt.green}")
+"#);
+}
+
+// A computed (variable) key works the same as a literal one.
+#[test]
+fn map_index_assign_computed_key() {
+    run(r#"
+m = {}
+k = "dyn"
+m[k] = 42
+(m.dyn == 42) | (fail "computed key: ${m.dyn}")
+"#);
+}
+
+// `m.field = v` — the field (dot) form mutates the same way as `m["field"]`.
+#[test]
+fn map_field_assign() {
+    run(r#"
+m = {a:1 b:2}
+m.a = 99
+(m.a == 99) | (fail "field assign: ${m.a}")
+(m.b == 2) | (fail "field assign sibling changed: ${m.b}")
+"#);
+}
+
+// Writing to a name that does not exist yet auto-creates the map (so `cnt["a"] =
+// 1` works without a preceding `cnt = {}`).
+#[test]
+fn map_index_assign_creates_var() {
+    run(r#"
+fresh["x"] = 5
+(fresh.x == 5) | (fail "auto-create: ${fresh.x}")
+"#);
+}
+
+// A deep write auto-creates intermediate map levels (`cfg["db"]["port"] = 8080`).
+#[test]
+fn map_index_assign_nested() {
+    run(r#"
+cfg = {}
+cfg["db"]["port"] = 8080
+cfg["db"]["host"] = "localhost"
+(cfg.db.port == 8080) | (fail "nested port: ${cfg.db.port}")
+(cfg.db.host == "localhost") | (fail "nested host: ${cfg.db.host}")
+"#);
+}
+
+// Maps are value types throughout Fluxon (like `.set`/`.push` returning a new
+// value): mutating a map passed into a function does NOT affect the caller's map.
+#[test]
+fn map_index_assign_is_value_local() {
+    run(r#"
+m = {n:1}
+fn bump x
+  x["n"] = 99
+  ret x
+bumped = bump m
+(bumped.n == 99) | (fail "callee did not see write: ${bumped.n}")
+(m.n == 1) | (fail "caller map was mutated (should be a value copy): ${m.n}")
+"#);
+}
+
+// Indexing into a non-collection with a string key is a loud error, not silent.
+#[test]
+fn map_index_assign_wrong_type_errors() {
+    let e = run_source(
+        r#"
+x = 5
+x["k"] = 1
+"#,
+    )
+    .unwrap_err();
+    assert!(e.contains("int"), "unexpected error text: {}", e);
+}
+
 // Issue #98 — nested numeric index `m.0.1`. The lexer used to greedily swallow
 // `.1` as `Flt(0.1)` (not knowing it was in a `.` member context). Now a number
 // after a member index does not start a float: `m.0.1` ≡ `(m.0).1`.
