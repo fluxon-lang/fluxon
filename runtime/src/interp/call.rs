@@ -155,8 +155,12 @@ impl Interp {
                     matches!(name.as_str(), "debug" | "info" | "warn" | "err")
                         && self.lookup(m, env).is_err()
                 }
-                // `str.*`/`math.*`/... — pure value modules.
-                Expr::Ident(m) => crate::builtins::is_module(m) && self.lookup(m, env).is_err(),
+                // `str.*`/`math.*`/... — pure value modules. `apply_callee`
+                // routes `is_module` names to `call_module` UNCONDITIONALLY (a
+                // module name is never a value, so a `math = nil` binding does
+                // not shadow `math.max`); match that here, with no lookup check,
+                // so folding stays consistent with dispatch (Codex review #222).
+                Expr::Ident(m) => crate::builtins::is_module(m),
                 _ => false,
             },
             _ => false,

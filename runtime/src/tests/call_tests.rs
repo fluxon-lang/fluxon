@@ -165,6 +165,18 @@ add inc 2 3
         err
     );
 
+    // A callback dispatch (`reg.add`: a Field whose module is NOT `is_module`)
+    // is excluded — the handler must reach the registry uncalled. If it were
+    // folded, `called` would flip during argument evaluation.
+    run(r#"
+called <- false
+fn handler x
+  called <- true
+  ret x
+reg.add "h" handler
+(called == false) | (fail "callback dispatch handler must not be folded")
+"#);
+
     // The pipe partial-call path folds the same way for a value builtin.
     run(r#"
 fn fac n
@@ -173,6 +185,17 @@ fn fac n
   fac (n - 1) * n
 # `5 |> math.max fac 0` => `math.max fac 0 5` => `math.max (fac 0) 5` = max(1,5) = 5
 (5 |> math.max fac 0 == 5) | (fail "pipe fold: max(fac 0, 5) = 5")
+"#);
+
+    // A binding that merely shares a core module's name does NOT shadow it —
+    // `apply_callee` routes `is_module` names to the builtin unconditionally, so
+    // folding must too (Codex review #222). `math = nil` must not break the rule.
+    run(r#"
+fn inc n
+  ret n + 1
+math = nil
+# `math.max inc 1 5` => `math.max (inc 1) 5` = max(2, 5) = 5
+(math.max inc 1 5 == 5) | (fail "module-name binding must not break fold")
 "#);
 }
 
