@@ -113,7 +113,62 @@ impl Interp {
     // ---------------- call ----------------
     pub(crate) fn eval_call(&self, callee: &Expr, args: &[Expr], env: &Env) -> EvalResult {
         let argv = self.eval_args(args, env)?;
+        // Paren-free nested calls bind tighter in argument position (issue #219):
+        // `log fac 4` means `log (fac 4)`, not `log(fac, 4)`. Before this, a bare
+        // function value sitting in argument position was passed UNCALLED — the
+        // program ran and printed the wrong thing (`<fn fac> 4`) with no error.
+        // Now an argument that is a function value consumes the arguments that
+        // follow it (innermost-first) and is applied, so `f g x` => `f (g x)`.
+        let argv = self.fold_nested_calls(argv)?;
         self.apply_callee(callee, argv, env)
+    }
+
+    // Collapses bare function values in argument position into nested calls
+    // (issue #219). Scans RIGHT-to-LEFT so inner calls resolve before the
+    // outer ones consume their result: in `log add inc 2 3`, `inc 2` is applied
+    // first, then `add (inc 2) 3`, leaving `log` a single argument.
+    //
+    // A function value is only folded when it is NOT the last argument — a
+    // trailing function is a genuine higher-order argument (`xs.reduce 0 add`,
+    // `http.get "/p" handler`), so it is passed through untouched. A user `fn`
+    // consumes exactly its own arity; a native fn's arity is unknown, so it
+    // greedily consumes the rest (an arity mismatch then fails loudly inside the
+    // native, never silently).
+    fn fold_nested_calls(&self, argv: Vec<Value>) -> Result<Vec<Value>, Flow> {
+        // Fast path: nothing to fold unless a non-last argument is callable.
+        let needs_fold = argv
+            .iter()
+            .take(argv.len().saturating_sub(1))
+            .any(|v| matches!(v, Value::Fn(_) | Value::Native(_)));
+        if !needs_fold {
+            return Ok(argv);
+        }
+        let mut out: Vec<Value> = Vec::with_capacity(argv.len());
+        // Build the result right-to-left, then reverse. `out` holds the
+        // already-folded tail (in reverse); a function pops its arguments off it.
+        for v in argv.into_iter().rev() {
+            match &v {
+                Value::Fn(_) | Value::Native(_) if !out.is_empty() => {
+                    let take = match &v {
+                        Value::Fn(fv) => fv.params.len(),
+                        _ => out.len(), // native: arity unknown, take the rest
+                    };
+                    let take = take.min(out.len());
+                    let mut call_args = Vec::with_capacity(take);
+                    for _ in 0..take {
+                        // `out` holds the tail in reverse, so its back is the
+                        // argument nearest this function — popping yields them in
+                        // left-to-right source order.
+                        call_args.push(out.pop().unwrap());
+                    }
+                    let result = self.apply(v, call_args)?;
+                    out.push(result);
+                }
+                _ => out.push(v),
+            }
+        }
+        out.reverse();
+        Ok(out)
     }
 
     // Calls the callee with the arguments ALREADY evaluated. eval_call and pipe

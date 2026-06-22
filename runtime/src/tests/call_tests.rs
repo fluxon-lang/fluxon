@@ -87,3 +87,40 @@ g(5)
     .expect_err("f(x) with parenthesized argument should error");
     assert!(err.contains("argument-less"), "unexpected error: {}", err);
 }
+
+// Issue #219: a paren-free nested call binds tighter in argument position.
+// `log fac 4` means `log (fac 4)`, NOT `log(fac, 4)`. Before the fix the bare
+// function value `fac` was passed UNCALLED and the program silently printed the
+// wrong thing (`<fn fac> 4`) with no error — the dangerous class of trap. Now a
+// non-last function-valued argument consumes the arguments that follow it
+// (innermost-first) and is applied.
+#[test]
+fn parenless_nested_call_binds_in_arg_position() {
+    run(r#"
+fn fac n
+  if n == 0
+    ret 1
+  fac (n - 1) * n
+fn inc n
+  ret n + 1
+fn add a b
+  ret a + b
+
+# the exact issue example: `log fac 5` == `log (fac 5)` == 120, no bare fn value
+(fac 5 == 120) | (fail "fac 5 should be 120")
+
+# a user fn consumes exactly its own arity, leaving the rest for the outer call
+(add inc 2 3 == 6) | (fail "add inc 2 3 should be add (inc 2) 3 = 6")
+
+# chained: `inc inc 2` == `inc (inc 2)` == 4
+(inc inc 2 == 4) | (fail "inc inc 2 should be 4")
+
+# genuine multi-arg calls are UNAFFECTED — `2` is not a function value
+(add 2 3 == 5) | (fail "add 2 3 must stay 5")
+
+# a TRAILING function value is a real higher-order argument, never folded
+xs = [1 2 3]
+(xs.map inc == [2 3 4]) | (fail "trailing fn arg must pass through (map)")
+(xs.reduce 0 add == 6) | (fail "trailing fn arg must pass through (reduce)")
+"#);
+}
