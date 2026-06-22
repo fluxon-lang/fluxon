@@ -128,18 +128,37 @@ impl Interp {
 
     // Is this callee a builtin that takes plain VALUES (so a function in
     // argument position is a mistake to be folded), as opposed to one that takes
-    // a callback (where it must arrive uncalled)? Only the bare `log` logger and
-    // the pure value modules (`is_module`: str/math/json/...) qualify. User fns
-    // and callback dispatches (ai/http/db/reg/cron/queue, list HOF methods) do
-    // not. The `log`/module names defer to a user binding of the same name (the
-    // same precedence `apply_callee` uses for its own dispatch).
+    // a callback (which must arrive uncalled)? This is an ALLOWLIST of the
+    // value-taking builtins, so any callback API is excluded by default:
+    //   - bare `log` / `rep` / `assert` (the value-taking globals);
+    //   - the leveled logger `log.debug/info/warn/err`;
+    //   - the pure value modules (`is_module`: str/math/json/time/...).
+    // Excluded (NOT folded): user `fn`s (may take a callback before an options
+    // map, `run_with cb {opts}`), the callback dispatches (ai/http/ws/db/reg/
+    // cron/queue/par), and list HOF methods (`xs.map f`). Names defer to a user
+    // binding of the same name — the precedence `apply_callee` itself uses.
     fn callee_takes_values(&self, callee: &Expr, env: &Env) -> bool {
         match callee {
-            Expr::Ident(id) => id == "log" && self.lookup(id, env).is_err(),
-            Expr::Field { target, .. } => {
-                matches!(target.as_ref(), Expr::Ident(m)
-                    if crate::builtins::is_module(m) && self.lookup(m, env).is_err())
-            }
+            // `rep`/`assert` are installed globals — `lookup` returns the native
+            // (a user re-binding would shadow it and is left alone). `log` is not
+            // installed, so it is the builtin only when no `log` var exists.
+            Expr::Ident(id) => match id.as_str() {
+                "log" => self.lookup(id, env).is_err(),
+                "rep" | "assert" => {
+                    matches!(self.lookup(id, env), Ok(Value::Native(_)))
+                }
+                _ => false,
+            },
+            Expr::Field { target, name } => match target.as_ref() {
+                // `log.debug/info/warn/err` — the leveled logger (value-taking).
+                Expr::Ident(m) if m == "log" => {
+                    matches!(name.as_str(), "debug" | "info" | "warn" | "err")
+                        && self.lookup(m, env).is_err()
+                }
+                // `str.*`/`math.*`/... — pure value modules.
+                Expr::Ident(m) => crate::builtins::is_module(m) && self.lookup(m, env).is_err(),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -182,13 +201,16 @@ impl Interp {
         // Build the result right-to-left, then reverse. `out` holds the
         // already-folded tail (in reverse); a function pops its arguments off it.
         for v in argv.into_iter().rev() {
+            // A nullary fn consumes nothing — folding it would auto-call it
+            // (`log new_id "tag"` must NOT run `new_id`; Fluxon requires the
+            // explicit `new_id()`). So `take == 0` falls through to pass-through.
+            let take = match &v {
+                Value::Fn(fv) => fv.params.len().min(out.len()),
+                Value::Native(_) => out.len(), // native: arity unknown, take the rest
+                _ => 0,
+            };
             match &v {
-                Value::Fn(_) | Value::Native(_) if !out.is_empty() => {
-                    let take = match &v {
-                        Value::Fn(fv) => fv.params.len(),
-                        _ => out.len(), // native: arity unknown, take the rest
-                    };
-                    let take = take.min(out.len());
+                Value::Fn(_) | Value::Native(_) if take > 0 => {
                     let mut call_args = Vec::with_capacity(take);
                     for _ in 0..take {
                         // `out` holds the tail in reverse, so its back is the

@@ -175,3 +175,38 @@ fn fac n
 (5 |> math.max fac 0 == 5) | (fail "pipe fold: max(fac 0, 5) = 5")
 "#);
 }
+
+// Issue #222 (Codex review): the value-builtin allowlist also covers `rep`,
+// `assert`, and `log.*` — not just bare `log` and modules. `rep status fn args`
+// must fold the body so it is not a bare function value (the silent-wrong class).
+#[test]
+fn arg_fold_covers_rep_and_log_levels() {
+    // `rep 200 fac 5` => `rep 200 (fac 5)`: the body becomes 120, not <fn fac>.
+    run(r#"
+fn fac n
+  if n == 0
+    ret 1
+  fac (n - 1) * n
+r = rep 200 fac 5
+(r.body == 120) | (fail "rep body should be folded to 120, got ${r.body}")
+"#);
+}
+
+// Issue #222 (Codex review): a nullary fn must NOT be auto-called while folding.
+// `new_id "tag"` would make `take == 0`; folding must leave `new_id` a bare
+// function value (Fluxon requires the explicit `new_id()` to call it).
+#[test]
+fn arg_fold_does_not_autocall_nullary() {
+    run(r#"
+calls <- 0
+fn nid
+  calls <- calls + 1
+  ret "x"
+# rep is a value builtin and nid is NOT the last arg (headers map follows), so
+# folding is considered — but nid is nullary (consumes nothing), so it is passed
+# UNCALLED as the body and `calls` stays 0.
+r = rep 200 nid {ct: "txt"}
+(calls == 0) | (fail "nullary fn must not be auto-called by folding")
+(r.body != "x") | (fail "nullary fn should remain a function value, not its result")
+"#);
+}
