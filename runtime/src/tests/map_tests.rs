@@ -182,6 +182,23 @@ bumped = bump m
 "#);
 }
 
+// A failed deep write must not leak the empty parent maps it auto-created. Since
+// `try/catch` resumes, a half-applied write would corrupt the map. The pre-check
+// makes the write all-or-nothing: after a caught error the map is untouched.
+#[test]
+fn map_index_assign_failed_write_no_leak() {
+    run(r#"
+m = {a:1}
+try
+  m["x"]["y"][0] = 1
+catch e
+  nil
+(m.a == 1) | (fail "existing key lost: ${m.a}")
+((m.has "x") == false) | (fail "failed write leaked auto-created parent: ${m}")
+(m.len == 1) | (fail "map grew on a failed write: ${m}")
+"#);
+}
+
 // Indexing into a non-collection with a string key is a loud error, not silent.
 #[test]
 fn map_index_assign_wrong_type_errors() {

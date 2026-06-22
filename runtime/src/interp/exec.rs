@@ -605,6 +605,12 @@ fn apply_path(slot: &mut Value, path: &[Accessor], v: Value, root: &str) -> Resu
         // No accessors — this would be a plain `=`, never produced by the parser.
         None => return Err(Flow::err("index assignment has no key")),
     };
+    // Validate the WHOLE path before mutating anything. step_into auto-creates
+    // missing map parents, so a leaf error after a deep descent would otherwise
+    // leave those empty parents behind (e.g. `try m["x"][0] = 1` would leak
+    // `m.x = {}`). Since `try/catch` resumes execution, that would corrupt the
+    // map. A read-only pre-check makes the write all-or-nothing.
+    validate_path(slot, path, root)?;
     // Descend through the parent accessors, auto-creating missing map levels.
     let mut cur = slot;
     for acc in parents {
@@ -636,6 +642,81 @@ fn apply_path(slot: &mut Value, path: &[Accessor], v: Value, root: &str) -> Resu
             "cannot assign an int index into {} (only lists are int-indexed)",
             other.type_name()
         ))),
+    }
+}
+
+// Read-only dry run of `apply_path`: checks every accessor against the existing
+// structure (and every list index for range) WITHOUT mutating, so a failure
+// midway cannot leave auto-created parents behind. A missing map key is treated
+// as a soon-to-be-created empty map — so the next accessor must be a string key
+// (an int index into a fresh map is the error we want to catch up front).
+fn validate_path(slot: &Value, path: &[Accessor], root: &str) -> Result<(), Flow> {
+    // Tracks the value we're "standing on"; None means it will be auto-created as
+    // an empty map (so only a Key accessor is valid next).
+    let mut cur: Option<&Value> = Some(slot);
+    let (last, parents) = match path.split_last() {
+        Some(p) => p,
+        None => return Err(Flow::err("index assignment has no key")),
+    };
+    for acc in parents {
+        match (cur, acc) {
+            (Some(Value::Map(m)), Accessor::Key(k)) => cur = m.get(k),
+            (Some(Value::List(xs)), Accessor::Idx(i)) => {
+                let idx = *i;
+                if idx < 0 || idx as usize >= xs.len() {
+                    return Err(Flow::err(format!(
+                        "list index {} out of range (len {})",
+                        idx,
+                        xs.len()
+                    )));
+                }
+                cur = Some(&xs[idx as usize]);
+            }
+            // A missing parent (None) is created as an empty map; an int index
+            // into it (or into an existing map) is invalid.
+            (None, Accessor::Key(_)) => cur = None,
+            (Some(other), Accessor::Key(_)) => {
+                return Err(Flow::err(format!(
+                    "cannot index into {} with a string key (in `{}[...]`)",
+                    other.type_name(),
+                    root
+                )));
+            }
+            (cur_v, Accessor::Idx(_)) => {
+                let tn = cur_v.map(|v| v.type_name()).unwrap_or("map");
+                return Err(Flow::err(format!(
+                    "cannot index into {} with an int (in `{}[...]`)",
+                    tn, root
+                )));
+            }
+        }
+    }
+    // The leaf: a Key writes into a map (existing or auto-created), an Idx writes
+    // into a list element (must be in range).
+    match (cur, last) {
+        (Some(Value::Map(_)) | None, Accessor::Key(_)) => Ok(()),
+        (Some(Value::List(xs)), Accessor::Idx(i)) => {
+            let idx = *i;
+            if idx < 0 || idx as usize >= xs.len() {
+                return Err(Flow::err(format!(
+                    "list index {} out of range (len {}) — lists are fixed-length, use l.push to grow",
+                    idx,
+                    xs.len()
+                )));
+            }
+            Ok(())
+        }
+        (Some(other), Accessor::Key(_)) => Err(Flow::err(format!(
+            "cannot assign a string key into {} (only maps have string keys)",
+            other.type_name()
+        ))),
+        (cur_v, Accessor::Idx(_)) => {
+            let tn = cur_v.map(|v| v.type_name()).unwrap_or("map");
+            Err(Flow::err(format!(
+                "cannot assign an int index into {} (only lists are int-indexed)",
+                tn
+            )))
+        }
     }
 }
 
