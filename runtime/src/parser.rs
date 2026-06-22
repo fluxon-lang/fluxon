@@ -229,6 +229,18 @@ impl Parser {
                 value,
             });
         }
+        // `m[k] = v` / `l[i] = v` / `m.field = v` — in-place element mutation
+        // (issue #220). A plain `name = v` is already handled above via peek2; here
+        // `=` after an indexed/field lvalue is the only remaining `=` case, so it
+        // must be an element write. We require an Index/Field target so a stray `=`
+        // after some other expression still surfaces as the usual parse error.
+        if matches!(lhs, Expr::Index { .. } | Expr::Field { .. }) && self.eat(&Tok::Eq) {
+            let value = self.parse_expr()?;
+            return Ok(Stmt::IndexAssign {
+                target: Box::new(lhs),
+                value,
+            });
+        }
         Ok(Stmt::Expr(lhs))
     }
 

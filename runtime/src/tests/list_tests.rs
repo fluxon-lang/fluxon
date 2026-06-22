@@ -11,6 +11,50 @@ log "evens=${evens} doubled=${doubled} total=${total}"
 "#);
 }
 
+// Issue #220 — index assignment `l[i] = v` for lists: in-place element update at
+// an in-range integer index.
+#[test]
+fn list_index_assign() {
+    run(r#"
+l = [1 2 3]
+l[1] = 20
+l[0] = (l[0] ?? 0) + 100
+(l.0 == 101) | (fail "l[0]: ${l.0}")
+(l.1 == 20) | (fail "l[1]: ${l.1}")
+(l.2 == 3) | (fail "l[2]: ${l.2}")
+(l.len == 3) | (fail "len changed: ${l.len}")
+"#);
+}
+
+// A nested list/map element can be written through a chain (`grid[r][c]`).
+#[test]
+fn list_index_assign_nested() {
+    run(r#"
+grid = [[1 2] [3 4]]
+grid[0][1] = 99
+(grid.0.1 == 99) | (fail "grid[0][1]: ${grid.0.1}")
+(grid.1.0 == 3) | (fail "grid[1][0] changed: ${grid.1.0}")
+"#);
+}
+
+// Lists are fixed-length: an out-of-range index is a loud error directing the
+// user to `l.push` (not a silent grow / no-op).
+#[test]
+fn list_index_assign_out_of_range_errors() {
+    let e = run_source(
+        r#"
+l = [1 2 3]
+l[5] = 9
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        e.contains("out of range") && e.contains("push"),
+        "unexpected error text: {}",
+        e
+    );
+}
+
 // list.index gives the position (-1 if not found), list.find gives the first
 // element matching the predicate (nil if not found). has is bool, index is the
 // position — a pair.

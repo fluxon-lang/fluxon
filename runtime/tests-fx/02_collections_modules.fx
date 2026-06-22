@@ -74,6 +74,28 @@ k = "dyn"
 dynm = {[k]:100}
 eq dynm.dyn 100 "map dynamic key"
 
+# --- index assignment (issue #220): m[k] = v writes IN PLACE ---
+cnt = {}
+cnt["a"] = 1
+cnt["a"] = (cnt["a"] ?? 0) + 9
+eq cnt.a 10 "map index assign in place"
+cnt.b = 2
+eq cnt.b 2 "map field assign m.key = v"
+
+# the canonical word-count accumulator
+words = ["red" "blue" "red"]
+wc = {}
+each w in words
+  wc[w] = (wc[w] ?? 0) + 1
+eq wc.red 2 "map accumulator each"
+eq wc.blue 1 "map accumulator each (single)"
+
+# list element write (in-range)
+ml = [1 2 3]
+ml[1] = 20
+eq ml.1 20 "list index assign in place"
+eq ml.len 3 "list index assign keeps length"
+
 # --- str module ---
 eq (str.len "hello") 5 "str.len"
 eq (str.up "abc") "ABC" "str.up"
