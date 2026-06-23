@@ -105,13 +105,17 @@ impl Interp {
             }
         }
         let mut last = Value::Nil;
-        for stmt in prog {
+        // Only the LAST statement's value is kept (for display) — earlier ones are
+        // discarded, exactly like `exec_block`. So `tail_used` is true only for the
+        // final statement: a bare trailing `rep` yields its response map for
+        // display, while a non-final discarded `m.set k v` is caught as the
+        // #215/#218 trap instead of silently no-opping mid-chunk.
+        let n = prog.len();
+        for (i, stmt) in prog.iter().enumerate() {
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
-            // REPL top level — keep the last expression's value (a bare `rep`
-            // yields its response map for display); `tail_used = true`.
-            match self.exec_stmt(stmt, &self.global.clone(), true) {
+            match self.exec_stmt(stmt, &self.global.clone(), i + 1 == n) {
                 Ok(v) => last = v,
                 Err(Flow::Error(e)) => return Err(e),
                 Err(Flow::Fail { status, message }) => {
@@ -486,6 +490,12 @@ impl Interp {
         let Expr::Ident(var) = target.as_ref() else {
             return None;
         };
+        // Check the method name first — only these four are functional mutators
+        // models mistake for in-place. Bailing here avoids the variable lookup
+        // (which clones the value) for every other discarded `var.method` call.
+        if !matches!(name.as_str(), "set" | "del" | "merge" | "push") {
+            return None;
+        }
         match self.lookup(var, env).ok()? {
             Value::Map(m) => {
                 // A map field that IS a function shadows the builtin — a real call.
