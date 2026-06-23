@@ -50,6 +50,9 @@ impl Interp {
                     Expr::Call { callee, args } => {
                         let mut argv = self.eval_args(args, env)?;
                         argv.push(l);
+                        // Same arg-position binding as a direct call (issue #222):
+                        // `5 |> log fac` must behave like `log (fac 5)`.
+                        let argv = self.fold_nested_calls(callee, argv, env)?;
                         return self.apply_callee(callee, argv, env);
                     }
                     // `x |> str.up` / `x |> db.all` => an argument-less
@@ -113,7 +116,120 @@ impl Interp {
     // ---------------- call ----------------
     pub(crate) fn eval_call(&self, callee: &Expr, args: &[Expr], env: &Env) -> EvalResult {
         let argv = self.eval_args(args, env)?;
+        // Paren-free nested calls bind tighter in argument position (issue #219):
+        // `log fac 4` means `log (fac 4)`, not `log(fac, 4)`. Before this, a bare
+        // function value sitting in argument position was passed UNCALLED — the
+        // program ran and printed the wrong thing (`<fn fac> 4`) with no error.
+        // Now an argument that is a function value consumes the arguments that
+        // follow it (innermost-first) and is applied, so `f g x` => `f (g x)`.
+        let argv = self.fold_nested_calls(callee, argv, env)?;
         self.apply_callee(callee, argv, env)
+    }
+
+    // Is this callee a builtin that takes plain VALUES (so a function in
+    // argument position is a mistake to be folded), as opposed to one that takes
+    // a callback (which must arrive uncalled)? This is an ALLOWLIST of the
+    // value-taking builtins, so any callback API is excluded by default:
+    //   - bare `log` / `rep` / `assert` (the value-taking globals);
+    //   - the leveled logger `log.debug/info/warn/err`;
+    //   - the pure value modules (`is_module`: str/math/json/time/...).
+    // Excluded (NOT folded): user `fn`s (may take a callback before an options
+    // map, `run_with cb {opts}`), the callback dispatches (ai/http/ws/db/reg/
+    // cron/queue/par), and list HOF methods (`xs.map f`). Names defer to a user
+    // binding of the same name — the precedence `apply_callee` itself uses.
+    fn callee_takes_values(&self, callee: &Expr, env: &Env) -> bool {
+        match callee {
+            // `rep`/`assert` are installed globals — `lookup` returns the native
+            // (a user re-binding would shadow it and is left alone). `log` is not
+            // installed, so it is the builtin only when no `log` var exists.
+            Expr::Ident(id) => match id.as_str() {
+                "log" => self.lookup(id, env).is_err(),
+                "rep" | "assert" => {
+                    matches!(self.lookup(id, env), Ok(Value::Native(_)))
+                }
+                _ => false,
+            },
+            Expr::Field { target, name } => match target.as_ref() {
+                // `log.debug/info/warn/err` — the leveled logger (value-taking).
+                Expr::Ident(m) if m == "log" => {
+                    matches!(name.as_str(), "debug" | "info" | "warn" | "err")
+                        && self.lookup(m, env).is_err()
+                }
+                // `str.*`/`math.*`/... — pure value modules. `apply_callee`
+                // routes `is_module` names to `call_module` UNCONDITIONALLY (a
+                // module name is never a value, so a `math = nil` binding does
+                // not shadow `math.max`); match that here, with no lookup check,
+                // so folding stays consistent with dispatch (Codex review #222).
+                Expr::Ident(m) => crate::builtins::is_module(m),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    // Collapses bare function values in argument position into nested calls
+    // (issue #219). Scans RIGHT-to-LEFT so inner calls resolve before the
+    // outer ones consume their result: in `log math.max fac 3 fac 4`, the inner
+    // `fac` calls resolve first, then `math.max ..`, leaving `log` one argument.
+    //
+    // Only applies when the CALLEE is a builtin that takes VALUES, never a
+    // callback: bare `log`, or a pure value module (`str`/`math`/`json`/... —
+    // exactly `is_module`). Everything else is left alone — in particular a user
+    // `fn` (which may legitimately take a callback followed by an options map,
+    // `run_with cb {opts}`) and the callback-taking dispatches (`ai.stream`,
+    // `http.on`, `xs.map`, `db.tx`, `reg.add`, ...), where folding would call the
+    // callback during argument evaluation and break the API (Codex review #222).
+    //
+    // A function value is also only folded when it is NOT the last argument. A
+    // user `fn` consumes exactly its own arity; a native fn's arity is unknown,
+    // so it greedily consumes the rest (an arity mismatch then fails loudly
+    // inside the native, never silently).
+    fn fold_nested_calls(
+        &self,
+        callee: &Expr,
+        argv: Vec<Value>,
+        env: &Env,
+    ) -> Result<Vec<Value>, Flow> {
+        if !self.callee_takes_values(callee, env) {
+            return Ok(argv);
+        }
+        // Fast path: nothing to fold unless a non-last argument is callable.
+        let needs_fold = argv
+            .iter()
+            .take(argv.len().saturating_sub(1))
+            .any(|v| matches!(v, Value::Fn(_) | Value::Native(_)));
+        if !needs_fold {
+            return Ok(argv);
+        }
+        let mut out: Vec<Value> = Vec::with_capacity(argv.len());
+        // Build the result right-to-left, then reverse. `out` holds the
+        // already-folded tail (in reverse); a function pops its arguments off it.
+        for v in argv.into_iter().rev() {
+            // A nullary fn consumes nothing — folding it would auto-call it
+            // (`log new_id "tag"` must NOT run `new_id`; Fluxon requires the
+            // explicit `new_id()`). So `take == 0` falls through to pass-through.
+            let take = match &v {
+                Value::Fn(fv) => fv.params.len().min(out.len()),
+                Value::Native(_) => out.len(), // native: arity unknown, take the rest
+                _ => 0,
+            };
+            match &v {
+                Value::Fn(_) | Value::Native(_) if take > 0 => {
+                    let mut call_args = Vec::with_capacity(take);
+                    for _ in 0..take {
+                        // `out` holds the tail in reverse, so its back is the
+                        // argument nearest this function — popping yields them in
+                        // left-to-right source order.
+                        call_args.push(out.pop().unwrap());
+                    }
+                    let result = self.apply(v, call_args)?;
+                    out.push(result);
+                }
+                _ => out.push(v),
+            }
+        }
+        out.reverse();
+        Ok(out)
     }
 
     // Calls the callee with the arguments ALREADY evaluated. eval_call and pipe

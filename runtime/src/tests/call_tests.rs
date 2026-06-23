@@ -87,3 +87,149 @@ g(5)
     .expect_err("f(x) with parenthesized argument should error");
     assert!(err.contains("argument-less"), "unexpected error: {}", err);
 }
+
+// Issue #219: a paren-free nested call binds tighter in argument position WHEN
+// the callee is a value-taking builtin (`log`, `math.*`, ...). `log fac 4` means
+// `log (fac 4)`, NOT `log(fac, 4)`. Before the fix the bare function value `fac`
+// was passed UNCALLED and the program silently printed the wrong thing
+// (`<fn fac> 4`) with no error — the dangerous class of trap. A non-last
+// function-valued argument now consumes the arguments that follow it
+// (innermost-first) and is applied.
+//
+// It does NOT fold for a user-fn callee (which may take a callback, possibly
+// followed by an options map) or a callback dispatch (`ai.*`/`http.*`/HOF
+// methods) — see `arg_fold_only_for_value_taking_builtins` (Codex review #222).
+#[test]
+fn parenless_nested_call_binds_in_arg_position() {
+    run(r#"
+fn fac n
+  if n == 0
+    ret 1
+  fac (n - 1) * n
+fn inc n
+  ret n + 1
+
+# a value builtin folds nested calls: `math.max fac 3 fac 4`
+# == `math.max (fac 3) (fac 4)` == max(6, 24) == 24
+(math.max fac 3 fac 4 == 24) | (fail "math.max fac 3 fac 4 = max(6,24) = 24")
+
+# chained inside a value builtin: `math.abs inc inc -3`? use math.max for clarity:
+# `math.max inc 2 5` == `math.max (inc 2) 5` == max(3,5) == 5
+(math.max inc 2 5 == 5) | (fail "math.max inc 2 5 = max(inc 2, 5) = 5")
+
+# a single-arg `fac 5` (fac is the callee) is an ordinary call, unaffected
+(fac 5 == 120) | (fail "fac 5 should be 120")
+
+# genuine multi-arg builtin call is UNAFFECTED — args are not function values
+(math.max 2 3 == 3) | (fail "math.max 2 3 must stay 3")
+
+# a TRAILING function value is a real higher-order argument, never folded
+fn add a b
+  ret a + b
+xs = [1 2 3]
+(xs.map inc == [2 3 4]) | (fail "trailing fn arg must pass through (map)")
+(xs.reduce 0 add == 6) | (fail "trailing fn arg must pass through (reduce)")
+"#);
+}
+
+// Issue #222 (Codex review): folding is restricted to value-taking builtins, so
+// it never calls a callback that a higher-order API expects to receive uncalled.
+#[test]
+fn arg_fold_only_for_value_taking_builtins() {
+    // A user fn whose callback is followed by an options map: the callback must
+    // NOT be folded (called) during argument evaluation. If it were, `dbl` would
+    // be applied to the map and raise "Mul ... map and int".
+    run(r#"
+fn run_with cb opts
+  ret (cb opts.n)
+fn dbl x
+  ret x * 2
+(run_with dbl {n: 21} == 42) | (fail "user-fn callback must not be folded")
+"#);
+
+    // A user fn as the callee with a fn arg in the middle is NOT folded — it
+    // stays a plain (over-arity) call and fails LOUDLY, never silently.
+    let err = run_source(
+        r#"
+fn add a b
+  ret a + b
+fn inc n
+  ret n + 1
+add inc 2 3
+"#,
+    )
+    .expect_err("user-fn callee must not fold; over-arity must error");
+    assert!(
+        err.contains("expected 2 arguments"),
+        "unexpected error: {}",
+        err
+    );
+
+    // A callback dispatch (`reg.add`: a Field whose module is NOT `is_module`)
+    // is excluded — the handler must reach the registry uncalled. If it were
+    // folded, `called` would flip during argument evaluation.
+    run(r#"
+called <- false
+fn handler x
+  called <- true
+  ret x
+reg.add "h" handler
+(called == false) | (fail "callback dispatch handler must not be folded")
+"#);
+
+    // The pipe partial-call path folds the same way for a value builtin.
+    run(r#"
+fn fac n
+  if n == 0
+    ret 1
+  fac (n - 1) * n
+# `5 |> math.max fac 0` => `math.max fac 0 5` => `math.max (fac 0) 5` = max(1,5) = 5
+(5 |> math.max fac 0 == 5) | (fail "pipe fold: max(fac 0, 5) = 5")
+"#);
+
+    // A binding that merely shares a core module's name does NOT shadow it —
+    // `apply_callee` routes `is_module` names to the builtin unconditionally, so
+    // folding must too (Codex review #222). `math = nil` must not break the rule.
+    run(r#"
+fn inc n
+  ret n + 1
+math = nil
+# `math.max inc 1 5` => `math.max (inc 1) 5` = max(2, 5) = 5
+(math.max inc 1 5 == 5) | (fail "module-name binding must not break fold")
+"#);
+}
+
+// Issue #222 (Codex review): the value-builtin allowlist also covers `rep`,
+// `assert`, and `log.*` — not just bare `log` and modules. `rep status fn args`
+// must fold the body so it is not a bare function value (the silent-wrong class).
+#[test]
+fn arg_fold_covers_rep_and_log_levels() {
+    // `rep 200 fac 5` => `rep 200 (fac 5)`: the body becomes 120, not <fn fac>.
+    run(r#"
+fn fac n
+  if n == 0
+    ret 1
+  fac (n - 1) * n
+r = rep 200 fac 5
+(r.body == 120) | (fail "rep body should be folded to 120, got ${r.body}")
+"#);
+}
+
+// Issue #222 (Codex review): a nullary fn must NOT be auto-called while folding.
+// `new_id "tag"` would make `take == 0`; folding must leave `new_id` a bare
+// function value (Fluxon requires the explicit `new_id()` to call it).
+#[test]
+fn arg_fold_does_not_autocall_nullary() {
+    run(r#"
+calls <- 0
+fn nid
+  calls <- calls + 1
+  ret "x"
+# rep is a value builtin and nid is NOT the last arg (headers map follows), so
+# folding is considered — but nid is nullary (consumes nothing), so it is passed
+# UNCALLED as the body and `calls` stays 0.
+r = rep 200 nid {ct: "txt"}
+(calls == 0) | (fail "nullary fn must not be auto-called by folding")
+(r.body != "x") | (fail "nullary fn should remain a function value, not its result")
+"#);
+}
