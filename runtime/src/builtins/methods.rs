@@ -191,6 +191,13 @@ fn map_method(m: &BTreeMap<String, Value>, method: &str, args: Vec<Value>) -> R 
             let k = key_of(arg(&args, 0, "map.has")?);
             Ok(Value::Bool(m.contains_key(&k)))
         }
+        // Read a key, nil when absent — the read twin every model reaches for
+        // (`m.get k`), complementing `??` for a default (`m.get k ?? 0`). Reads
+        // only; the in-place write is `m[k] = v` (issue #218).
+        "get" => {
+            let k = key_of(arg(&args, 0, "map.get")?);
+            Ok(m.get(&k).cloned().unwrap_or(Value::Nil))
+        }
         "keys" => Ok(Value::List(
             m.keys().map(|k| Value::Str(k.clone())).collect(),
         )),

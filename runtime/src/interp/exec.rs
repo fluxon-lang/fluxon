@@ -41,9 +41,12 @@ impl Interp {
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
-            // Top level — no enclosing function to return from, so a bare `rep`
-            // is just a value (`tail_used = true`); a Return would be ignored anyway.
-            match self.exec_stmt(stmt, &self.global.clone(), true) {
+            // Top level (a script) — every statement's value is DISCARDED (we
+            // ignore `Ok` below), so `tail_used = false`: a bare `rep` may
+            // short-circuit (its Return is ignored anyway), and a discarded
+            // functional mutation (`m.set k v`) is caught as the #215/#218 trap.
+            // (The REPL differs — it keeps the last value for display.)
+            match self.exec_stmt(stmt, &self.global.clone(), false) {
                 Ok(_) => {}
                 Err(Flow::Error(e)) => return Err(e),
                 Err(Flow::Fail { status, message }) => {
@@ -102,13 +105,17 @@ impl Interp {
             }
         }
         let mut last = Value::Nil;
-        for stmt in prog {
+        // Only the LAST statement's value is kept (for display) — earlier ones are
+        // discarded, exactly like `exec_block`. So `tail_used` is true only for the
+        // final statement: a bare trailing `rep` yields its response map for
+        // display, while a non-final discarded `m.set k v` is caught as the
+        // #215/#218 trap instead of silently no-opping mid-chunk.
+        let n = prog.len();
+        for (i, stmt) in prog.iter().enumerate() {
             if matches!(stmt, Stmt::FnDecl { .. } | Stmt::Tbl { .. }) {
                 continue;
             }
-            // REPL top level — keep the last expression's value (a bare `rep`
-            // yields its response map for display); `tail_used = true`.
-            match self.exec_stmt(stmt, &self.global.clone(), true) {
+            match self.exec_stmt(stmt, &self.global.clone(), i + 1 == n) {
                 Ok(v) => last = v,
                 Err(Flow::Error(e)) => return Err(e),
                 Err(Flow::Fail { status, message }) => {
@@ -240,6 +247,15 @@ impl Interp {
                         );
                     }
                     _ => {}
+                }
+                // A functional collection method (`.set`/`.del`/`.merge`/`.push`)
+                // whose result is DISCARDED is the single most common LLM trap
+                // (issues #215, #218): the model writes `m.set k v` expecting an
+                // in-place mutation, the new map is thrown away, and the bug
+                // surfaces far away (an empty patch into `db.up`). Catch it at the
+                // call site and point at the canonical in-place form `m[k] = v`.
+                if !tail_used && let Some(msg) = self.discarded_functional_mutation(e, env) {
+                    return Err(Flow::err(msg));
                 }
                 let v = self.eval(e, env)?;
                 // A bare `rep ...` whose value is DISCARDED short-circuits the
@@ -454,6 +470,64 @@ impl Interp {
         apply_path(&mut fresh, &path, v, &root_name)?;
         env.write().define(&root_name, fresh, true);
         Ok(())
+    }
+
+    // Detect a discarded functional collection method on a plain variable —
+    // `m.set k v` / `m.del k` / `m.merge o` / `l.push x` written as a bare
+    // statement, the imperative habit models bring from Python/JS (issues #215,
+    // #218). These return a NEW value and never mutate the receiver, so throwing
+    // the result away is always a bug. Returns the guidance message to raise, or
+    // None when the call is legitimate. We only fire for an `Ident` receiver
+    // (looking it up is side-effect free, and the trap always names a variable),
+    // and never when a map field shadows the method with a user function.
+    fn discarded_functional_mutation(&self, e: &Expr, env: &Env) -> Option<String> {
+        let Expr::Call { callee, .. } = e else {
+            return None;
+        };
+        let Expr::Field { target, name } = callee.as_ref() else {
+            return None;
+        };
+        let Expr::Ident(var) = target.as_ref() else {
+            return None;
+        };
+        // Check the method name first — only these four are functional mutators
+        // models mistake for in-place. Bailing here avoids the variable lookup
+        // (which clones the value) for every other discarded `var.method` call.
+        if !matches!(name.as_str(), "set" | "del" | "merge" | "push") {
+            return None;
+        }
+        match self.lookup(var, env).ok()? {
+            Value::Map(m) => {
+                // A map field that IS a function shadows the builtin — a real call.
+                if matches!(m.get(name), Some(Value::Fn(_) | Value::Native(_))) {
+                    return None;
+                }
+                match name.as_str() {
+                    "set" => Some(format!(
+                        "map.set returns a NEW map and does not mutate `{var}`; its result \
+                         here is discarded. Write in place: `{var}[k] = v` — or capture the \
+                         result: `{var} = {var}.set k v`."
+                    )),
+                    "del" => Some(format!(
+                        "map.del returns a NEW map and does not mutate `{var}`; its result \
+                         here is discarded. Capture it: `{var} = {var}.del k`."
+                    )),
+                    "merge" => Some(format!(
+                        "map.merge returns a NEW map and does not mutate `{var}`; its result \
+                         here is discarded. Capture it: `{var} = {var}.merge other`."
+                    )),
+                    _ => None,
+                }
+            }
+            Value::List(_) => match name.as_str() {
+                "push" => Some(format!(
+                    "list.push returns a NEW list and does not mutate `{var}`; its result \
+                     here is discarded. Capture it: `{var} = {var}.push x`."
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     // `=` bind: searches for the variable WITHIN THE CURRENT FUNCTION. if/each/

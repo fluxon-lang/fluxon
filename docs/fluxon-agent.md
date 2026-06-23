@@ -496,10 +496,14 @@ Sort in memory: `l.sort` (NOT a `db.order` round-trip).
 
 ### map methods (.method)
 ```fluxon
-m.set k v · m.del k · m.has k · m.keys · m.vals · m.k · m[k]
-m.merge other → new map, other's keys win (defaults + override)
+m[k] = v   # WRITE in place (canonical) · also m.k = v · auto-creates: cnt[w] = (cnt[w] ?? 0) + 1
+m.get k · m.k · m[k] · m.get k ?? default   # READ (get → nil when absent)
+m.has k · m.keys · m.vals · m.len · m.del k · m.merge other
+m.set k v · m.del k · m.merge other → return a NEW map (do NOT mutate) — capture: m = m.set k v
 ```
-Write to a map: `m.set k v` (`m[k]` is READ only). Shared state via this.
+Write a key in place: `m[k] = v` (or `m.k = v`). `.set`/`.del`/`.merge` are
+functional — they return a new map; a bare `m.set k v` (result discarded) is an
+error, use `m[k] = v`. `m.merge other` → other's keys win (defaults + override).
 
 ### str / math / rand (core, no use needed)
 ```fluxon

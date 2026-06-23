@@ -42,6 +42,25 @@ fn repl_xato_qaytadi_sessiya_oldinmas() {
     assert_eq!(repl_chunk(&interp, "1 + 1").unwrap().repr(), "2");
 }
 
+// Issues #215/#218 — a non-final discarded `m.set k v` in a REPL chunk is the
+// same silent no-op trap as in a script and must error mid-chunk (only the LAST
+// statement is tail position, kept for display).
+#[test]
+fn repl_discarded_set_errors_mid_chunk() {
+    let interp = interp::Interp::new_arc();
+    // Value has no Debug, so match instead of unwrap_err.
+    let e = match repl_chunk(&interp, "m = {}\nm.set \"k\" 1\nm") {
+        Ok(_) => panic!("expected the discarded m.set to error"),
+        Err(e) => e,
+    };
+    assert!(e.contains("map.set"), "unexpected error text: {}", e);
+    // A trailing (last) method call is still a value for display — not an error.
+    assert_eq!(
+        repl_chunk(&interp, "{a:1}.has \"a\"").unwrap().repr(),
+        "true"
+    );
+}
+
 #[test]
 fn repl_multiline_block_heuristikasi() {
     // A single-line expression — not a block (evaluated as soon as it parses).

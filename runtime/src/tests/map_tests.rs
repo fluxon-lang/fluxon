@@ -212,6 +212,112 @@ x["k"] = 1
     assert!(e.contains("int"), "unexpected error text: {}", e);
 }
 
+// Issue #218 — `m.get k` reads a key, nil when absent. The read twin every model
+// reaches for; pairs with `??` for a default (`m.get k ?? 0`), the canonical
+// word-count shape.
+#[test]
+fn map_get() {
+    run(r#"
+m = {a:1 b:2}
+(m.get "a" == 1) | (fail "get present: ${m.get "a"}")
+(m.get "missing" == nil) | (fail "get absent should be nil")
+((m.get "missing" ?? 0) == 0) | (fail "get ?? default")
+
+# the canonical accumulator written with .get + in-place m[k] = v
+words = ["the" "cat" "the" "dog" "the"]
+counts = {}
+each w in words
+  cur = counts.get w ?? 0
+  counts[w] = cur + 1
+(counts.the == 3) | (fail "the != 3: ${counts.the}")
+(counts.cat == 1) | (fail "cat != 1: ${counts.cat}")
+(counts.dog == 1) | (fail "dog != 1: ${counts.dog}")
+"#);
+}
+
+// Issues #215, #218 — a bare `m.set k v` (result discarded) is the silent-no-op
+// trap models hit. It must be a loud error at the call site pointing at the
+// canonical in-place form, not a no-op that blows up later in `db.up`.
+#[test]
+fn map_set_discarded_is_error() {
+    let e = run_source(
+        r#"
+patch = {}
+patch.set "name" "after"
+"#,
+    )
+    .unwrap_err();
+    assert!(e.contains("map.set"), "unexpected error text: {}", e);
+    assert!(
+        e.contains("patch[k] = v") || e.contains("patch = patch.set"),
+        "error should guide to the fix: {}",
+        e
+    );
+}
+
+// `.del`/`.merge` carry the same trap and the same guidance.
+#[test]
+fn map_del_merge_discarded_is_error() {
+    let e = run_source(r#"{a:1}.has "a""#); // sanity: a non-mutator statement is fine
+    assert!(e.is_ok(), "non-mutator should not error: {:?}", e);
+
+    let de = run_source(
+        r#"
+m = {a:1}
+m.del "a"
+"#,
+    )
+    .unwrap_err();
+    assert!(de.contains("map.del"), "del error text: {}", de);
+
+    let me = run_source(
+        r#"
+m = {a:1}
+m.merge {b:2}
+"#,
+    )
+    .unwrap_err();
+    assert!(me.contains("map.merge"), "merge error text: {}", me);
+}
+
+// A discarded `l.push x` is the list counterpart of the same trap.
+#[test]
+fn list_push_discarded_is_error() {
+    let e = run_source(
+        r#"
+xs = [1 2]
+xs.push 3
+"#,
+    )
+    .unwrap_err();
+    assert!(e.contains("list.push"), "unexpected error text: {}", e);
+    assert!(e.contains("xs = xs.push"), "should guide to capture: {}", e);
+}
+
+// The guard must NOT fire when the result is used: captured (`m = m.set ...`),
+// reassigned (`m <- m.set ...`), in the function's tail (return value), or when a
+// map field shadows the method with a user function.
+#[test]
+fn functional_mutation_used_is_ok() {
+    run(r#"
+m = {a:1}
+m = m.set "b" 2            # captured
+(m.b == 2) | (fail "captured set lost")
+
+fn with_key x
+  x.set "k" 9              # tail position — the returned new map
+out = with_key {}
+(out.k == 9) | (fail "tail set lost: ${out.k}")
+
+# a map field that is a function shadows the builtin — a real call, not the trap
+fn noop k v
+  ret nil
+obj = {}
+obj["set"] = noop
+obj.set "x" 1             # discarded but legitimately a user-fn call, not the trap
+"#);
+}
+
 // Issue #98 — nested numeric index `m.0.1`. The lexer used to greedily swallow
 // `.1` as `Flt(0.1)` (not knowing it was in a `.` member context). Now a number
 // after a member index does not start a float: `m.0.1` ≡ `(m.0).1`.
