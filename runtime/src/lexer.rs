@@ -295,11 +295,22 @@ impl<'a> Lexer<'a> {
                     Tok::Gt
                 }
             }
-            b'&' => Tok::Amp,
+            b'&' => {
+                // Accept `&&` as an alias for `&` (small models reach for the
+                // C/JS/Go form reflexively) — same logical-AND semantics.
+                if self.peek_or(0) == b'&' {
+                    self.advance();
+                }
+                Tok::Amp
+            }
             b'|' => {
                 if self.peek_or(0) == b'>' {
                     self.advance();
                     Tok::PipeGt
+                } else if self.peek_or(0) == b'|' {
+                    // Accept `||` as an alias for `|` (logical OR).
+                    self.advance();
+                    Tok::Pipe
                 } else {
                     Tok::Pipe
                 }

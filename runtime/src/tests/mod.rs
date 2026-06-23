@@ -118,6 +118,7 @@ mod framework_tests;
 mod interp_err_tests;
 mod list_tests;
 mod log_tests;
+mod logic_alias_tests;
 mod map_tests;
 mod math_each_tests;
 mod migrate_tests;
