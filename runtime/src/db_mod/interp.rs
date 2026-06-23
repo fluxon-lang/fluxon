@@ -115,7 +115,15 @@ impl Interp {
         let (set_cols, mut vals) = self.map_to_cols(&table, &set)?;
         let (whr_cols, whr_vals) = self.map_to_cols(&table, &whr)?;
         if set_cols.is_empty() {
-            return Err(Flow::err("db.up: update map is empty"));
+            // An empty patch is almost always the discarded-`.set` trap (#215): the
+            // patch was built with `patch.set k v` (result thrown away) instead of
+            // `patch[k] = v`, so it stays `{}`. The bug is three lines up; point
+            // back at it instead of leaving a bare "update map is empty".
+            return Err(Flow::err(
+                "db.up: update map is empty — nothing to update. If you built the patch with \
+                 `.set`, note map.set returns a NEW map: write `patch[k] = v` in place (or \
+                 `patch = patch.set k v`).",
+            ));
         }
         // Guard, like in db.del: an empty condition → build_update builds the "WHERE"
         // part with no columns (malformed SQL) and the whole table would be updated.

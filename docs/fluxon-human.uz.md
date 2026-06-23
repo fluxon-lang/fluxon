@@ -1038,18 +1038,27 @@ l.all \x -> x > 0      # hammasi mosmi → bool (birinchi nomosda to'xtaydi)
 
 **`map` — kalit-qiymat metodlari** (qiymat ustida, `.metod`):
 ```fluxon
-m.set k v              # kalit qo'yadi/yangilaydi → yangi map
-m.del k                # kalitni o'chiradi → yangi map
-m.merge other          # ikki map'ni birlashtiradi (other ustun) → yangi map
+m[k] = v               # kalitni JOYIDA yozadi (kanonik) — m.key = v ham
+m.set k v              # kalit qo'yadi/yangilaydi → YANGI map (mutatsiya QILMAYDI)
+m.del k                # kalitni o'chiradi → YANGI map (mutatsiya QILMAYDI)
+m.merge other          # ikki map'ni birlashtiradi (other ustun) → YANGI map
 m.has k                # kalit bormi → bool
 m.keys                 # kalitlar ro'yxati
 m.vals                 # qiymatlar ro'yxati
 m.key   m[k]           # o'qish (m[k] — dinamik, o'zgaruvchi kalit)
 ```
-> **Muhim:** map'ga **yozish** uchun `m.set k v` ishlating. `m[k]` faqat
-> **o'qiydi** (yozmaydi). Bu list bilan izchil: list'da `push`, map'da `set`.
-> Shared state (masalan, realtime'da kim qaysi xonada) shu metodlar bilan
-> boshqariladi.
+> **Muhim — `.set`/`.del`/`.merge` mutatsiya QILMAYDI.** Ular **yangi** map
+> qaytaradi, asl map'ga tegmaydi — natijani ishlatish shart. Kalit **yozish** uchun
+> kanonik shakl `m[k] = v` (yoki `m.key = v`); map'ni o'zgartirish uchun natijani
+> oling: `m = m.set k v`. Natijasi tashlab yuborilgan yalang'och `m.set k v` —
+> no-op; Fluxon uni xato bilan rad etadi va `m[k] = v` ni ko'rsatadi. List uchun
+> ham shu qoida: `l = l.push x` (yoki `l.filter` bilan quring), hech qachon
+> tashlab yuborilgan `l.push x` emas.
+> ```fluxon
+> # XATO — jim no-op (rad etiladi):     TO'G'RI:
+> patch = {}                            patch = {}
+> patch.set "name" "after"              patch["name"] = "after"
+> ```
 
 **`str` — matn funksiyalari:**
 ```fluxon

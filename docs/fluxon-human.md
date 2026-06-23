@@ -1029,18 +1029,27 @@ l.all \x -> x > 0      # do all match → bool (stops at first mismatch)
 
 **`map` — key-value methods** (on a value, `.method`):
 ```fluxon
-m.set k v              # sets/updates a key → a new map
-m.del k                # removes a key → a new map
-m.merge other          # merges two maps (other's keys win) → a new map
+m[k] = v               # write a key IN PLACE (canonical) — also m.key = v
+m.set k v              # sets/updates a key → a NEW map (does NOT mutate)
+m.del k                # removes a key → a NEW map (does NOT mutate)
+m.merge other          # merges two maps (other's keys win) → a NEW map
 m.has k                # is the key present → bool
 m.keys                 # a list of keys
 m.vals                 # a list of values
 m.key   m[k]           # read (m[k] — dynamic, variable key)
 ```
-> **Important:** to **write** to a map use `m.set k v`. `m[k]` only **reads**
-> (does not write). This is consistent with lists: `push` for a list, `set` for a
-> map. Shared state (for example, who is in which room in realtime) is managed
-> with these methods.
+> **Important — `.set`/`.del`/`.merge` do NOT mutate.** They return a **new** map
+> and leave the original untouched, so you must use the result. To **write a key**,
+> the canonical form is `m[k] = v` (or `m.key = v`); to transform a map, capture
+> the return value: `m = m.set k v`. A bare `m.set k v` whose result is discarded
+> is a no-op — Fluxon rejects it with an error pointing you at `m[k] = v`. The same
+> rule holds for lists: `l = l.push x` (or build with `l.filter`), never a discarded
+> `l.push x`.
+> ```fluxon
+> # WRONG — silent no-op (rejected):    RIGHT:
+> patch = {}                            patch = {}
+> patch.set "name" "after"              patch["name"] = "after"
+> ```
 
 **`str` — text functions:**
 ```fluxon

@@ -107,6 +107,21 @@ fn db_up_bosh_shart_rad_etiladi() {
     });
 }
 
+// Issue #215: db.up with an empty patch is the discarded-`.set` trap surfacing
+// far from its cause. The error now points back at the immutable-`.set` pitfall
+// instead of a bare "update map is empty".
+#[test]
+fn db_up_bosh_patch_set_tuzogini_eslatadi() {
+    with_db_test("up_empty_patch", || {
+        let setup = "use db\ntbl t\n  id serial pk\n  n int\ndb.ins \"t\" {n:1}\n";
+        let e = run_source(&format!("{setup}db.up \"t\" {{}} {{id:1}}\n")).unwrap_err();
+        assert!(
+            e.contains("db.up: update map is empty") && e.contains("map.set returns a NEW map"),
+            "unexpected error: {e}"
+        );
+    });
+}
+
 // Issue #104: db.offset without LIMIT used to be silently ignored (SQLite requires
 // LIMIT for OFFSET). Now it is applied correctly with LIMIT -1 OFFSET m.
 #[test]
