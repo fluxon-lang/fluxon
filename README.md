@@ -77,8 +77,8 @@ fluxon --help              # all commands
 <details>
 <summary><b>Other install options</b></summary>
 
-Pin a specific version with `FLUXON_VERSION=v0.1.0` (or `$env:FLUXON_VERSION` on
-Windows). Prefer a manual download? Grab the archive for your platform from the
+The installer always grabs the latest release. Prefer a manual download? Grab
+the archive for your platform from the
 [releases page](https://github.com/fluxon-lang/fluxon/releases).
 
 **From source** (Rust toolchain required):
@@ -162,7 +162,7 @@ The whole process is preserved in the [`research/`](research/) folder.
 
 | Path | What's inside |
 |------|---------------|
-| [`docs/fluxon-agent.md`](docs/fluxon-agent.md) | Compact spec for AI agents (~2700 tokens) |
+| [`docs/fluxon-agent.md`](docs/fluxon-agent.md) | Compact spec for AI agents (~10k tokens) |
 | [`docs/fluxon-human.md`](docs/fluxon-human.md) | Detailed guide for humans |
 | [`examples/support-tickets/`](examples/support-tickets/) | AI classification + confidence routing |
 | [`examples/ecommerce/`](examples/ecommerce/) | Catalog, cart, checkout (transaction), AI recommendations |

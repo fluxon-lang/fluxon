@@ -61,7 +61,7 @@ Before adding a new battery or making a change, find the relevant file:
 | User-module `.pkg` manifest parsing + load-time validation | `runtime/src/interp/pkg.rs` |
 | CLI entry point + integration tests | `runtime/src/main.rs` |
 
-**If you need to read the spec:** `docs/fluxon-agent.md` (~2700 tokens, compact —
+**If you need to read the spec:** `docs/fluxon-agent.md` (~10k tokens, compact —
 written for an AI to learn how the language works). More detail:
 `docs/fluxon-human.md` (English) or `docs/fluxon-human.uz.md` (Uzbek).
 
